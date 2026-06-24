@@ -88,10 +88,23 @@ Key characteristics:
 | `rysmith` | Generate random RefractIR leaf functions (reify) |
 | `rylink` | Compose leaf functions into whole programs (reify) |
 | `rytwin` | Transform a generated program into a semantically-equivalent variant (reify) |
+| `rypuzmk` / `rypuzchk` | Make / check fill-in-the-blanks puzzles (see [./docs/puzzle.md](./docs/puzzle.md)) |
 
 Documentation of each tool: [./docs/](./docs).
 
 Remember: The interpreter, solver, and compiler backends are shared foundational for **all** RefractIR tooling. They should be kept **clean, correct, and well-tested**. They should also be kept **independent of any specific downstream tools**, with mentioning none in their implementation.
+
+### Puzzle tooling (`rypuzmk` / `rypuzchk`)
+
+The puzzle tools live in [`./puzzle/`](./puzzle) and share
+[`puzzle/puzzle_common.hpp`](./puzzle/puzzle_common.hpp) (the masking printer,
+the `MaskedConstantCollector`, and helpers). `rypuzmk` masks a rysmith-generated
+leaf into `FILL_XXX` blanks with a machine-readable banner; `rypuzchk` validates
+a solution (correctness via the embedded `check_chksum`, plus path, FILL_CONST
+budget, intrinsic usage, and a re-mask structural check). The puzzle/checker
+contract and its intended degrees of freedom are documented in
+[./docs/puzzle.md](./docs/puzzle.md) — read it before changing the masking model
+or either tool, because the producer and consumer must stay in lockstep.
 
 ## Compilation / Analysis Pipeline
 
