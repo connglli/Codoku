@@ -195,11 +195,40 @@ and loop counts, the exact constants used, and the statement/atom/block shape.
 
 Key options: `-o/--output`, `--keep-ground-truth` (writes `<output>.gt.sir`),
 `-s/--seed`, `-L/--min-loop-iter`, `-B/--n-bbls`, `-S/--n-stmts`,
-`--rysmith <path>`.
+`--rysmith <path>`, `--pkg-res` (see below).
 
 `rypuzmk` validates the generated leaf (≥ 3 blocks, `^entry` first, `^exit`
 last) and **self-checks** that the ground truth re-masks to the puzzle it
 emits, so a structurally broken (unsolvable) puzzle is never shipped.
+
+### Package a self-contained sandbox
+
+The banner refers to its toolchain and reference material by relative path
+(`./symiri`, `./rypuzchk`, `./references/SPEC.md`, `./references/examples/`,
+`./references/interp/`, etc.). [`puzzle/pkgres.sh`](../puzzle/pkgres.sh)
+populates a directory with exactly those resources:
+
+```bash
+./puzzle/pkgres.sh <dir>          # symlink the resources (default)
+./puzzle/pkgres.sh <dir> --copy   # copy them (portable / self-contained)
+```
+
+It links/copies the RefractIR tools (`symiri`, `symirc`, `symirsolve`,
+`rypuzchk`), the SMT solvers found on `PATH` (`z3`, `cvc5`, `bitwuzla`), the
+latest `docs/SPEC_*.md` as `references/SPEC.md`, `examples/` as
+`references/examples/`, and `test/interp/` as `references/interp/` (the
+EXPECT-tagged good-and-bad examples).
+
+`rypuzmk --pkg-res` runs this automatically against the puzzle's parent
+directory, so a single command yields a ready-to-solve sandbox:
+
+```bash
+mkdir task && ./rypuzmk --seed 42 -o task/puzzle.sir --keep-ground-truth --pkg-res
+cd task && ./rypuzchk puzzle.sir my_solution.sir
+```
+
+`--pkg-res` requires `--output`. `rypuzmk` locates `pkgres.sh` next to its own
+binary; override with `--pkgres-script <path>` if needed.
 
 ### Check a solution
 
