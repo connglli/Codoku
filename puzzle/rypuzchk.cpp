@@ -146,7 +146,7 @@ int main(int argc, char **argv) {
   options.add_options()
       ("puzzle", "Puzzle file path", cxxopts::value<std::string>())
       ("solution", "Solution file path", cxxopts::value<std::string>())
-      ("symiri", "Path to symiri binary", cxxopts::value<std::string>()->default_value("./symiri"))
+      ("symiri", "Path to symiri binary (default: 'symiri' next to this binary)", cxxopts::value<std::string>())
       ("h,help", "Print usage");
 
   options.parse_positional({"puzzle", "solution"});
@@ -159,7 +159,16 @@ int main(int argc, char **argv) {
 
   std::string puzzlePath = result["puzzle"].as<std::string>();
   std::string solutionPath = result["solution"].as<std::string>();
-  std::string symiriPath = result["symiri"].as<std::string>();
+  // Default symiri to the one packaged next to this binary, so a sandbox's
+  // ./tools/rypuzchk finds ./tools/symiri regardless of the caller's CWD.
+  std::string symiriPath;
+  if (result.count("symiri")) {
+    symiriPath = result["symiri"].as<std::string>();
+  } else {
+    std::error_code ec;
+    fs::path exe = fs::canonical("/proc/self/exe", ec);
+    symiriPath = (ec ? fs::path("./symiri") : exe.parent_path() / "symiri").string();
+  }
 
   try {
     // 1. Read and parse puzzle requirements (machine markers in the header).

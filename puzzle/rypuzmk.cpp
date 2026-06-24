@@ -114,15 +114,18 @@ static const char *PUZZLE_HEADER_TEMPLATE = R"TPL(//
 //
 // Use the following command to verify your solution:
 //
-//   ./rypuzchk [this_puzzle_file].sir [your_solution].sir
+//   ./tools/rypuzchk [this_puzzle_file].sir [your_solution].sir
 //
 // ------------------------------------------------
 // Materials
 // ------------------------------------------------
 //
 // * Grammar: ./references/SPEC.md.
+// * Floating point: ./references/float.md.
+// * Intrinsics: ./references/intrinsics.md.
+// * Undefined behaviour: ./references/undefined.md.
 // * Good Examples: ./references/examples/
-// * Good and Bad Examples:
+// * Good and Bad Examples: ./references/interp/
 //   * Each example is with "// EXPECT: PASS" or "// EXPECT: FAIL" in the header comment.
 //   * "// EXPECT: PASS" means the code is valid and should be accepted by the interpreter.
 //   * "// EXPECT: FAIL" means the code is invalid and should be rejected by the interpreter.
@@ -136,11 +139,11 @@ static const char *PUZZLE_HEADER_TEMPLATE = R"TPL(//
 //
 // 0. Each FILL_XXX mark must be filled out with a corresponding element.
 // 1. Each intrinsic function is used at least once.
-// 2. You have access to all common command line tools and the toolchain in ./:
-//    - ./symiri:     The interpreter
-//    - ./symirc:     The compiler
-//    - ./symirsolve: The solver
-//    - ./z3, ./cvc5, ./bitwuzla: SMT solvers
+// 2. You have access to all common command line tools and the toolchain in ./tools/:
+//    - ./tools/symiri:     The interpreter
+//    - ./tools/symirc:     The compiler
+//    - ./tools/symirsolve: The solver
+//    - ./tools/z3, ./tools/cvc5, ./tools/bitwuzla: SMT solvers
 // 3. Do NOT change any code except for the FILL_XXX marks.
 // 4. Do NOT introduce any new code, variables, or basic blocks.
 // 5. Do NOT access the internet.
@@ -183,6 +186,25 @@ std::string trim(const std::string &s) {
 }
 
 /**
+ * @brief Locates pkgres.sh. Honors an explicit override, otherwise searches
+ * next to this executable (the binary lives at the repo root, the script in
+ * puzzle/). Returns an empty path if not found.
+ */
+fs::path findPkgresScript(const std::string &override) {
+  if (!override.empty())
+    return fs::path(override);
+  std::error_code ec;
+  fs::path exe = fs::canonical("/proc/self/exe", ec);
+  fs::path dir = ec ? fs::current_path() : exe.parent_path();
+  for (const fs::path &c: {dir / "puzzle" / "pkgres.sh", dir / "pkgres.sh",
+                           dir / ".." / "puzzle" / "pkgres.sh"}) {
+    if (fs::exists(c))
+      return c;
+  }
+  return {};
+}
+
+/**
  * @brief Renders the puzzle header banner from its template and dynamic parts.
  */
 std::string renderHeader(
@@ -208,6 +230,8 @@ int main(int argc, char **argv) {
       ("S,n-stmts", "Number of statements per block on path for rysmith", cxxopts::value<uint32_t>()->default_value("3"))
       // Other options
       ("keep-ground-truth", "Save the unmasked ground-truth concrete .sir file as <puzzle>.gt.sir", cxxopts::value<bool>()->default_value("false"))
+      ("pkg-res", "Copy/link tools + references into the puzzle's parent directory", cxxopts::value<bool>()->default_value("false"))
+      ("pkgres-script", "Path to pkgres.sh (auto-detected next to the binary if omitted)", cxxopts::value<std::string>())
       ("rysmith", "Path to rysmith binary", cxxopts::value<std::string>()->default_value("./rysmith"))
       ("s,seed", "Seed for rysmith", cxxopts::value<uint32_t>())
       ("h,help", "Print usage");
@@ -369,6 +393,31 @@ int main(int argc, char **argv) {
     }
 
     *out << header << puzzleBody.str();
+    fileOut.flush();
+
+    // Optionally populate the puzzle's parent directory with the toolchain and
+    // reference material the banner refers to (./symiri, ./references/..., ...).
+    if (result["pkg-res"].as<bool>()) {
+      if (!result.count("output")) {
+        std::cerr << "Error: --pkg-res requires --output (need a directory to populate).\n";
+        return 1;
+      }
+      fs::path parent = fs::path(result["output"].as<std::string>()).parent_path();
+      if (parent.empty())
+        parent = ".";
+      fs::path script = findPkgresScript(
+          result.count("pkgres-script") ? result["pkgres-script"].as<std::string>() : ""
+      );
+      if (script.empty()) {
+        std::cerr << "Error: --pkg-res: could not locate pkgres.sh (pass --pkgres-script).\n";
+        return 1;
+      }
+      std::string cmd = "bash '" + script.string() + "' '" + parent.string() + "'";
+      if (int rc = std::system(cmd.c_str()); rc != 0) {
+        std::cerr << "Error: --pkg-res: pkgres.sh failed (status " << rc << ").\n";
+        return 1;
+      }
+    }
 
     if (deleteTemp) {
       std::error_code ec;
