@@ -25,6 +25,8 @@ Core concepts:
 | `rysmith` | Generator: random RefractIR leaf functions for compiler testing. |
 | `rylink` | Generator: random whole programs composed from a leaf-function pool. |
 | `rytwin` | Transformer: an equivalent variant of a generated program. |
+| `rypuzmk` | Puzzle maker: Mask a generated function into a fill-in-the-blanks puzzle. |
+| `rypuzchk` | Puzzle checker: Validate a candidate puzzle solution. |
 
 ## 🚀 Getting started
 
@@ -94,6 +96,14 @@ Emit an equivalent twin of a generated program. `rytwin` reads the `.state.json`
 ```bash
 ./rysmith -n 1 --emit-desc -o out/
 ./rytwin --p-twin 0.5 --validate -o out/<func>.twin.sir out/<func>.sir
+```
+
+#### Make and check puzzles
+```bash
+# Mask a generated function into a fill-in-the-blanks puzzle (+ ground truth).
+./rypuzmk --seed 42 -o puzzle.sir --keep-ground-truth
+# Validate a candidate solution.
+./rypuzchk puzzle.sir solution.sir
 ```
 
 ### Switching SMT backends
@@ -243,6 +253,7 @@ The annotated source is [examples/minicipher_v022.sir](./examples/minicipher_v02
 * [symirc user guide](./docs/symirc.md): the C / WASM / Python translator.
 * [symirsolve user guide](./docs/symirsolve.md): the SMT concretizer.
 * [reify user guide](./docs/reify.md): rysmith, rylink, and rytwin.
+* [puzzle user guide](./docs/puzzle.md): rypuzmk and rypuzchk.
 
 ## 📋 License
 
