@@ -196,8 +196,8 @@ fs::path findPkgresScript(const std::string &override) {
   std::error_code ec;
   fs::path exe = fs::canonical("/proc/self/exe", ec);
   fs::path dir = ec ? fs::current_path() : exe.parent_path();
-  for (const fs::path &c: {dir / "puzzle" / "pkgres.sh", dir / "pkgres.sh",
-                           dir / ".." / "puzzle" / "pkgres.sh"}) {
+  for (const fs::path &c:
+       {dir / "puzzle" / "pkgres.sh", dir / "pkgres.sh", dir / ".." / "puzzle" / "pkgres.sh"}) {
     if (fs::exists(c))
       return c;
   }
@@ -228,6 +228,7 @@ int main(int argc, char **argv) {
       ("L,min-loop-iter", "Minimum loop iterations constraint for rysmith", cxxopts::value<uint32_t>()->default_value("2"))
       ("B,n-bbls", "Number of basic blocks for rysmith", cxxopts::value<uint32_t>()->default_value("5"))
       ("S,n-stmts", "Number of statements per block on path for rysmith", cxxopts::value<uint32_t>()->default_value("3"))
+      ("p-mask", "Probability in [0,1] that each statement is masked (default 1.0 = mask all)", cxxopts::value<double>()->default_value("1.0"))
       // Other options
       ("keep-ground-truth", "Save the unmasked ground-truth concrete .sir file as <puzzle>.gt.sir", cxxopts::value<bool>()->default_value("false"))
       ("pkg-res", "Copy/link tools + references into the puzzle's parent directory", cxxopts::value<bool>()->default_value("false"))
@@ -248,14 +249,17 @@ int main(int argc, char **argv) {
   bool deleteTemp = false;
   fs::path tmpDir;
 
+  // Seed is shared: it drives rysmith generation (when applicable) and also the
+  // --p-mask coin flips, so the same --seed + --p-mask reproduces the puzzle.
+  std::optional<uint32_t> seed;
+  if (result.count("seed"))
+    seed = result["seed"].as<uint32_t>();
+
   try {
     if (result.count("input")) {
       inputPath = result["input"].as<std::string>();
     } else {
       std::string rysmithPath = result["rysmith"].as<std::string>();
-      std::optional<uint32_t> seed;
-      if (result.count("seed"))
-        seed = result["seed"].as<uint32_t>();
 
       uint32_t minLoopIter = result["min-loop-iter"].as<uint32_t>();
       uint32_t nBbls = result["n-bbls"].as<uint32_t>();
@@ -298,9 +302,35 @@ int main(int argc, char **argv) {
       return 1;
     }
 
+    // Selective masking (--p-mask). With p == 1.0 (the default) every statement
+    // is masked. With p < 1.0 each maskable statement is independently masked
+    // with probability p. rypuzchk infers which positions were masked directly
+    // from the puzzle body (via inferMaskSetFromPuzzle()), so no header marker
+    // is emitted — the header stays clean for human solvers.
+    double pMask = result["p-mask"].as<double>();
+    if (pMask < 0.0 || pMask > 1.0) {
+      std::cerr << "Error: --p-mask must be in [0, 1], got " << pMask << "\n";
+      return 1;
+    }
+    std::optional<std::unordered_set<int>> maskSet;
+    if (pMask < 1.0) {
+      int nStmts = countMaskableStatements(*leaf);
+      uint32_t maskSeed = seed.value_or(std::random_device{}());
+      std::mt19937 mrng(maskSeed);
+      std::bernoulli_distribution coin(pMask);
+      std::unordered_set<int> chosen;
+      for (int i = 0; i < nStmts; ++i) {
+        if (coin(mrng))
+          chosen.insert(i);
+      }
+      maskSet = std::move(chosen);
+    }
+    const std::unordered_set<int> *maskPtr = maskSet ? &*maskSet : nullptr;
+
     // Collect the exact FILL_CONST budget (every constant the masking hides,
     // counted only at masked positions).
     MaskedConstantCollector collector;
+    collector.selectiveMask = maskPtr;
     collector.collect(*leaf);
 
     // Extract path comment
@@ -341,7 +371,7 @@ int main(int argc, char **argv) {
     // Render the masked puzzle body and the unmasked ground truth from the same
     // program, so we can both self-check and (optionally) save the ground truth.
     std::ostringstream puzzleBody;
-    SIRMaskedPrinter(puzzleBody, *leaf, /*enableMasking=*/true).print(prog);
+    SIRMaskedPrinter(puzzleBody, *leaf, /*enableMasking=*/true, maskPtr).print(prog);
     std::ostringstream gtBody;
     SIRMaskedPrinter(gtBody, *leaf, /*enableMasking=*/false).print(prog);
 
@@ -356,7 +386,7 @@ int main(int argc, char **argv) {
         return 1;
       }
       std::ostringstream remasked;
-      SIRMaskedPrinter(remasked, *gtLeaf, /*enableMasking=*/true).print(gtProg);
+      SIRMaskedPrinter(remasked, *gtLeaf, /*enableMasking=*/true, maskPtr).print(gtProg);
       if (remasked.str() != puzzleBody.str()) {
         std::cerr << "Error: self-check failed: ground truth does not re-mask to the puzzle "
                      "(printer/parser round-trip mismatch).\n";
