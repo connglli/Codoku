@@ -143,11 +143,10 @@ std::string stripCommentsAndWhitespace(const std::string &str) {
 
 int main(int argc, char **argv) {
   cxxopts::Options options("rypuzchk", "RefractIR Puzzle Validator");
-  options.add_options()
-      ("puzzle", "Puzzle file path", cxxopts::value<std::string>())
-      ("solution", "Solution file path", cxxopts::value<std::string>())
-      ("symiri", "Path to symiri binary (default: 'symiri' next to this binary)", cxxopts::value<std::string>())
-      ("h,help", "Print usage");
+  options
+      .add_options()("puzzle", "Puzzle file path", cxxopts::value<std::string>())("solution", "Solution file path", cxxopts::value<std::string>())("symiri", "Path to symiri binary (default: 'symiri' next to this binary)", cxxopts::value<std::string>())(
+          "h,help", "Print usage"
+      );
 
   options.parse_positional({"puzzle", "solution"});
   auto result = options.parse(argc, argv);
@@ -220,9 +219,30 @@ int main(int argc, char **argv) {
       return 1;
     }
 
+    // Infer the selective masking set from the puzzle body. The puzzle file
+    // contains FILL_XXX tokens (not parseable as RefractIR), so we derive
+    // which positions were masked by comparing sentinel-annotated renders of
+    // the solution (full-masked vs. plain) against the stripped puzzle text.
+    // inferMaskSetFromPuzzle() returns the indices that are masked: the empty
+    // set when nothing is masked, and the full index range [0, N) when every
+    // position is masked.
+    std::unordered_set<int> maskSet = inferMaskSetFromPuzzle(*leaf, prog, puzzleText);
+    int totalPositions = countMaskableStatements(*leaf);
+    // If every position is masked, pass nullptr to MaskedConstantCollector and
+    // SIRMaskedPrinter to take their cheaper "mask everything" fast-path (which
+    // is also what rypuzmk does for the default --p-mask 1.0). Otherwise hand
+    // them the inferred set so only the masked positions are considered.
+    const std::unordered_set<int> *maskPtr;
+    if (static_cast<int>(maskSet.size()) == totalPositions) {
+      maskPtr = nullptr;
+    } else {
+      maskPtr = &maskSet;
+    }
+
     // 5. FILL_CONST budget: the exact multiset of constants in masked positions
     //    must equal the puzzle's budget (no missing, no extra, no off-budget).
     MaskedConstantCollector collector;
+    collector.selectiveMask = maskPtr;
     collector.collect(*leaf);
 
     for (const auto &pair: reqs.constCounts) {
@@ -255,7 +275,7 @@ int main(int argc, char **argv) {
     // 7. Structural integrity (anti-cheating): re-masking the solution must
     //    reproduce the puzzle skeleton exactly (modulo comments/whitespace).
     std::ostringstream mss;
-    SIRMaskedPrinter(mss, *leaf).print(prog);
+    SIRMaskedPrinter(mss, *leaf, /*enableMasking=*/true, maskPtr).print(prog);
     if (stripCommentsAndWhitespace(mss.str()) != stripCommentsAndWhitespace(puzzleText)) {
       std::cerr << "[FAIL] Solution structural integrity check failed.\n"
                 << "  You may have changed code outside the FILL_XXX marks, or introduced\n"

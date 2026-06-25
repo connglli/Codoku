@@ -51,7 +51,18 @@ def make_puzzle(rypuzmk, rysmith, seed, outdir):
   """Generate a puzzle + ground truth for `seed`; return (puzzle_path, gt_path)."""
   puzzle = os.path.join(outdir, f"p{seed}.sir")
   gt = os.path.join(outdir, f"p{seed}.gt.sir")
-  r = run([rypuzmk, "--seed", str(seed), "--rysmith", rysmith, "-o", puzzle, "--keep-ground-truth"])
+  r = run(
+    [
+      rypuzmk,
+      "--seed",
+      str(seed),
+      "--rysmith",
+      rysmith,
+      "-o",
+      puzzle,
+      "--keep-ground-truth",
+    ]
+  )
   ok = r.returncode == 0 and os.path.exists(puzzle) and os.path.exists(gt)
   return (puzzle, gt) if ok else (None, None)
 
@@ -67,6 +78,12 @@ def split_header_body(text):
   m = re.search(r"\nfun @", text)
   i = m.start() + 1 if m else 0
   return text[:i], text[i:]
+
+
+def body_fill_count(text):
+  """Count FILL_XXX marks inside the program body (excludes the banner prose)."""
+  _, body = split_header_body(text)
+  return body.count("FILL_")
 
 
 def first_body_stmt_line(gt_text):
@@ -104,7 +121,9 @@ def main():
         check(f"generate seed {s}", False, "rypuzmk failed")
         continue
       passed, out = chk(rypuzchk, symiri, puzzle, gt)
-      check(f"ground truth round-trips (seed {s})", passed, out.strip().splitlines()[-1:] )
+      check(
+        f"ground truth round-trips (seed {s})", passed, out.strip().splitlines()[-1:]
+      )
       rt_ok = rt_ok and passed
       if s == 42:
         base_puzzle, base_gt = puzzle, gt
@@ -122,10 +141,14 @@ def main():
 
     # (3) require/assume dropped from both puzzle and ground truth
     _, p_body = split_header_body(puzzle_text)
-    check("puzzle body has no require/assume",
-          not re.search(r"\b(require|assume)\b", p_body))
-    check("ground truth has no require/assume",
-          not re.search(r"\b(require|assume)\b", gt_text))
+    check(
+      "puzzle body has no require/assume",
+      not re.search(r"\b(require|assume)\b", p_body),
+    )
+    check(
+      "ground truth has no require/assume",
+      not re.search(r"\b(require|assume)\b", gt_text),
+    )
 
     # (4) a solution that still contains FILL marks is rejected
     passed, _ = chk(rypuzchk, symiri, base_puzzle, base_puzzle)
@@ -138,14 +161,14 @@ def main():
       lines = gt_text.splitlines(keepends=True)
       del_path = os.path.join(outdir, "mut_delete.sir")
       with open(del_path, "w") as f:
-        f.writelines(lines[:idx] + lines[idx + 1:])
+        f.writelines(lines[:idx] + lines[idx + 1 :])
       passed, out = chk(rypuzchk, symiri, base_puzzle, del_path)
       check("deleted masked statement rejected", not passed)
 
       # (5b) duplicating a masked statement is rejected
       dup_path = os.path.join(outdir, "mut_dup.sir")
       with open(dup_path, "w") as f:
-        f.writelines(lines[:idx] + [lines[idx], lines[idx]] + lines[idx + 1:])
+        f.writelines(lines[:idx] + [lines[idx], lines[idx]] + lines[idx + 1 :])
       passed, out = chk(rypuzchk, symiri, base_puzzle, dup_path)
       check("duplicated masked statement rejected", not passed)
 
@@ -156,7 +179,9 @@ def main():
       val = m.group(1)
       # The ground truth has no banner/markers, so perturb it whole: replace the
       # first standalone occurrence of the budgeted value with an off-budget one.
-      new_gt, n = re.subn(r"(?<!\d)" + re.escape(val) + r"(?!\d)", "987654321", gt_text, count=1)
+      new_gt, n = re.subn(
+        r"(?<!\d)" + re.escape(val) + r"(?!\d)", "987654321", gt_text, count=1
+      )
       check("budgeted constant occurs in masked body", n == 1)
       if n == 1:
         off_path = os.path.join(outdir, "mut_offbudget.sir")
@@ -164,6 +189,96 @@ def main():
           f.write(new_gt)
         passed, out = chk(rypuzchk, symiri, base_puzzle, off_path)
         check("off-budget constant rejected", not passed)
+
+    # (7) --p-mask selective masking. The mask is inferred from the puzzle body
+    # by rypuzchk (via inferMaskSetFromPuzzle), so no //@ MASK header is ever
+    # emitted — the header stays clean for human solvers.
+    full_fill = body_fill_count(puzzle_text)
+    check(
+      "p-mask: default puzzle carries no //@ MASK marker",
+      "//@ MASK:" not in puzzle_text,
+    )
+
+    half_puzzle = os.path.join(outdir, "pm_half.sir")
+    half_gt = os.path.join(outdir, "pm_half.gt.sir")
+    r = run(
+      [
+        rypuzmk,
+        "--seed",
+        "42",
+        "--p-mask",
+        "0.5",
+        "--rysmith",
+        rysmith,
+        "-o",
+        half_puzzle,
+        "--keep-ground-truth",
+      ]
+    )
+    half_ok = (
+      r.returncode == 0 and os.path.exists(half_puzzle) and os.path.exists(half_gt)
+    )
+    check("p-mask 0.5: rypuzmk succeeds", half_ok, r.stderr)
+    if half_ok:
+      htext = open(half_puzzle).read()
+      check("p-mask 0.5: no //@ MASK marker emitted", "//@ MASK:" not in htext)
+      check(
+        "p-mask 0.5: fewer FILL marks than full masking",
+        body_fill_count(htext) < full_fill,
+      )
+      passed, out = chk(rypuzchk, symiri, half_puzzle, half_gt)
+      check(
+        "p-mask 0.5: ground truth round-trips", passed, out.strip().splitlines()[-1:]
+      )
+
+    zero_puzzle = os.path.join(outdir, "pm_zero.sir")
+    zero_gt = os.path.join(outdir, "pm_zero.gt.sir")
+    r = run(
+      [
+        rypuzmk,
+        "--seed",
+        "42",
+        "--p-mask",
+        "0",
+        "--rysmith",
+        rysmith,
+        "-o",
+        zero_puzzle,
+        "--keep-ground-truth",
+      ]
+    )
+    zero_ok = (
+      r.returncode == 0 and os.path.exists(zero_puzzle) and os.path.exists(zero_gt)
+    )
+    check("p-mask 0: rypuzmk succeeds", zero_ok, r.stderr)
+    if zero_ok:
+      ztext = open(zero_puzzle).read()
+      check(
+        "p-mask 0: body fully revealed (no FILL marks)", body_fill_count(ztext) == 0
+      )
+      check("p-mask 0: no //@ MASK marker emitted", "//@ MASK:" not in ztext)
+      passed, out = chk(rypuzchk, symiri, zero_puzzle, zero_gt)
+      check(
+        "p-mask 0: fully-revealed puzzle round-trips",
+        passed,
+        out.strip().splitlines()[-1:],
+      )
+
+    # (edge) an out-of-range probability is rejected rather than silently clamped.
+    r = run(
+      [
+        rypuzmk,
+        "--seed",
+        "42",
+        "--p-mask",
+        "1.5",
+        "--rysmith",
+        rysmith,
+        "-o",
+        os.path.join(outdir, "pm_bad.sir"),
+      ]
+    )
+    check("p-mask out of range rejected", r.returncode != 0)
 
   return summarize()
 
