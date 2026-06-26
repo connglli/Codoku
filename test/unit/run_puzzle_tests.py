@@ -103,6 +103,39 @@ def first_body_stmt_line(gt_text):
   return -1
 
 
+def find_body_line(gt_text, pattern, last=False):
+  """Index of the first (or last) stripped line in a ^bN block matching `pattern`."""
+  rx = re.compile(pattern)
+  lines = gt_text.splitlines()
+  in_body = False
+  found = -1
+  for idx, ln in enumerate(lines):
+    s = ln.strip()
+    if re.match(r"^\^b\w*:", s):
+      in_body = True
+      continue
+    if s.startswith("^"):
+      in_body = False
+      continue
+    if in_body and rx.search(s):
+      found = idx
+      if not last:
+        return idx
+  return found
+
+
+def dup_line(gt_text, idx):
+  """Return `gt_text` with line `idx` duplicated in place (a structural insert).
+
+  Duplicating an `addr`/idempotent assignment in place is semantics-preserving
+  (the second write stores the same value), so the mutant still executes
+  correctly under symiri — isolating the *structural* check as the only gate
+  that can legitimately reject it.
+  """
+  lines = gt_text.splitlines(keepends=True)
+  return "".join(lines[:idx] + [lines[idx], lines[idx]] + lines[idx + 1 :])
+
+
 def main():
   if len(sys.argv) != 5:
     print("usage: run_puzzle_tests.py <rypuzmk> <rypuzchk> <rysmith> <symiri>")
@@ -263,6 +296,90 @@ def main():
         passed,
         out.strip().splitlines()[-1:],
       )
+
+    # (8) Structural tampering must be reported via the structural-integrity
+    # check, even under partial masking. A semantics-preserving statement
+    # insertion still executes correctly (passes symiri) and keeps the path, so
+    # the structural check is the *only* legitimate gate. The mask set is
+    # inferred from the (now-mutated) solution; an earlier design let that
+    # inference drift and surface the rejection as a confusing "FILL_CONST
+    # count mismatch" budget error. Harden: structural is the authoritative
+    # first gate, so these report "structural integrity" instead.
+    def expect_structural(name, puzzle, mutated_text):
+      sol = os.path.join(outdir, "mut_struct.sir")
+      with open(sol, "w") as f:
+        f.write(mutated_text)
+      passed, out = chk(rypuzchk, symiri, puzzle, sol)
+      ok = (not passed) and ("structural integrity" in out.lower())
+      check(name, ok, out.strip().splitlines()[-1:])
+
+    # half_gt and base_gt share the same concrete body (masking only changes the
+    # puzzle, never the ground truth), so the same insertions apply to both.
+    addr_idx = find_body_line(gt_text, r"^%\w+ = addr\b.*;$")
+    const_idx = find_body_line(gt_text, r"^%[\w\[\]]+ = -?\d{3,}\b.*\* %\w+;$")
+    first_idx = first_body_stmt_line(gt_text)
+    check("found a body addr statement to duplicate", addr_idx >= 0)
+    check("found a body statement with a constant to duplicate", const_idx >= 0)
+
+    if half_ok and addr_idx >= 0:
+      # (8a) partial-mask: duplicating a constant-free body stmt drifts the mask
+      # inference; it must still be reported as a structural failure.
+      expect_structural(
+        "p-mask 0.5: duplicated addr stmt rejected as structural",
+        half_puzzle,
+        dup_line(gt_text, addr_idx),
+      )
+    if half_ok and const_idx >= 0:
+      # (8b) partial-mask: duplicating a body stmt that carries a constant.
+      expect_structural(
+        "p-mask 0.5: duplicated const stmt rejected as structural",
+        half_puzzle,
+        dup_line(gt_text, const_idx),
+      )
+    if half_ok and first_idx >= 0:
+      # (8c) partial-mask: duplicating the first body statement.
+      expect_structural(
+        "p-mask 0.5: duplicated first body stmt rejected as structural",
+        half_puzzle,
+        dup_line(gt_text, first_idx),
+      )
+    store_idx = find_body_line(gt_text, r"^store\b.*;$")
+    if half_ok and store_idx >= 0:
+      # (8d) partial-mask: duplicating a `store` (idempotent in place) is another
+      # constant-free insertion that drifts the inference; still structural.
+      expect_structural(
+        "p-mask 0.5: duplicated store stmt rejected as structural",
+        half_puzzle,
+        dup_line(gt_text, store_idx),
+      )
+    if const_idx >= 0:
+      # (8e) full-mask: duplicating a body stmt with a constant must be a
+      # structural failure, not an "extra constant" budget complaint.
+      expect_structural(
+        "full-mask: duplicated const stmt rejected as structural",
+        base_puzzle,
+        dup_line(gt_text, const_idx),
+      )
+
+    # (8f/edge) a structurally-faithful solution that merely carries an
+    # off-budget constant must STILL be reported as a budget error, not a
+    # structural one — i.e. running the structural check first must not swallow
+    # genuine FILL_CONST violations.
+    m_off = re.search(r"//@ FILL_CONST:\s*(-?\d{2,})\s+\d+", puzzle_text)
+    if m_off:
+      off_gt, n_off = re.subn(
+        r"(?<!\d)" + re.escape(m_off.group(1)) + r"(?!\d)",
+        "987654321",
+        gt_text,
+        count=1,
+      )
+      if n_off == 1:
+        off_sol = os.path.join(outdir, "mut_offbudget2.sir")
+        with open(off_sol, "w") as f:
+          f.write(off_gt)
+        passed, out = chk(rypuzchk, symiri, base_puzzle, off_sol)
+        ok = (not passed) and ("structural integrity" not in out.lower())
+        check("off-budget constant still reported as budget error", ok, out.strip())
 
     # (edge) an out-of-range probability is rejected rather than silently clamped.
     r = run(

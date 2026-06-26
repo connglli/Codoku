@@ -239,8 +239,33 @@ int main(int argc, char **argv) {
       maskPtr = &maskSet;
     }
 
-    // 5. FILL_CONST budget: the exact multiset of constants in masked positions
+    // 5. Structural integrity (anti-cheating): re-masking the solution must
+    //    reproduce the puzzle skeleton exactly (modulo comments/whitespace).
+    //
+    //    This is the authoritative structural gate and MUST run before the
+    //    budget check below. Re-masking emits exactly one chunk per maskable
+    //    statement of the *solution*, so a solution whose statement count or
+    //    skeleton differs from the puzzle can never reproduce it -- regardless
+    //    of how the mask set was inferred. Conversely, once this passes the
+    //    solution is structurally identical to the puzzle in every non-FILL
+    //    position, which means the inferred maskPtr is exact and the budget
+    //    check operates on a trustworthy partition. Running it first also keeps
+    //    a structural edit (e.g. an inserted statement, which would otherwise
+    //    drift the mask inference) reported as a structural failure rather than
+    //    an incidental "FILL_CONST count mismatch".
+    std::ostringstream mss;
+    SIRMaskedPrinter(mss, *leaf, /*enableMasking=*/true, maskPtr).print(prog);
+    if (stripCommentsAndWhitespace(mss.str()) != stripCommentsAndWhitespace(puzzleText)) {
+      std::cerr << "[FAIL] Solution structural integrity check failed.\n"
+                << "  You may have changed code outside the FILL_XXX marks, or introduced\n"
+                << "  unauthorized variables / statements / basic blocks.\n";
+      return 1;
+    }
+
+    // 6. FILL_CONST budget: the exact multiset of constants in masked positions
     //    must equal the puzzle's budget (no missing, no extra, no off-budget).
+    //    Reaching here means step 5 passed, so maskPtr partitions the solution
+    //    exactly as the puzzle does.
     MaskedConstantCollector collector;
     collector.selectiveMask = maskPtr;
     collector.collect(*leaf);
@@ -261,7 +286,7 @@ int main(int argc, char **argv) {
       }
     }
 
-    // 6. Each declared intrinsic must be called somewhere.
+    // 7. Each declared intrinsic must be called somewhere.
     CallCollector callCollector;
     for (const auto &f: prog.funs)
       callCollector.collect(f);
@@ -270,17 +295,6 @@ int main(int argc, char **argv) {
         std::cerr << "[FAIL] Declared intrinsic '" << in.name.name << "' is never called.\n";
         return 1;
       }
-    }
-
-    // 7. Structural integrity (anti-cheating): re-masking the solution must
-    //    reproduce the puzzle skeleton exactly (modulo comments/whitespace).
-    std::ostringstream mss;
-    SIRMaskedPrinter(mss, *leaf, /*enableMasking=*/true, maskPtr).print(prog);
-    if (stripCommentsAndWhitespace(mss.str()) != stripCommentsAndWhitespace(puzzleText)) {
-      std::cerr << "[FAIL] Solution structural integrity check failed.\n"
-                << "  You may have changed code outside the FILL_XXX marks, or introduced\n"
-                << "  unauthorized variables / statements / basic blocks.\n";
-      return 1;
     }
 
     std::cout << "[PASS] Solution is valid!\n";
