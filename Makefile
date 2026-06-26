@@ -193,7 +193,7 @@ LIBRARY_OBJS = $(COMMON_OBJS) \
                $(SOLVER_CORE_SRCS:.cpp=.o) \
                $(SOLVER_IMPL_OBJ)
 
-.PHONY: all clean test test-unit test-frontend test-analysis test-interp test-backends test-cross-validation test-solver test-reify cross-validation build install
+.PHONY: all clean test test-unit test-frontend test-analysis test-interp test-backends test-cross-validation test-solver test-reify test-puzzle cross-validation build install
 
 all: $(TARGET_INTERP) $(TARGET_COMPILER) $(TARGET_SOLVER) $(TARGET_RYSMITH) $(TARGET_RYLINK) $(TARGET_RYTWIN) $(TARGET_RYPUZMK) $(TARGET_RYPUZCHK)
 
@@ -329,6 +329,10 @@ test-reify: $(TARGET_RYSMITH) $(TARGET_RYLINK) $(TARGET_INTERP) $(TARGET_COMPILE
 	JOBS=$${JOBS:-1}; \
 	$(PY) -m test.lib.run_reify_diff_tests --rysmith ./$(TARGET_RYSMITH) --symiri ./$(TARGET_INTERP) --symirc ./$(TARGET_COMPILER) --rylink ./$(TARGET_RYLINK) -n 100 --seed 1234 -j $$JOBS
 
+# Puzzle tooling: rypuzmk (maker) + rypuzchk (checker). Two suites:
+test-puzzle: $(TARGET_RYPUZMK) $(TARGET_RYPUZCHK) $(TARGET_RYSMITH) $(TARGET_INTERP)
+	$(PY) -m test.lib.run_puzzle_test test/puzzle ./$(TARGET_RYPUZCHK) ./$(TARGET_INTERP)
+
 # Aggregator. Recursive $(MAKE) calls keep per-component logs separated and
 # let CI selectively re-run a single group on retry.
 test: $(TARGET_INTERP) $(TARGET_COMPILER) $(TARGET_SOLVER) $(TARGET_RYSMITH) $(TARGET_RYLINK)
@@ -339,3 +343,4 @@ test: $(TARGET_INTERP) $(TARGET_COMPILER) $(TARGET_SOLVER) $(TARGET_RYSMITH) $(T
 	$(MAKE) cross-validation
 	$(MAKE) test-solver
 	$(MAKE) test-reify
+	$(MAKE) test-puzzle
