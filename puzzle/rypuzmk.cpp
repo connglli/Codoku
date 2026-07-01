@@ -148,7 +148,11 @@ static const char *PUZZLE_HEADER_TEMPLATE = R"TPL(//
 // 4. Do NOT introduce any new code, variables, or basic blocks.
 // 5. Do NOT access the internet.
 //
-// ------------------------------------------------
+{{BUDGET_SECTION}}//
+)TPL";
+
+static const char *BUDGET_SECTION_TEMPLATE =
+    R"TPL(// ------------------------------------------------
 // Requirements for FILL_CONST
 // ------------------------------------------------
 //
@@ -159,8 +163,6 @@ static const char *PUZZLE_HEADER_TEMPLATE = R"TPL(//
 // in the fixed (entry/exit) code do not count toward this budget.
 //
 {{FILL_CONST}}//
-//
-
 )TPL";
 
 /**
@@ -209,13 +211,18 @@ fs::path findPkgresScript(const std::string &override) {
  */
 std::string renderHeader(
     const std::string &leafName, const std::string &cfgStr, const std::string &pathStr,
-    const std::string &fillConstStr
+    const std::string &fillConstStr, bool liftConsts
 ) {
   std::string out = PUZZLE_HEADER_TEMPLATE;
   replaceAll(out, "{{LEAF_NAME}}", leafName);
   replaceAll(out, "{{CFG}}", cfgStr);
   replaceAll(out, "{{PATH}}", pathStr.empty() ? "[unknown]" : pathStr);
-  replaceAll(out, "{{FILL_CONST}}", fillConstStr);
+  if (liftConsts) {
+    replaceAll(out, "{{BUDGET_SECTION}}", "");
+  } else {
+    replaceAll(out, "{{BUDGET_SECTION}}", BUDGET_SECTION_TEMPLATE);
+    replaceAll(out, "{{FILL_CONST}}", fillConstStr);
+  }
   return out;
 }
 
@@ -229,6 +236,7 @@ int main(int argc, char **argv) {
       ("B,n-bbls", "Number of basic blocks for rysmith", cxxopts::value<uint32_t>()->default_value("5"))
       ("S,n-stmts", "Number of statements per block on path for rysmith", cxxopts::value<uint32_t>()->default_value("3"))
       ("p-mask", "Probability in [0,1] that each statement is masked (default 1.0 = mask all)", cxxopts::value<double>()->default_value("1.0"))
+      ("lift-consts", "Avoid generating magic-number related constraints (i.e. //@ FILL_CONST)", cxxopts::value<bool>()->default_value("false"))
       // Other options
       ("keep-ground-truth", "Save the unmasked ground-truth concrete .sir file as <puzzle>.gt.sir", cxxopts::value<bool>()->default_value("false"))
       ("pkg-res", "Copy/link tools + references into the puzzle's parent directory", cxxopts::value<bool>()->default_value("false"))
@@ -356,17 +364,21 @@ int main(int argc, char **argv) {
     }
 
     // Build the FILL_CONST budget as machine-readable "//@ FILL_CONST: <value> <count>" lines.
-    std::vector<std::pair<std::string, int>> sortedConsts(
-        collector.counts.begin(), collector.counts.end()
-    );
-    std::sort(sortedConsts.begin(), sortedConsts.end());
     std::ostringstream fillConstStr;
-    for (const auto &p: sortedConsts) {
-      fillConstStr << "//@ FILL_CONST: " << p.first << " " << p.second << "\n";
+    if (!result["lift-consts"].as<bool>()) {
+      std::vector<std::pair<std::string, int>> sortedConsts(
+          collector.counts.begin(), collector.counts.end()
+      );
+      std::sort(sortedConsts.begin(), sortedConsts.end());
+      for (const auto &p: sortedConsts) {
+        fillConstStr << "//@ FILL_CONST: " << p.first << " " << p.second << "\n";
+      }
     }
 
-    std::string header =
-        renderHeader(leaf->name.name, cfgStr.str(), trim(pathComment), fillConstStr.str());
+    std::string header = renderHeader(
+        leaf->name.name, cfgStr.str(), trim(pathComment), fillConstStr.str(),
+        result["lift-consts"].as<bool>()
+    );
 
     // Render the masked puzzle body and the unmasked ground truth from the same
     // program, so we can both self-check and (optionally) save the ground truth.

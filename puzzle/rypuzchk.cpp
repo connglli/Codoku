@@ -266,23 +266,25 @@ int main(int argc, char **argv) {
     //    must equal the puzzle's budget (no missing, no extra, no off-budget).
     //    Reaching here means step 5 passed, so maskPtr partitions the solution
     //    exactly as the puzzle does.
-    MaskedConstantCollector collector;
-    collector.selectiveMask = maskPtr;
-    collector.collect(*leaf);
+    if (!reqs.constCounts.empty()) {
+      MaskedConstantCollector collector;
+      collector.selectiveMask = maskPtr;
+      collector.collect(*leaf);
 
-    for (const auto &pair: reqs.constCounts) {
-      int actual = collector.counts.count(pair.first) ? collector.counts[pair.first] : 0;
-      if (actual != pair.second) {
-        std::cerr << "[FAIL] FILL_CONST count mismatch for '" << pair.first << "'. Expected "
-                  << pair.second << ", got " << actual << ".\n";
-        return 1;
+      for (const auto &pair: reqs.constCounts) {
+        int actual = collector.counts.count(pair.first) ? collector.counts[pair.first] : 0;
+        if (actual != pair.second) {
+          std::cerr << "[FAIL] FILL_CONST count mismatch for '" << pair.first << "'. Expected "
+                    << pair.second << ", got " << actual << ".\n";
+          return 1;
+        }
       }
-    }
-    for (const auto &pair: collector.counts) {
-      if (reqs.constCounts.find(pair.first) == reqs.constCounts.end()) {
-        std::cerr << "[FAIL] Off-budget constant in a FILL_CONST position: '" << pair.first
-                  << "' (count: " << pair.second << ").\n";
-        return 1;
+      for (const auto &pair: collector.counts) {
+        if (reqs.constCounts.find(pair.first) == reqs.constCounts.end()) {
+          std::cerr << "[FAIL] Off-budget constant in a FILL_CONST position: '" << pair.first
+                    << "' (count: " << pair.second << ").\n";
+          return 1;
+        }
       }
     }
 
