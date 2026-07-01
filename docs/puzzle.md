@@ -130,7 +130,9 @@ Given `rypuzchk <puzzle.sir> <solution.sir>`, in order:
 4. **`FILL_CONST` budget**: collect the multiset of constants that appear in
    *masked positions* of the solution and require it to equal the budget
    exactly — every listed value at its exact count, and **no** off-budget
-   constant in any masked position.
+   constant in any masked position. However, when no such constants exist,
+   the budget is empty and the solution may use any constants in masked positions.
+   Such puzzles can be generated via `--lift-consts` of `rypuzmk`.
 5. **Intrinsics**: every declared intrinsic must be called somewhere.
 6. **Structural integrity**: re-mask the solution and require it to match the
    puzzle skeleton byte-for-byte (modulo comments and whitespace). This is the

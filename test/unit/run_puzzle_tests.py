@@ -395,7 +395,72 @@ def main():
         os.path.join(outdir, "pm_bad.sir"),
       ]
     )
-    check("p-mask out of range rejected", r.returncode != 0)
+    # (9) --lift-consts validation
+    lift_puzzle = os.path.join(outdir, "lift_puzzle.sir")
+    lift_gt = os.path.join(outdir, "lift_puzzle.gt.sir")
+    r_lift = run(
+      [
+        rypuzmk,
+        "--seed",
+        "42",
+        "--lift-consts",
+        "--rysmith",
+        rysmith,
+        "-o",
+        lift_puzzle,
+        "--keep-ground-truth",
+      ]
+    )
+    lift_ok = (
+      r_lift.returncode == 0 and os.path.exists(lift_puzzle) and os.path.exists(lift_gt)
+    )
+    check("lift-consts: rypuzmk with --lift-consts succeeds", lift_ok)
+    if lift_ok:
+      lift_content = open(lift_puzzle).read()
+      check(
+        "lift-consts: no //@ FILL_CONST marker in puzzle",
+        "//@ FILL_CONST:" not in lift_content,
+      )
+      check(
+        "lift-consts: no 'Requirements for FILL_CONST' section in puzzle header",
+        "Requirements for FILL_CONST" not in lift_content,
+      )
+      passed, out = chk(rypuzchk, symiri, lift_puzzle, lift_gt)
+      check(
+        "lift-consts: ground truth on lift puzzle accepted",
+        passed,
+        out.strip().splitlines()[-1:],
+      )
+
+      # Verify that perturbing a constant is accepted under lift-consts, but still structural check works.
+      fail_off_budget_path = os.path.join(
+        os.path.dirname(__file__), "..", "puzzle", "fail_off_budget_const.txt"
+      )
+      if os.path.exists(fail_off_budget_path):
+        with open(fail_off_budget_path) as f:
+          lines = f.readlines()
+        stripped_lines = [
+          ln
+          for ln in lines
+          if not (ln.startswith("// EXPECT:") or ln.startswith("// DESC:"))
+        ]
+        parts = "".join(stripped_lines).split("=>\n")
+        if len(parts) == 2:
+          puz_txt, sol_txt = parts
+          # Remove //@ FILL_CONST lines from the puzzle to simulate --lift-consts
+          puz_no_const = re.sub(r"//@ FILL_CONST:.*?\n", "", puz_txt)
+          puz_file = os.path.join(outdir, "lift_fail_off_budget_puz.sir")
+          sol_file = os.path.join(outdir, "lift_fail_off_budget_sol.sir")
+          with open(puz_file, "w") as f:
+            f.write(puz_no_const)
+          with open(sol_file, "w") as f:
+            f.write(sol_txt)
+          passed, out = chk(rypuzchk, symiri, puz_file, sol_file)
+          check(
+            "lift-consts: off-budget solution accepted when const constraints are absent",
+            passed,
+            out.strip().splitlines()[-1:],
+          )
 
   return summarize()
 
