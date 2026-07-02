@@ -66,7 +66,8 @@ def _parse_claude(trajectory_file: Path) -> dict[str, Any]:
           stats["output_tokens"] += usage.get("output_tokens", 0)
           stats["cache_read_tokens"] += usage.get("cache_read_input_tokens", 0)
           stats["cache_write_tokens"] += usage.get("cache_creation_input_tokens", 0)
-          stats["cost_usd"] += usage.get("cost_usd", 0.0)
+
+        stats["cost_usd"] += event.get("total_cost_usd", 0.0)
 
         if event_type == "tool_use":
           tool_name = event.get("name", "unknown")
