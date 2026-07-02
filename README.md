@@ -106,6 +106,13 @@ Emit an equivalent twin of a generated program. `rytwin` reads the `.state.json`
 ./rypuzchk puzzle.sir solution.sir
 ```
 
+#### Run ReifyPuzzle Benchmarks
+First configure your environment variables for your chosen agent in `puzzle/bench/rypuzbench.env`.
+Then run the benchmark suite for example:
+```bash
+python puzzle/bench/run.py -n 3 -o ./benchmark -a opencode -m 'opencode/deepseek-v4-flash-free' --timeout 600 -B 1 -S 5
+```
+
 ### Switching SMT backends
 
 The solver backend is selected at compile time through the `SOLVER` variable:
