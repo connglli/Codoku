@@ -2,8 +2,26 @@
 # -----------------------------------------------------------------------
 # common.sh — Shared utility logic for RefractIR agent runners.
 # -----------------------------------------------------------------------
+# Unified agent interface (all agents must follow this contract):
+#
+#   <agent>.sh <puzzle-dir> --model MODEL  [--timeout S]
+#               [--max-turns N] [--max-budget-usd F]
+#
+# Inputs (inside <puzzle-dir>):
+#   puzzle.sir          The puzzle to solve
+#   tools/              Symlinks to RefractIR tools + SMT solvers
+#   references/         Symlinks to reference documentation
+#   workspace/          Writable scratch space
+#   system.md           Instructions (pre-processed with runtime paths)
+#
+# Outputs (agent must produce):
+#   solution.sir        The solved puzzle (if successful)
+#   trajectory.jsonl    Raw agent output / log
+#   cache/              Agent session / cache data
+#
 # Sourced by agent runner scripts (e.g. claude.sh, opencode.sh) to avoid
 # duplicating the parsing, paths, templating, and timeout orchestration.
+# See ./claude.sh and ./opencode.sh for examples of how to use this common.sh.
 # -----------------------------------------------------------------------
 set -euo pipefail
 
