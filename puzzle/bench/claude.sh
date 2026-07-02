@@ -35,7 +35,7 @@ CLAUDE_ARGS=(
   --model "${MODEL}"
   --output-format stream-json
   --system-prompt "${SYSTEM_PROMPT}"
-  --dangerously-skip-permission
+  --dangerously-skip-permissions
 )
 
 # Conditional flags (0 / empty = omit = unlimited)
