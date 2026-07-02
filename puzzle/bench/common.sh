@@ -35,7 +35,7 @@ fi
 PUZZLE_FILE="${PUZZLE_DIR}/puzzle.sir"
 SOLUTION_FILE="${PUZZLE_DIR}/solution.sir"
 WORKSPACE="${PUZZLE_DIR}/workspace"
-TRAJECTORY="${PUZZLE_DIR}/trajectory.json"
+TRAJECTORY="${PUZZLE_DIR}/trajectory.jsonl"
 SYSTEM_MD="${PUZZLE_DIR}/system.md"
 STDERR_LOG="${PUZZLE_DIR}/stderr.log"
 
@@ -56,8 +56,8 @@ run_agent() {
 
   if [ "${TIMEOUT}" -gt 0 ] 2>/dev/null; then
     timeout --signal TERM --kill-after 30 "${TIMEOUT}" \
-      "${cmd[@]}" 2>"${STDERR_LOG}" | tee "${TRAJECTORY}" 2>&1
+      "${cmd[@]}" 2>"${STDERR_LOG}" | tee "${TRAJECTORY}"
   else
-    "${cmd[@]}" 2>"${STDERR_LOG}" | tee "${TRAJECTORY}" 2>&1
+    "${cmd[@]}" 2>"${STDERR_LOG}" | tee "${TRAJECTORY}"
   fi
 }

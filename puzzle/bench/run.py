@@ -448,7 +448,7 @@ class BenchmarkRunner:
     oracles = self.output_dir / "oracles"
     puzzle_file = puz_dir / "puzzle.sir"
     solution_file = puz_dir / "solution.sir"
-    trajectory_file = puz_dir / "trajectory.json"
+    trajectory_file = puz_dir / "trajectory.jsonl"
     hash_file = oracles / f"puz-{puzzle_idx:04d}.hash"
 
     log(f"  Analyzing puzzle {puzzle_idx:04d} (elapsed={elapsed:.1f}s)")

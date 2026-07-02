@@ -17,7 +17,7 @@
 #
 # Outputs (agent must produce):
 #   solution.sir        The solved puzzle (if successful)
-#   trajectory.json     Raw agent output / log
+#   trajectory.jsonl    Raw agent output / log
 #   cache/              Agent session / cache data
 # -----------------------------------------------------------------------
 set -euo pipefail
