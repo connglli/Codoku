@@ -100,28 +100,57 @@ def _parse_opencode(trajectory_file: Path) -> dict[str, Any]:
         if event_type == "step_start":
           stats["num_rounds"] += 1
 
-        usage = event.get("usage", {})
-        if not usage and "metrics" in event:
-          usage = event["metrics"]
-        if not usage and event_type == "step_finish":
-          usage = event
+        part = event.get("part", {}) if isinstance(event.get("part"), dict) else {}
+        if part:
+          tokens = part.get("tokens")
+          if isinstance(tokens, dict):
+            stats["input_tokens"] += (
+              tokens.get("input", 0) or tokens.get("input_tokens", 0) or 0
+            )
+            stats["output_tokens"] += (
+              tokens.get("output", 0) or tokens.get("output_tokens", 0) or 0
+            )
+            cache = tokens.get("cache")
+            if isinstance(cache, dict):
+              stats["cache_read_tokens"] += (
+                cache.get("read", 0) or cache.get("cache_read_input_tokens", 0) or 0
+              )
+              stats["cache_write_tokens"] += (
+                cache.get("write", 0)
+                or cache.get("cache_creation_input_tokens", 0)
+                or 0
+              )
 
-        if usage:
-          stats["input_tokens"] += (
-            usage.get("input_tokens", 0) or usage.get("prompt_tokens", 0) or 0
-          )
-          stats["output_tokens"] += (
-            usage.get("output_tokens", 0) or usage.get("completion_tokens", 0) or 0
-          )
-          stats["cache_read_tokens"] += usage.get("cache_read_input_tokens", 0) or 0
-          stats["cache_write_tokens"] += (
-            usage.get("cache_creation_input_tokens", 0) or 0
-          )
-          stats["cost_usd"] += usage.get("cost_usd", 0.0) or 0.0
+          cost = part.get("cost")
+          if isinstance(cost, (int, float)):
+            stats["cost_usd"] += cost
 
-        if event_type == "tool_use":
-          tool_name = event.get("name", "unknown")
-          stats["tool_calls"][tool_name] = stats["tool_calls"].get(tool_name, 0) + 1
+          if event_type == "tool_use":
+            tool_name = part.get("tool") or part.get("name") or "unknown"
+            stats["tool_calls"][tool_name] = stats["tool_calls"].get(tool_name, 0) + 1
+        else:
+          usage = event.get("usage", {})
+          if not usage and "metrics" in event:
+            usage = event["metrics"]
+          if not usage and event_type == "step_finish":
+            usage = event
+
+          if usage:
+            stats["input_tokens"] += (
+              usage.get("input_tokens", 0) or usage.get("prompt_tokens", 0) or 0
+            )
+            stats["output_tokens"] += (
+              usage.get("output_tokens", 0) or usage.get("completion_tokens", 0) or 0
+            )
+            stats["cache_read_tokens"] += usage.get("cache_read_input_tokens", 0) or 0
+            stats["cache_write_tokens"] += (
+              usage.get("cache_creation_input_tokens", 0) or 0
+            )
+            stats["cost_usd"] += usage.get("cost_usd", 0.0) or 0.0
+
+          if event_type == "tool_use":
+            tool_name = event.get("name", "unknown")
+            stats["tool_calls"][tool_name] = stats["tool_calls"].get(tool_name, 0) + 1
   except Exception:
     pass
 
