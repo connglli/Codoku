@@ -6,8 +6,9 @@ You are an expert at solving RefractIR puzzles. A RefractIR puzzle is a masked f
 
 The puzzle file is at `{{PUZZLE_FILE}}`.
 Save the complete solution to `{{SOLUTION_FILE}}`.
-Use `{{WORKSPACE}}` for any intermediate files (scripts, notes, attempts, thoughts, etc.);
-that said, avoid using `/tmp` or similar directories, as they may be cleaned up automatically.
+Use `{{WORKSPACE}}` for any intermediate files (scripts, notes, attempts, thoughts, etc.).
+That said, avoid using `/tmp` or similar directories, as they may be cleaned up automatically.
+That also said, avoid generating the solution file before you solve the puzzle successfully.
 
 ## How to Read the Puzzle
 
@@ -29,7 +30,7 @@ that said, avoid using `/tmp` or similar directories, as they may be cleaned up 
 
 - `FILL_VAR` → a local variable (`%name`), possibly with subscript `[idx]` or field `.name`
 - `FILL_CONST` → an integer, float, or `null` literal (must match the budget exactly)
-- `FILL_OP` → an operator (`+`, `-`, `*`, `/`, `%`, `&`, `|`, `^`, `<<`, `>>`, `>>>`, `~`, `as`, `addr`, `load`, `store`, `select`, `cmp`, `ptrindex`, `ptrfield`) or a relational operator for `cmp`
+- `FILL_OP` → an operator (e.g., `+`, `-`, `*`, `/`, `%`, `&`, `|`, `^`, `<<`, `>>`, `>>>`, `~`, `as`, `addr`, `load`, `store`, `select`, `cmp`, `ptrindex`, `ptrfield`) or a relational operator for `cmp`
 - `FILL_TYPE` → a type (for `as` casts)
 - `FILL_LABEL` → a branch target (`^label`)
 - `FILL_FUNC` → a function name for `call`
@@ -44,7 +45,7 @@ Use the checker to verify your solution:
 
 You can also run the interpreter directly:
 ```bash
-./tools/symiri {{SOLUTION_FILE}}
+./tools/symiri [--check] [--dump-trace] {{SOLUTION_FILE}}
 ```
 Exit code 0 means the checksum matched.
 
@@ -62,9 +63,8 @@ Exit code 0 means the checksum matched.
 - Start by reading the SPEC and examples to understand the language syntax.
 - Map out all variables and their types from the `let` declarations.
 - Trace the execution path block by block.
-- For each `FILL_VAR`, identify which variables are in scope and have the right type.
-- For each `FILL_CONST`, check the budget to know which constants are available.
-- For each `FILL_OP`, consider what operation would produce the value needed downstream.
+- For each `FILL_XXX`, identify which are available.
 - Use the interpreter (`./tools/symiri`) to test partial solutions — if it crashes, the checksum is wrong or you hit undefined behavior.
 - Use the checker (`./tools/rypuzchk`) for the definitive pass/fail verdict.
 - If stuck, try the solver: `./tools/symirsolve` can sometimes help with constraint reasoning.
+- There're also other tools in `./tools/` that can help with debugging and analysis.
