@@ -232,6 +232,7 @@ def generate_puzzles(
         f"rypuzmk failed for puzzle {i}: {result.stderr.strip()}",
         level="ERROR",
       )
+      puz_dir.unlink()  # Remove the puzzle directory to avoid leaving a partial puzzle
       # Try next seed on failure (rypuzmk retries internally too)
       continue
 
