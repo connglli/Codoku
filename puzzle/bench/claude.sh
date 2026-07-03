@@ -37,10 +37,7 @@ run_agent claude "${CLAUDE_ARGS[@]}" "${USER_PROMPT}"
 EXIT_CODE=$?
 
 # — Save cache ———————————————————————————————————————————————————————————
-# Claude Code stores session data under ~/.claude/.  Copy whatever is
-# there into the puzzle's cache/ directory for post-mortem analysis.
-if [ -d "${HOME}/.claude" ]; then
-  cp -r "${HOME}/.claude" "${PUZZLE_DIR}/cache/" 2>/dev/null || true
-fi
+# Claude Code stores session data under ~/.claude/.
+save_cache "${HOME}/.claude"
 
 exit ${EXIT_CODE}

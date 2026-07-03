@@ -287,20 +287,12 @@ class BenchmarkRunner:
     # Build the Docker image for the agent if it doesn't exist
     build_docker_image(BENCH_IMAGE, BENCH_DOCKERFILE)
 
-    # Determine which puzzles haven't been solved yet
-    pending: list[int] = []
-    already: list[int] = []
-    for i in range(1, self.n + 1):
-      analysis_file = self.output_dir / f"puz-{i:04d}" / "analyses.json"
-      if analysis_file.exists():
-        already.append(i)
-      else:
-        pending.append(i)
+    pending, finished = self._get_pending_and_finished()
 
-    if already:
-      log(f"Skipping {len(already)} already-analyzed puzzles")
+    if finished:
+      log(f"Skipping {len(finished)} already-finished puzzles")
     if not pending:
-      log("All puzzles already analyzed, skipping agent runs.")
+      log("All puzzles already finished, skipping agent runs.")
       return self._collect_all_analyses()
 
     log(
@@ -342,6 +334,29 @@ class BenchmarkRunner:
       signal.signal(signal.SIGTERM, original_sigterm)
 
     return self._collect_all_analyses()
+
+  def _get_pending_and_finished(self) -> tuple[list[int], list[int]]:
+    """Determine which puzzles are pending and which are already finished."""
+    pending: list[int] = []
+    finished: list[int] = []
+    for i in range(1, self.n + 1):
+      analysis_file = self.output_dir / f"puz-{i:04d}" / "analyses.json"
+      should_skip = False
+      if analysis_file.exists():
+        try:
+          with open(analysis_file) as f:
+            data = json.load(f)
+            verdict = data.get("verdict")
+            if verdict in ("FAIL", "PASS", "NO_SOLUTION"):
+              should_skip = True
+        except Exception:
+          pass
+
+      if should_skip:
+        finished.append(i)
+      else:
+        pending.append(i)
+    return pending, finished
 
   def _run_single(self, puzzle_idx: int) -> dict[str, Any]:
     """Run the agent on a single puzzle in a Docker container."""

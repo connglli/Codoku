@@ -17,7 +17,7 @@
 # Outputs (agent must produce):
 #   solution.sir        The solved puzzle (if successful)
 #   trajectory.jsonl    Raw agent output / log
-#   cache/              Agent session / cache data
+#   agent_cache/        Agent session / cache data
 #
 # Sourced by agent runner scripts (e.g. claude.sh, opencode.sh) to avoid
 # duplicating the parsing, paths, templating, and timeout orchestration.
@@ -55,9 +55,9 @@ SOLUTION_FILE="${PUZZLE_DIR}/solution.sir"
 WORKSPACE="${PUZZLE_DIR}/workspace"
 TRAJECTORY="${PUZZLE_DIR}/trajectory.jsonl"
 SYSTEM_MD="${PUZZLE_DIR}/system.md"
-STDERR_LOG="${PUZZLE_DIR}/stderr.log"
+CACHE_DIR="${PUZZLE_DIR}/agent_cache"
 
-mkdir -p "${WORKSPACE}" "${PUZZLE_DIR}/cache"
+mkdir -p "${WORKSPACE}"
 
 # — Process system.md template ———————————————————————————————————————————
 # The template (mounted at /opt/rypuz/system.md) contains placeholders
@@ -74,8 +74,19 @@ run_agent() {
 
   if [ "${TIMEOUT}" -gt 0 ] 2>/dev/null; then
     timeout --signal TERM --kill-after 30 "${TIMEOUT}" \
-      "${cmd[@]}" 2>"${STDERR_LOG}" | tee "${TRAJECTORY}"
+      "${cmd[@]}" | tee "${TRAJECTORY}"
   else
-    "${cmd[@]}" 2>"${STDERR_LOG}" | tee "${TRAJECTORY}"
+    "${cmd[@]}" | tee "${TRAJECTORY}"
+  fi
+}
+
+save_cache() {
+  local src_dir="$1"
+  local dest_dir="${CACHE_DIR}"
+  if [ -d "${src_dir}" ]; then
+    cp -r "${src_dir}" "${dest_dir}" 2>/dev/null || true
+  else
+    echo "Warning: the agent cache directory ${src_dir} does not exist." >&2
+    mkdir -p "${dest_dir}"
   fi
 }

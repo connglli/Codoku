@@ -23,6 +23,7 @@ OPENCODE_ARGS=(
 # OpenCode does not support
 # - MAX_TURNS
 # - MAX_BUDGET_USD
+echo "Warning: OpenCode does not support MAX_TURNS or MAX_BUDGET_USD. Ignoring these options." >&2
 
 # — Run ——————————————————————————————————————————————————————————————————
 run_agent opencode "${OPENCODE_ARGS[@]}"
@@ -30,9 +31,6 @@ EXIT_CODE=$?
 
 # — Save cache ———————————————————————————————————————————————————————————
 # OpenCode stores session data under ~/.local/share/opencode/.
-# Copy whatever is there into the puzzle's cache/ directory.
-if [ -d "${HOME}/.local/share/opencode" ]; then
-  cp -r "${HOME}/.local/share/opencode" "${PUZZLE_DIR}/cache/" 2>/dev/null || true
-fi
+save_cache "${HOME}/.local/share/opencode"
 
 exit ${EXIT_CODE}
