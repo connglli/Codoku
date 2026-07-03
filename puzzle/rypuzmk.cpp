@@ -326,10 +326,19 @@ int main(int argc, char **argv) {
       uint32_t maskSeed = seed.value_or(std::random_device{}());
       std::mt19937 mrng(maskSeed);
       std::bernoulli_distribution coin(pMask);
+      int attempt = 0;
       std::unordered_set<int> chosen;
-      for (int i = 0; i < nStmts; ++i) {
-        if (coin(mrng))
-          chosen.insert(i);
+      while (attempt < 100 && chosen.empty() && pMask > 0.0) {
+        for (int i = 0; i < nStmts; ++i) {
+          if (coin(mrng))
+            chosen.insert(i);
+        }
+        attempt += 1;
+      }
+      if (chosen.empty() && pMask > 0.0) {
+        throw std::runtime_error(
+            "Failed to generate a mask set for the rysmith-generated function after 100 attempts"
+        );
       }
       maskSet = std::move(chosen);
     }

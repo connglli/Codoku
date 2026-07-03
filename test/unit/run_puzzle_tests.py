@@ -47,7 +47,7 @@ def check(name, ok, detail=""):
   print(f"  [{color}{tag}{NC}] {name}" + (f" — {detail}" if detail and not ok else ""))
 
 
-def make_puzzle(rypuzmk, rysmith, seed, outdir):
+def make_puzzle(rypuzmk, rysmith, seed, outdir, *options):
   """Generate a puzzle + ground truth for `seed`; return (puzzle_path, gt_path)."""
   puzzle = os.path.join(outdir, f"p{seed}.sir")
   gt = os.path.join(outdir, f"p{seed}.gt.sir")
@@ -62,6 +62,7 @@ def make_puzzle(rypuzmk, rysmith, seed, outdir):
       puzzle,
       "--keep-ground-truth",
     ]
+    + list(options)
   )
   ok = r.returncode == 0 and os.path.exists(puzzle) and os.path.exists(gt)
   return (puzzle, gt) if ok else (None, None)
@@ -461,6 +462,28 @@ def main():
             passed,
             out.strip().splitlines()[-1:],
           )
+
+      # (10) TDD: zero FILL_XX generation errors (5 tests)
+      for test_idx, test_seed in enumerate([1001, 1002, 1003, 1004, 1005], 1):
+        err_puzzle = os.path.join(outdir, f"err_puzzle_{test_seed}.sir")
+        r_err = run(
+          [
+            rypuzmk,
+            "--input",
+            base_gt,
+            "--seed",
+            str(test_seed),
+            "--p-mask",
+            "0.000001",
+            "-o",
+            err_puzzle,
+          ]
+        )
+        check(
+          f"zero-fill-error: rypuzmk fails on zero FILL_XX with input (test {test_idx})",
+          r_err.returncode != 0,
+          f"exit code: {r_err.returncode}",
+        )
 
   return summarize()
 
