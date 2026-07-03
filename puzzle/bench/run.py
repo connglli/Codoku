@@ -760,6 +760,37 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
   return args, remaining
 
 
+# fmt: off
+def user_consent(args, rypuzmk_opts, output_dir) -> bool:
+  # Print everything
+  print("=" * 68)
+  print("Reify Puzzle Benchmark Configuration:")
+  print(f"  Number of puzzles (-n):       {args.n}")
+  print(f"  Output directory (-o):        {output_dir}")
+  print(f"  Agent (-a):                   {args.agent}")
+  print(f"  Model (-m):                   {args.model}")
+  print(f"  Parallelism (-j):             {args.parallelism}")
+  print(f"  Max turns (--max-turns):      {args.max_turns if args.max_turns > 0 else 'unlimited'}")
+  print(f"  Timeout per puzzle:           {args.timeout if args.timeout > 0 else 'unlimited'}")
+  print(f"  Max budget USD:               {args.max_budget_usd if args.max_budget_usd > 0 else 'unlimited'}")
+  print(f"  Generate only:                {args.generate_only}")
+  print(f"  Analyze only:                 {args.analyze_only}")
+  if rypuzmk_opts:
+    print(f"  Options passed to rypuzmk:    {' '.join(rypuzmk_opts)}")
+  print("=" * 68)
+  # Ask the user to double check and confirm
+  try:
+    response = input("Please double check the configurations. Proceed? (y/N): ")
+    if response.strip().lower() not in ("y", "yes"):
+      print("Benchmark run cancelled by user.")
+      return False
+  except (KeyboardInterrupt, EOFError):
+    print("\nBenchmark run cancelled by user.")
+    return False
+  return True
+# fmt: on
+
+
 def main() -> None:
   args, rypuzmk_opts = parse_args()
 
@@ -767,6 +798,10 @@ def main() -> None:
   output_dir = Path(args.output) if args.output else Path.cwd() / "benchmark"
   output_dir = output_dir.resolve()
   output_dir.mkdir(parents=True, exist_ok=True)
+
+  # Ask the user to double check the configurations before proceeding
+  if not user_consent(args, rypuzmk_opts, output_dir):
+    return
 
   start_time = time.time()
 
