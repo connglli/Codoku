@@ -200,7 +200,7 @@ def generate_puzzles(
   # Compile tools inside the container
   log("Compiling tools (rypuzmk, rypuzchk, symiri) inside the Docker container...")
   result = run_in_generation_container(
-    ["make", "rypuzmk", "rypuzchk", "symiri"],
+    ["bash", "-c", "make clean && make -j all"],
     capture=False,
   )
   if result.returncode != 0:
@@ -210,10 +210,12 @@ def generate_puzzles(
   # Start generating puzzles from the last existing index + 1
   log(f"Generating puzzles {start_from + 1}..{n} ({n - start_from} remaining)")
 
-  for i in range(start_from + 1, n + 1):
+  i = start_from + 1
+  while i <= n:
     puz_dir = output_dir / f"puz-{i:04d}"
     puz_dir.mkdir(parents=True, exist_ok=True)
     puzzle_file = puz_dir / "puzzle.sir"
+    gt_raw_file = puzzle_file.with_suffix(".gt.sir")
     gt_file = oracles / f"sol-{i:04d}.sir"
     hash_file = oracles / f"puz-{i:04d}.hash"
 
@@ -232,23 +234,26 @@ def generate_puzzles(
         f"rypuzmk failed for puzzle {i}: {result.stderr.strip()}",
         level="ERROR",
       )
-      puz_dir.unlink()  # Remove the puzzle directory to avoid leaving a partial puzzle
+      shutil.rmtree(
+        puz_dir, ignore_errors=True
+      )  # Remove the puzzle directory to avoid leaving a partial puzzle
       # Try next seed on failure (rypuzmk retries internally too)
       continue
 
-    # rypuzmk writes ground-truth to <output>.gt.sir
-    gt_raw = puzzle_file.with_suffix(".gt.sir")
-    if gt_raw.exists():
-      shutil.move(str(gt_raw), str(gt_file))
-    else:
-      log(f"Warning: ground-truth not found for puzzle {i}", level="WARN")
+    if not puzzle_file.exists():
+      fatal(f"Error: puzzle.sir not generated for puzzle {i}")
+    if not gt_raw_file.exists():
+      fatal(f"Error: ground-truth not found for puzzle {i}", level="WARN")
 
-    # Hash the puzzle file
-    if puzzle_file.exists():
-      hash_file.write_text(sha1_file(puzzle_file) + "\n")
+    # rypuzmk writes ground-truth to <output>.gt.sir
+    shutil.move(str(gt_raw_file), str(gt_file))
+    # Compute SHA1 hash of puzzle.sir and save to oracles/puz-NNNN.hash
+    hash_file.write_text(sha1_file(puzzle_file) + "\n")
 
     if i % 10 == 0 or i == n:
       log(f"  Generated {i}/{n} puzzles")
+
+    i += 1
 
   log("Puzzle generation complete.")
 
