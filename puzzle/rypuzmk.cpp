@@ -235,8 +235,8 @@ int main(int argc, char **argv) {
       ("L,min-loop-iter", "Minimum loop iterations constraint for rysmith", cxxopts::value<uint32_t>()->default_value("2"))
       ("B,n-bbls", "Number of basic blocks for rysmith", cxxopts::value<uint32_t>()->default_value("5"))
       ("S,n-stmts", "Number of statements per block on path for rysmith", cxxopts::value<uint32_t>()->default_value("3"))
-      ("p-mask", "Probability in [0,1] that each statement is masked (default 1.0 = mask all)", cxxopts::value<double>()->default_value("1.0"))
-      ("lift-consts", "Avoid generating magic-number related constraints (i.e. //@ FILL_CONST)", cxxopts::value<bool>()->default_value("false"))
+      ("P,p-mask", "Probability in [0,1] that each statement is masked (default 1.0 = mask all)", cxxopts::value<double>()->default_value("1.0"))
+      ("C,lift-consts", "Avoid generating magic-number related constraints (i.e. //@ FILL_CONST)", cxxopts::value<bool>()->default_value("false"))
       // Other options
       ("keep-ground-truth", "Save the unmasked ground-truth concrete .sir file as <puzzle>.gt.sir", cxxopts::value<bool>()->default_value("false"))
       ("pkg-res", "Copy/link tools + references into the puzzle's parent directory", cxxopts::value<bool>()->default_value("false"))
