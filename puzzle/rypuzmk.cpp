@@ -44,11 +44,16 @@ std::string runRysmithAndGetSir(
       fs::remove_all(entry.path());
     }
 
-    std::string cmd = rysmithPath + " -n 1" + " --min-loop-iter " + std::to_string(minLoopIter) +
-                      " --n-bbls " + std::to_string(nBbls) + " --n-stmts " +
-                      std::to_string(nStmts) + " --emit-main -o " + tmpDir.string();
+    // clang-format off
+    std::string cmd = rysmithPath +
+                      " -n 1 --no-crc32 --emit-main" +
+                      " --min-loop-iter " + std::to_string(minLoopIter) +
+                      " --n-bbls " + std::to_string(nBbls) +
+                      " --n-stmts " + std::to_string(nStmts) +
+                      " -o " + tmpDir.string();
     cmd += " --seed " + std::to_string(seed);
     cmd += " > /dev/null 2>&1";
+    // clang-format on
 
     int ret = std::system(cmd.c_str());
     (void) ret; // Suppress unused-result warning
