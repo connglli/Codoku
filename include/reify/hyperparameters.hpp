@@ -109,7 +109,7 @@ namespace refractir::reify::rysmith::hp {
   // side stream meant to add aliasing for the compiler to chew on. Charging
   // them to the same budget would let a heavy store density starve the
   // assignment count.
-  inline constexpr double kPStoreBeforeAssign = 0.25;
+  inline constexpr double kPStoreBeforeAssign = 0;
 
   // How many LHS picks `genBlockStmts` tries before giving up on the
   // current `nStmts` slot. The slot can fail to emit an AssignInstr when
