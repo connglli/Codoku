@@ -26,6 +26,7 @@ import sys
 import textwrap
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +59,24 @@ AGENTS = {
   "opencode": BENCH_DIR / "opencode.sh",
   # Future: "codex": BENCH_DIR / "codex.sh",
 }
+
+
+# ---------------------------------------------------------------------------
+# Verdict
+# ---------------------------------------------------------------------------
+
+
+class Verdict(str, Enum):
+  # Completed verdicts
+  COMPLETED_PASS = "PASS"  # Solution is valid and passed all checks
+  COMPLETED_FAIL = "FAIL"  # Solution is invalid/wrong
+  COMPLETED_TIMEOUT = "TIMEOUT"  # Agent timed out; treated as no solutions
+  COMPLETED_NO_SOLUTION = "NO_SOLUTION"  # Agent finished but produced no solution.sir
+  COMPLETED_CHEAT = "CHEAT"  # Agent modified the puzzle.sir file (tampering detected)
+  # Incomplete verdicts
+  INCOMPLETE_CANCELLED = "CANCELLED"  # Agent execution was cancelled (e.g. SIGINT)
+  INCOMPLETE_ERROR = "ERROR"  # Internal or checker script error
+  INCOMPLETE_PENDING = "PENDING"  # Puzzle is queued/waiting to be run
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +202,13 @@ def generate_puzzles(
     puzzle_file = puz_dir / "puzzle.sir"
     gt_file = oracles / f"sol-{i:04d}.sir"
     hash_file = oracles / f"puz-{i:04d}.hash"
-    if puzzle_file.exists() and gt_file.exists() and hash_file.exists():
+    puz_copy_file = oracles / f"puz-{i:04d}.sir"
+    if (
+      puzzle_file.exists()
+      and gt_file.exists()
+      and hash_file.exists()
+      and puz_copy_file.exists()
+    ):
       start_from = i
     else:
       break
@@ -218,6 +243,7 @@ def generate_puzzles(
     gt_raw_file = puzzle_file.with_suffix(".gt.sir")
     gt_file = oracles / f"sol-{i:04d}.sir"
     hash_file = oracles / f"puz-{i:04d}.hash"
+    puz_copy_file = oracles / f"puz-{i:04d}.sir"
 
     # Build the rypuzmk command arguments for the container.
     # Use --seed <i> for reproducibility unless the user already passed --seed.
@@ -247,6 +273,8 @@ def generate_puzzles(
 
     # rypuzmk writes ground-truth to <output>.gt.sir
     shutil.move(str(gt_raw_file), str(gt_file))
+    # Save a copy of puzzle.sir alongside sol-XXXX.sir
+    shutil.copy(str(puzzle_file), str(puz_copy_file))
     # Compute SHA1 hash of puzzle.sir and save to oracles/puz-NNNN.hash
     hash_file.write_text(sha1_file(puzzle_file) + "\n")
 
@@ -330,11 +358,13 @@ class BenchmarkRunner:
           try:
             analysis = future.result()
             results.append(analysis)
-            status = analysis.get("verdict", "UNKNOWN")
+            status = analysis.get("verdict")
             log(f"  puz-{idx:04d}: {status}")
           except Exception as e:
             log(f"  puz-{idx:04d}: EXCEPTION: {e}", level="ERROR")
-            results.append({"puzzle_id": idx, "verdict": "ERROR", "error": str(e)})
+            results.append(
+              {"puzzle_id": idx, "verdict": Verdict.INCOMPLETE_ERROR, "error": str(e)}
+            )
     finally:
       signal.signal(signal.SIGINT, original_sigint)
       signal.signal(signal.SIGTERM, original_sigterm)
@@ -353,7 +383,13 @@ class BenchmarkRunner:
           with open(analysis_file) as f:
             data = json.load(f)
             verdict = data.get("verdict")
-            if verdict in ("FAIL", "PASS", "NO_SOLUTION"):
+            if verdict in (
+              Verdict.COMPLETED_FAIL,
+              Verdict.COMPLETED_PASS,
+              Verdict.COMPLETED_NO_SOLUTION,
+              Verdict.COMPLETED_TIMEOUT,
+              Verdict.COMPLETED_CHEAT,
+            ):
               should_skip = True
         except Exception:
           pass
@@ -367,7 +403,7 @@ class BenchmarkRunner:
   def _run_single(self, puzzle_idx: int) -> dict[str, Any]:
     """Run the agent on a single puzzle in a Docker container."""
     if self._stop:
-      return {"puzzle_id": puzzle_idx, "verdict": "CANCELLED"}
+      return {"puzzle_id": puzzle_idx, "verdict": Verdict.INCOMPLETE_CANCELLED}
 
     puz_dir = self.output_dir / f"puz-{puzzle_idx:04d}"
     (puz_dir / "workspace").mkdir(exist_ok=True)
@@ -426,6 +462,7 @@ class BenchmarkRunner:
     elapsed = 0.0
     log(f"  Starting container for puz-{puzzle_idx:04d}: {container_name}")
 
+    timed_out = False
     try:
       result = run_cmd(
         cmd,
@@ -442,6 +479,7 @@ class BenchmarkRunner:
 
     except subprocess.TimeoutExpired:
       elapsed = time.time() - start_time
+      timed_out = True
       log(
         f"  Container for puz-{puzzle_idx:04d} timed out after {elapsed:.0f}s",
         level="WARN",
@@ -454,7 +492,7 @@ class BenchmarkRunner:
         self._containers.remove(container_name)
 
     # Analyze the result
-    analysis = self._analyze_puzzle(puzzle_idx, elapsed)
+    analysis = self._analyze_puzzle(puzzle_idx, elapsed, timed_out=timed_out)
 
     # Save analysis
     analysis_file = puz_dir / "analyses.json"
@@ -463,7 +501,9 @@ class BenchmarkRunner:
 
     return analysis
 
-  def _analyze_puzzle(self, puzzle_idx: int, elapsed: float) -> dict[str, Any]:
+  def _analyze_puzzle(
+    self, puzzle_idx: int, elapsed: float, timed_out: bool = False
+  ) -> dict[str, Any]:
     """Analyze a single puzzle result after the agent finishes."""
     puz_dir = self.output_dir / f"puz-{puzzle_idx:04d}"
     oracles = self.output_dir / "oracles"
@@ -479,14 +519,32 @@ class BenchmarkRunner:
       "elapsed_seconds": round(elapsed, 2),
     }
 
+    # If the container timed out, mark it as TIMEOUT
+    if timed_out:
+      analysis["verdict"] = Verdict.COMPLETED_TIMEOUT
+      analysis.update(analyzers.parse_trajectory(self.agent, trajectory_file))
+      return analysis
+
+    # Parse trajectory for token/cost/round stats
+    traj_stats = analyzers.parse_trajectory(self.agent, trajectory_file)
+
+    # Check if the agent run was incomplete / had an empty trajectory / non-zero exit code
+    # without writing a solution
+    is_empty_traj = traj_stats.get("num_rounds", 0) == 0
+    if is_empty_traj and not solution_file.exists():
+      analysis["verdict"] = Verdict.INCOMPLETE_ERROR
+      analysis["error"] = "Agent failed to complete (empty trajectory)"
+      analysis.update(traj_stats)
+      return analysis
+
     # 1. Check if solution.sir exists
     has_solution = solution_file.exists()
     analysis["has_solution"] = has_solution
     log(f"  - has_solution={has_solution}")
 
     if not has_solution:
-      analysis["verdict"] = "NO_SOLUTION"
-      analysis.update(analyzers.parse_trajectory(self.agent, trajectory_file))
+      analysis["verdict"] = Verdict.COMPLETED_NO_SOLUTION
+      analysis.update(traj_stats)
       return analysis
 
     # 2. Check if puzzle.sir was modified (cheat detection)
@@ -506,17 +564,11 @@ class BenchmarkRunner:
     )
 
     if puzzle_modified:
-      analysis["verdict"] = "CHEAT"
-      analysis.update(analyzers.parse_trajectory(self.agent, trajectory_file))
+      analysis["verdict"] = Verdict.COMPLETED_CHEAT
+      analysis.update(traj_stats)
       return analysis
 
     # 3. Run rypuzchk to validate the solution
-    rypuzchk = REPO_ROOT / "rypuzchk"
-    if not rypuzchk.exists():
-      analysis["verdict"] = "ERROR"
-      analysis["error"] = "rypuzchk not found"
-      return analysis
-
     try:
       container_args = [
         "./rypuzchk",
@@ -543,13 +595,13 @@ class BenchmarkRunner:
 
     # 4. Verdict
     if passed:
-      analysis["verdict"] = "PASS"
+      analysis["verdict"] = Verdict.COMPLETED_PASS
     else:
-      analysis["verdict"] = "FAIL"
+      analysis["verdict"] = Verdict.COMPLETED_FAIL
     log(f"  - checker_passed={passed} ({chk_stdout.strip()})")
 
     # 5. Parse trajectory for token/cost/round stats (decoupled via analyzers)
-    analysis.update(analyzers.parse_trajectory(self.agent, trajectory_file))
+    analysis.update(traj_stats)
 
     return analysis
 
@@ -562,7 +614,7 @@ class BenchmarkRunner:
         with open(analysis_file) as f:
           results.append(json.load(f))
       else:
-        results.append({"puzzle_id": i, "verdict": "PENDING"})
+        results.append({"puzzle_id": i, "verdict": Verdict.INCOMPLETE_PENDING})
     return results
 
   def _kill_all_containers(self) -> None:
@@ -585,40 +637,60 @@ def compute_summary(
   """Compute aggregate statistics and save result.json."""
   total = len(results)
 
-  counts: dict[str, int] = {}
+  counts: dict[str, int] = {v: 0 for v in Verdict}
   for r in results:
-    v = r.get("verdict", "UNKNOWN")
-    counts[v] = counts.get(v, 0) + 1
+    v = r.get("verdict")
+    counts[v] = counts.get(v) + 1
 
-  passed = counts.get("PASS", 0)
-  failed = counts.get("FAIL", 0)
-  cheated = counts.get("CHEAT", 0)
-  no_solution = counts.get("NO_SOLUTION", 0)
-  errors = counts.get("ERROR", 0)
+  passed = counts.get(Verdict.COMPLETED_PASS, 0)
+  failed = counts.get(Verdict.COMPLETED_FAIL, 0)
+  cheated = counts.get(Verdict.COMPLETED_CHEAT, 0)
+  no_solution = counts.get(Verdict.COMPLETED_NO_SOLUTION, 0)
+  timeouts = counts.get(Verdict.COMPLETED_TIMEOUT, 0)
+  cancelled = counts.get(Verdict.INCOMPLETE_CANCELLED, 0)
+  errors = counts.get(Verdict.INCOMPLETE_ERROR, 0)
+  pendings = counts.get(Verdict.INCOMPLETE_PENDING, 0)
 
   # Aggregate numeric stats
   rounds_list = [
-    r.get("num_rounds", 0) for r in results if r.get("verdict") != "PENDING"
+    r.get("num_rounds", 0)
+    for r in results
+    if r.get("verdict") != Verdict.INCOMPLETE_PENDING
   ]
   tokens_list = [
-    r.get("total_tokens", 0) for r in results if r.get("verdict") != "PENDING"
+    r.get("total_tokens", 0)
+    for r in results
+    if r.get("verdict") != Verdict.INCOMPLETE_PENDING
   ]
-  cost_list = [r.get("cost_usd", 0.0) for r in results if r.get("verdict") != "PENDING"]
+  cost_list = [
+    r.get("cost_usd", 0.0)
+    for r in results
+    if r.get("verdict") != Verdict.INCOMPLETE_PENDING
+  ]
   elapsed_list = [
-    r.get("elapsed_seconds", 0.0) for r in results if r.get("verdict") != "PENDING"
+    r.get("elapsed_seconds", 0.0)
+    for r in results
+    if r.get("verdict") != Verdict.INCOMPLETE_PENDING
   ]
 
   def safe_avg(lst: list[float | int]) -> float:
     return sum(lst) / len(lst) if lst else 0.0
 
+  completed_total = passed + failed + cheated + no_solution + timeouts
   summary = {
     "total_puzzles": total,
     "pass": passed,
     "fail": failed,
     "cheat": cheated,
     "no_solution": no_solution,
+    "timeout": timeouts,
+    "cancelled": cancelled,
     "error": errors,
+    "pending": pendings,
     "pass_rate": round(passed / total * 100, 1) if total else 0.0,
+    "pass_rate_completed": round(passed / completed_total * 100, 1)
+    if completed_total
+    else 0.0,
     "avg_rounds": round(safe_avg(rounds_list), 1),
     "avg_total_tokens": round(safe_avg(tokens_list), 0),
     "avg_cost_usd": round(safe_avg(cost_list), 4),
@@ -646,20 +718,28 @@ def print_summary_table(summary: dict[str, Any]) -> None:
 
   print()
   print("=" * 68)
-  print(
-    f"  ReifyPuzzle Benchmark — {opts.get('agent', '?')} / {opts.get('model', '?')}"
-  )
+  print(f"ReifyPuzzle Benchmark — {opts.get('agent', '?')} / {opts.get('model', '?')}")
   print("=" * 68)
   print()
   print(f"  {'Metric':<30} {'Value':>15}")
   print(f"  {'-' * 30} {'-' * 15}")
   print(f"  {'Total puzzles':<30} {n:>15}")
+  print(f"  {'-' * 3}")
   print(f"  {'Passed':<30} {summary['pass']:>15}")
+  print(f"  {'-' * 3}")
   print(f"  {'Failed':<30} {summary['fail']:>15}")
-  print(f"  {' Cheated':<30} {summary['cheat']:>15}")
-  print(f"  {' No solution':<30} {summary['no_solution']:>15}")
-  print(f"  {' Errors':<30} {summary['error']:>15}")
-  print(f"  {'Pass rate':<30} {summary['pass_rate']:>14.1f}%")
+  print(f"  {'Cheated':<30} {summary['cheat']:>15}")
+  print(f"  {'No solution':<30} {summary['no_solution']:>15}")
+  print(f"  {'Timeouts':<30} {summary['timeout']:>15}")
+  print(f"  {'-' * 3}")
+  print(f"  {'Cancelled':<30} {summary.get('cancelled', 0):>15}")
+  print(f"  {'Errors':<30} {summary['error']:>15}")
+  print(f"  {'Pendings':<30} {summary['pending']:>15}")
+  print(f"  {'-' * 30} {'-' * 15}")
+  print(f"  {'Pass rate (overall)':<30} {summary['pass_rate']:>14.1f}%")
+  print(
+    f"  {'Pass rate (completed)':<30} {summary.get('pass_rate_completed', 0.0):>14.1f}%"
+  )
   print(f"  {'-' * 30} {'-' * 15}")
   print(f"  {'Avg rounds':<30} {summary['avg_rounds']:>15.1f}")
   print(f"  {'Avg tokens':<30} {summary['avg_total_tokens']:>15,.0f}")
@@ -690,8 +770,8 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
               -L, --min-loop-iter N   Minimum loop iterations (default: 2)
               -B, --n-bbls N          Number of basic blocks (default: 5)
               -S, --n-stmts N         Statements per block (default: 3)
-              --p-mask P              Masking probability [0,1] (default: 1.0)
-              --lift-consts           Remove FILL_CONST budget constraints
+              -P, --p-mask P              Masking probability [0,1] (default: 1.0)
+              -C, --lift-consts           Remove FILL_CONST budget constraints
               --seed S                Base seed for puzzle generation
 
             These are passed through to rypuzmk verbatim.
@@ -800,6 +880,9 @@ def user_consent(args, rypuzmk_opts, output_dir) -> bool:
 def main() -> None:
   args, rypuzmk_opts = parse_args()
 
+  if args.analyze_only and args.generate_only:
+    fatal("Cannot use --analyze-only and --generate-only together.")
+
   # Resolve output directory
   output_dir = Path(args.output) if args.output else Path.cwd() / "benchmark"
   output_dir = output_dir.resolve()
@@ -811,13 +894,18 @@ def main() -> None:
 
   start_time = time.time()
 
-  # Save metadata
-  metadata = {
-    "command": " ".join(sys.argv),
-    "options": vars(args),
-    "output_dir": str(output_dir),
-    "start_time": datetime.datetime.now().isoformat(),
-  }
+  if not args.analyze_only:
+    # Save metadata
+    metadata = {
+      "command": " ".join(sys.argv),
+      "options": vars(args),
+      "output_dir": str(output_dir),
+      "start_time": datetime.datetime.now().isoformat(),
+    }
+  else:
+    # Read from existing metadata.json if analyzing only
+    with open(output_dir / "metadata.json") as f:
+      metadata = json.load(f)
 
   # --- Phase 1: Generate puzzles ---
   if not args.analyze_only:
@@ -859,17 +947,16 @@ def main() -> None:
         with open(analysis_file) as f:
           results.append(json.load(f))
       else:
-        results.append({"puzzle_id": i, "verdict": "PENDING"})
+        results.append({"puzzle_id": i, "verdict": Verdict.INCOMPLETE_PENDING})
 
   # --- Phase 3: Summary ---
   log("Phase 3: Computing summary")
-  metadata["end_time"] = datetime.datetime.now().isoformat()
-  metadata["total_seconds"] = round(time.time() - start_time, 2)
-
-  # Save metadata
-  with open(output_dir / "metadata.json", "w") as f:
-    json.dump(metadata, f, indent=2)
-
+  if not args.analyze_only:
+    metadata["end_time"] = datetime.datetime.now().isoformat()
+    metadata["total_seconds"] = round(time.time() - start_time, 2)
+    # Save metadata
+    with open(output_dir / "metadata.json", "w") as f:
+      json.dump(metadata, f, indent=2)
   summary = compute_summary(results, output_dir, metadata)
   print_summary_table(summary)
 
