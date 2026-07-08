@@ -233,6 +233,7 @@ std::string renderHeader(
 
 int main(int argc, char **argv) {
   cxxopts::Options options("rypuzmk", "RefractIR Puzzle Creator");
+  // clang-format off
   options.add_options()
       ("input", "Optional concrete .sir file to mask", cxxopts::value<std::string>())
       ("o,output", "Output puzzle file path", cxxopts::value<std::string>())
@@ -246,11 +247,12 @@ int main(int argc, char **argv) {
       ("keep-ground-truth", "Save the unmasked ground-truth concrete .sir file as <puzzle>.gt.sir", cxxopts::value<bool>()->default_value("false"))
       ("pkg-res", "Copy/link tools + references into the puzzle's parent directory", cxxopts::value<bool>()->default_value("false"))
       ("pkgres-script", "Path to pkgres.sh (auto-detected next to the binary if omitted)", cxxopts::value<std::string>())
-      ("rysmith", "Path to rysmith binary", cxxopts::value<std::string>()->default_value("./rysmith"))
+      ("rysmith", "Path to rysmith binary", cxxopts::value<std::string>()->default_value((fs::path(argv[0]).parent_path() / "rysmith").string()))
       ("s,seed", "Seed for rysmith", cxxopts::value<uint32_t>())
       ("h,help", "Print usage");
-
   options.parse_positional({"input"});
+  // clang-format on
+
   auto result = options.parse(argc, argv);
 
   if (result.count("help")) {

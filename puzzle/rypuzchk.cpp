@@ -143,12 +143,15 @@ std::string stripCommentsAndWhitespace(const std::string &str) {
 
 int main(int argc, char **argv) {
   cxxopts::Options options("rypuzchk", "RefractIR Puzzle Validator");
-  options
-      .add_options()("puzzle", "Puzzle file path", cxxopts::value<std::string>())("solution", "Solution file path", cxxopts::value<std::string>())("symiri", "Path to symiri binary (default: 'symiri' next to this binary)", cxxopts::value<std::string>())(
-          "h,help", "Print usage"
-      );
-
+  // clang-format off
+  options.add_options()
+      ("puzzle", "Puzzle file path", cxxopts::value<std::string>())
+      ("solution", "Solution file path", cxxopts::value<std::string>())
+      ("symiri", "Path to symiri binary", cxxopts::value<std::string>()->default_value((fs::path(argv[0]).parent_path() / "symiri").string()))
+      ("h,help", "Print usage");
   options.parse_positional({"puzzle", "solution"});
+  // clang-format on
+
   auto result = options.parse(argc, argv);
 
   if (result.count("help") || !result.count("puzzle") || !result.count("solution")) {
