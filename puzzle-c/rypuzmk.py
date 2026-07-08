@@ -63,7 +63,7 @@ PUZZLE_HEADER_TEMPLATE = """\
 //
 // Use the following command to verify your solution:
 //
-//   ./tools/rypuzchk.py [this_puzzle_file].c [your_solution].c
+//   ./tools/rypuzchk-c [this_puzzle_file].c [your_solution].c
 //
 // ------------------------------------------------
 // General Requirements
