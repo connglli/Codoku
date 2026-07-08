@@ -469,6 +469,12 @@ class BenchmarkRunner:
         timeout=self.timeout + 60 if self.timeout > 0 else None,
       )
       elapsed = time.time() - start_time
+      if result.returncode == 124:
+        timed_out = True
+        log(
+          f"  Container for puz-{puzzle_idx:04d} timed out internally (exit code 124)",
+          level="WARN",
+        )
 
       # Save container stdout/stderr as log
       log_file = puz_dir / "container.log"
