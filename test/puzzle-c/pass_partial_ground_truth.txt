@@ -48,17 +48,21 @@
 //
 //@ FILL_CONST: -1 1
 //@ FILL_CONST: -125 1
+//@ FILL_CONST: -136 1
+//@ FILL_CONST: -161 1
 //@ FILL_CONST: -19249 1
 //@ FILL_CONST: -2106 1
 //@ FILL_CONST: -2147483640 1
 //@ FILL_CONST: -32767 1
 //@ FILL_CONST: -398914 1
 //@ FILL_CONST: -44 1
-//@ FILL_CONST: 0 1
+//@ FILL_CONST: 0 8
 //@ FILL_CONST: 2 1
-//@ FILL_CONST: 3 1
+//@ FILL_CONST: 29069 1
 //@ FILL_CONST: 3062288 1
 //@ FILL_CONST: 30664 1
+//@ FILL_CONST: 32767 1
+//@ FILL_CONST: 6088 1
 //@ FILL_CONST: 72 1
 //@ FILL_CONST: 77 1
 //@ FILL_CONST: 8 1
@@ -101,23 +105,23 @@ int32_t func_f29807_0(double pa0, float pa1, int32_t pa2);
 int32_t main(void);
 
 int32_t func_f29807_0(double pa0, float pa1, int32_t pa2) {
-  int8_t FILL_VAR[FILL_CONST] FILL_OP {FILL_CONST, FILL_CONST, FILL_CONST};
-  int16_t FILL_OP FILL_VAR[FILL_CONST] FILL_OP {0, 0};
-  int16_t v0 = -136;
-  int16_t FILL_VAR FILL_OP FILL_CONST;
-  int32_t v2 = -161;
-  int64_t FILL_VAR FILL_OP FILL_CONST;
-  int16_t FILL_OP FILL_VAR FILL_OP 0;
-  int16_t FILL_OP FILL_VAR FILL_OP 0;
-  int16_t FILL_OP FILL_OP FILL_VAR FILL_OP 0;
-  int16_t FILL_OP FILL_OP FILL_VAR FILL_OP 0;
-  _sym_arr_2_p_i16 FILL_OP FILL_VAR FILL_OP 0;
+  int8_t a0[3] = {FILL_CONST, FILL_CONST, FILL_CONST};
+  int16_t * a1[2] = {FILL_CONST, FILL_CONST};
+  int16_t v0 = FILL_CONST;
+  int16_t v1 = FILL_CONST;
+  int32_t v2 = FILL_CONST;
+  int64_t v3 = FILL_CONST;
+  int16_t * p0 = FILL_CONST;
+  int16_t * p1 = FILL_CONST;
+  int16_t * * pp0 = FILL_CONST;
+  int16_t * * pp1 = FILL_CONST;
+  _sym_arr_2_p_i16 * ap0 = FILL_CONST;
   int32_t _chk = 0;
 entry: ;
 #ifdef DUMP_TRACE
   printf("^entry:\n");
 #endif
-  p0 = ((&v0));
+p0 = ((&v0));
   p1 = ((&v0));
   pp0 = ((&p0));
   pp1 = ((&p0));
@@ -129,27 +133,27 @@ b0: ;
 #ifdef DUMP_TRACE
   printf("^b0:\n");
 #endif
-  FILL_VAR FILL_OP ((FILL_CONST) FILL_OP (FILL_CONST FILL_OP FILL_VAR));
+FILL_VAR FILL_OP ((FILL_CONST) FILL_OP (FILL_CONST FILL_OP FILL_VAR));
   if ((((FILL_TYPE)(FILL_CONST)) FILL_OP (FILL_CONST FILL_OP FILL_VAR)) FILL_OP (((FILL_TYPE)(FILL_CONST)) FILL_OP (FILL_OPFILL_VAR))) goto b1;
   else goto exit;
 b1: ;
 #ifdef DUMP_TRACE
   printf("^b1:\n");
 #endif
-  v1 = (((int16_t)(29069)) + (2 * v0));
+FILL_VAR FILL_OP (((FILL_TYPE)(FILL_CONST)) FILL_OP (FILL_CONST FILL_OP FILL_VAR));
   goto b2;
 b2: ;
 #ifdef DUMP_TRACE
   printf("^b2:\n");
 #endif
-  v0 = (((int16_t)(32767)) + (~v1) - (6088 & v1));
+FILL_VAR FILL_OP (((FILL_TYPE)(FILL_CONST)) FILL_OP (FILL_OPFILL_VAR) FILL_OP (FILL_CONST FILL_OP FILL_VAR));
     if (((FILL_OPFILL_VAR) FILL_OP (FILL_CONST FILL_OP FILL_VAR) FILL_OP (FILL_CONST)) FILL_OP ((FILL_CONST FILL_OP FILL_VAR) FILL_OP (FILL_CONST) FILL_OP (FILL_CONST))) goto exit;
   else goto entry;
 exit: ;
 #ifdef DUMP_TRACE
   printf("^exit:\n");
 #endif
-  _chk = ((0));
+_chk = ((0));
   _chk = (((int32_t)((int64_t)((uint64_t)(a0[0]) << 56) >> 56)) + (_chk));
   _chk = (((int32_t)((int64_t)((uint64_t)(a0[1]) << 56) >> 56)) + (_chk));
   _chk = (((int32_t)((int64_t)((uint64_t)(a0[2]) << 56) >> 56)) + (_chk));
@@ -170,7 +174,6 @@ entry: ;
   r = ((_check_chksum_i32(((-28902)), ((r)))));
   return ((0));
 }
-
 =>
 #include <stdint.h>
 #include <stddef.h>

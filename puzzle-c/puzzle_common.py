@@ -92,7 +92,12 @@ def get_leftmost_base(node):
 
   For example, ``a.b[i]`` yields the identifier node for ``a``.
   """
-  if node.type in ("member_expression", "subscript_expression", "pointer_expression"):
+  if node.type in (
+    "member_expression",
+    "field_expression",
+    "subscript_expression",
+    "pointer_expression",
+  ):
     arg = node.child_by_field_name("argument")
     if arg is None and node.children:
       arg = node.children[0]
@@ -228,21 +233,32 @@ def get_maskable_statements(func_node, src: bytes):
       continue
 
     if not in_body:
-      # Declarations before 'entry' are maskable let-initialisers.
-      if child.type == "declaration" and child.start_byte < entry_node.start_byte:
-        declarator = child.child_by_field_name("declarator")
-        name = None
-        if declarator:
-          if declarator.type == "init_declarator":
-            name_node = declarator.child_by_field_name("declarator")
-            if name_node:
-              name = src[name_node.start_byte : name_node.end_byte].decode("utf-8")
-          else:
-            name = src[declarator.start_byte : declarator.end_byte].decode("utf-8")
-        # Exclude '_'-prefixed scratch locals (e.g. '_chk'); their
-        # initialisers are left verbatim, mirroring the C++ sentinel rule.
-        if name and not name.startswith("_"):
-          decls_before_entry.append(child)
+      # Declarations and vector assignments before 'entry' are maskable let-initialisers/vector-initialisers.
+      if child.start_byte < entry_node.start_byte:
+        if child.type == "declaration":
+          declarator = child.child_by_field_name("declarator")
+          name = None
+          if declarator:
+            if declarator.type == "init_declarator":
+              name_node = declarator.child_by_field_name("declarator")
+              if name_node:
+                name = src[name_node.start_byte : name_node.end_byte].decode("utf-8")
+            else:
+              name = src[declarator.start_byte : declarator.end_byte].decode("utf-8")
+          if name and not name.startswith("_"):
+            decls_before_entry.append(child)
+        elif child.type == "expression_statement":
+          if child.children:
+            assignment = child.children[0]
+            if assignment.type == "assignment_expression":
+              lhs = assignment.child_by_field_name("left")
+              name = None
+              if lhs:
+                leftmost = get_leftmost_base(lhs)
+                if leftmost.type == "identifier":
+                  name = src[leftmost.start_byte : leftmost.end_byte].decode("utf-8")
+              if name and not name.startswith("_"):
+                decls_before_entry.append(child)
     else:
       # These statements are maskable body statements.
       if child.type in (
@@ -307,6 +323,39 @@ def collect_replacements(
   calls to these are masked; compiler builtins (``__builtin_isfinite``, …) and
   other external symbols are never in this set and thus never masked.
   """
+  if not is_body and node.type == "declaration":
+    declarator = node.child_by_field_name("declarator")
+    if declarator and declarator.type == "init_declarator":
+      init_val = declarator.child_by_field_name("value")
+      if init_val:
+        collect_replacements(
+          init_val,
+          src,
+          is_body,
+          replacements,
+          budget_counts,
+          local_names,
+          defined_funcs,
+        )
+    return
+
+  if not is_body and node.type == "expression_statement":
+    if node.children:
+      assignment = node.children[0]
+      if assignment and assignment.type == "assignment_expression":
+        rhs = assignment.child_by_field_name("right")
+        if rhs:
+          collect_replacements(
+            rhs,
+            src,
+            is_body,
+            replacements,
+            budget_counts,
+            local_names,
+            defined_funcs,
+          )
+        return
+
   # Whole lvalues rooted in a local/parameter variable mask to FILL_VAR.
   leftmost = get_leftmost_base(node)
   if leftmost.type == "identifier":
@@ -315,7 +364,7 @@ def collect_replacements(
       replacements.append((node.start_byte, node.end_byte, "FILL_VAR"))
       return
 
-  if node.type == "member_expression":
+  if node.type in ("member_expression", "field_expression"):
     field_node = node.child_by_field_name("field")
     if field_node:
       replacements.append((field_node.start_byte, field_node.end_byte, "FILL_FIELD"))
@@ -358,12 +407,8 @@ def collect_replacements(
   if node.type == "number_literal":
     lit_str = src[node.start_byte : node.end_byte].decode("utf-8")
     clean_lit = clean_c_literal(lit_str)
-    # For let-initialisers (not body), leave the sentinel values 0 and 1 visible.
-    if not is_body and clean_lit in ("0", "1", "0.0", "1.0"):
-      pass  # sentinel — leave verbatim, do not count toward budget
-    else:
-      replacements.append((node.start_byte, node.end_byte, "FILL_CONST"))
-      budget_counts[clean_lit] = budget_counts.get(clean_lit, 0) + 1
+    replacements.append((node.start_byte, node.end_byte, "FILL_CONST"))
+    budget_counts[clean_lit] = budget_counts.get(clean_lit, 0) + 1
     return
 
   if node.type == "goto_statement":
