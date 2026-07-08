@@ -1,0 +1,284 @@
+// EXPECT: PASS
+// DESC: a different valid solution: a masked term replaced with a structurally identical dead term
+//
+//
+// func_f29807_0() is a function of the following CFG:
+//
+//   entry -> b0 exit
+//   b0 -> b1 exit
+//   b1 -> b2
+//   b2 -> exit entry
+//
+// ------------------------------------------------
+// Task
+// ------------------------------------------------
+//
+// Replace all occurrences of FILL_XXX with appropriate code to make
+// the function return the expected value for the test case in main
+// following the below execution path:
+//
+//@ PATH: entry -> b0 -> b1 -> b2 -> entry -> b0 -> b1 -> b2 -> entry -> b0 -> exit
+//
+// ------------------------------------------------
+// Validation
+// ------------------------------------------------
+//
+// Use the following command to verify your solution:
+//
+//   ./puzzle/rypuzchk.py [this_puzzle_file].c [your_solution].c
+//
+// ------------------------------------------------
+// General Requirements
+// ------------------------------------------------
+//
+// 1. Each FILL_XXX mark must be filled out with a corresponding element.
+// 2. You have access to all common command line tools.
+// 3. Do NOT change any code except for the FILL_XXX marks.
+// 4. Do NOT introduce any new code, variables, or basic blocks.
+//
+// ------------------------------------------------
+// Requirements for FILL_CONST
+// ------------------------------------------------
+//
+// The lines below list every constant the FILL_CONST marks must carry, as
+// "<value> <count>" pairs. Across your whole solution each <value> must appear
+// in FILL_CONST positions exactly <count> times -- no more, no fewer -- and no
+// other constant may appear in any FILL_CONST position. Constants already shown
+// in the fixed (entry/exit) code do not count toward this budget.
+//
+//@ FILL_CONST: -1 1
+//@ FILL_CONST: -125 1
+//@ FILL_CONST: -136 1
+//@ FILL_CONST: -161 1
+//@ FILL_CONST: -19249 1
+//@ FILL_CONST: -2106 1
+//@ FILL_CONST: -2147483640 1
+//@ FILL_CONST: -32767 1
+//@ FILL_CONST: -398914 1
+//@ FILL_CONST: -44 1
+//@ FILL_CONST: 0 1
+//@ FILL_CONST: 2 2
+//@ FILL_CONST: 29069 1
+//@ FILL_CONST: 3 1
+//@ FILL_CONST: 3062288 1
+//@ FILL_CONST: 30664 1
+//@ FILL_CONST: 32767 1
+//@ FILL_CONST: 6088 1
+//@ FILL_CONST: 72 1
+//@ FILL_CONST: 77 1
+//@ FILL_CONST: 8 1
+//@ FILL_CONST: 9223372036854775806 1
+//
+//
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <float.h>
+#include <math.h>
+#include <string.h>
+
+#if !defined(__STDC_IEC_559__) || __STDC_IEC_559__ != 1
+# error "RefractIR-lowered C requires an IEC 60559 / IEEE 754 conforming "\
+          "implementation (compiler must predefine __STDC_IEC_559__ to 1)"
+#endif
+#if !defined(FLT_EVAL_METHOD) || FLT_EVAL_METHOD != 0
+# error "RefractIR-lowered C requires an implementation with FLT_EVAL_METHOD == 0, "\
+          "i.e., do not promote float into double or long double for evaluation"
+#endif
+#pragma STDC FP_CONTRACT OFF
+
+// vec-lowering: scalars
+
+typedef int16_t * _sym_arr_2_p_i16[2];
+
+static inline int32_t _check_chksum_i32(int32_t a0, int32_t a1) {
+  if (a0 != a1) {
+    fprintf(stderr, "@check_chksum mismatch: expected=%d actual=%d\n",
+            (int)a0, (int)a1);
+    abort();
+  }
+  return a1;
+}
+
+int32_t func_f29807_0(double pa0, float pa1, int32_t pa2);
+int32_t main(void);
+
+int32_t func_f29807_0(double pa0, float pa1, int32_t pa2) {
+  int8_t FILL_VAR[FILL_CONST] FILL_OP {FILL_CONST, FILL_CONST, FILL_CONST};
+  int16_t FILL_OP FILL_VAR[FILL_CONST] FILL_OP {0, 0};
+  int16_t FILL_VAR FILL_OP FILL_CONST;
+  int16_t FILL_VAR FILL_OP FILL_CONST;
+  int32_t FILL_VAR FILL_OP FILL_CONST;
+  int64_t FILL_VAR FILL_OP FILL_CONST;
+  int16_t FILL_OP FILL_VAR FILL_OP 0;
+  int16_t FILL_OP FILL_VAR FILL_OP 0;
+  int16_t FILL_OP FILL_OP FILL_VAR FILL_OP 0;
+  int16_t FILL_OP FILL_OP FILL_VAR FILL_OP 0;
+  _sym_arr_2_p_i16 FILL_OP FILL_VAR FILL_OP 0;
+  int32_t _chk = 0;
+entry: ;
+#ifdef DUMP_TRACE
+  printf("^entry:\n");
+#endif
+  p0 = ((&v0));
+  p1 = ((&v0));
+  pp0 = ((&p0));
+  pp1 = ((&p0));
+  ap0 = ((&a1));
+    ap0 = ((&a1));
+  if (((-2147483524) + (0 * pa2)) != ((0 * v2) - (0 * pa2))) goto b0;
+  else goto exit;
+b0: ;
+#ifdef DUMP_TRACE
+  printf("^b0:\n");
+#endif
+  FILL_VAR FILL_OP ((FILL_CONST) FILL_OP (FILL_CONST FILL_OP FILL_VAR));
+  if ((((FILL_TYPE)(FILL_CONST)) FILL_OP (FILL_CONST FILL_OP FILL_VAR)) FILL_OP (((FILL_TYPE)(FILL_CONST)) FILL_OP (FILL_OPFILL_VAR))) goto b1;
+  else goto exit;
+b1: ;
+#ifdef DUMP_TRACE
+  printf("^b1:\n");
+#endif
+  FILL_VAR FILL_OP (((FILL_TYPE)(FILL_CONST)) FILL_OP (FILL_CONST FILL_OP FILL_VAR));
+  goto b2;
+b2: ;
+#ifdef DUMP_TRACE
+  printf("^b2:\n");
+#endif
+  FILL_VAR FILL_OP (((FILL_TYPE)(FILL_CONST)) FILL_OP (FILL_OPFILL_VAR) FILL_OP (FILL_CONST FILL_OP FILL_VAR));
+    if (((FILL_OPFILL_VAR) FILL_OP (FILL_CONST FILL_OP FILL_VAR) FILL_OP (FILL_CONST)) FILL_OP ((FILL_CONST FILL_OP FILL_VAR) FILL_OP (FILL_CONST) FILL_OP (FILL_CONST))) goto exit;
+  else goto entry;
+exit: ;
+#ifdef DUMP_TRACE
+  printf("^exit:\n");
+#endif
+  _chk = ((0));
+  _chk = (((int32_t)((int64_t)((uint64_t)(a0[0]) << 56) >> 56)) + (_chk));
+  _chk = (((int32_t)((int64_t)((uint64_t)(a0[1]) << 56) >> 56)) + (_chk));
+  _chk = (((int32_t)((int64_t)((uint64_t)(a0[2]) << 56) >> 56)) + (_chk));
+  _chk = (((int32_t)((int64_t)((uint64_t)(v0) << 48) >> 48)) + (_chk));
+  _chk = (((int32_t)((int64_t)((uint64_t)(v1) << 48) >> 48)) + (_chk));
+  _chk = ((_chk) + (v2));
+  _chk = (((int32_t)(v3)) + (_chk));
+  _chk = (((int32_t)(pa0)) + (_chk));
+  _chk = (((int32_t)(pa1)) + (_chk));
+  _chk = ((_chk) + (pa2));
+  return ((_chk));
+}
+
+int32_t main(void) {
+  int32_t r = 0;
+entry: ;
+  r = ((func_f29807_0(((1679360.0000000002)), ((-2121728.0f)), ((382786)))));
+  r = ((_check_chksum_i32(((-28902)), ((r)))));
+  return ((0));
+}
+
+=>
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <float.h>
+#include <math.h>
+#include <string.h>
+
+#if !defined(__STDC_IEC_559__) || __STDC_IEC_559__ != 1
+# error "RefractIR-lowered C requires an IEC 60559 / IEEE 754 conforming "\
+          "implementation (compiler must predefine __STDC_IEC_559__ to 1)"
+#endif
+#if !defined(FLT_EVAL_METHOD) || FLT_EVAL_METHOD != 0
+# error "RefractIR-lowered C requires an implementation with FLT_EVAL_METHOD == 0, "\
+          "i.e., do not promote float into double or long double for evaluation"
+#endif
+#pragma STDC FP_CONTRACT OFF
+
+// vec-lowering: scalars
+
+typedef int16_t * _sym_arr_2_p_i16[2];
+
+static inline int32_t _check_chksum_i32(int32_t a0, int32_t a1) {
+  if (a0 != a1) {
+    fprintf(stderr, "@check_chksum mismatch: expected=%d actual=%d\n",
+            (int)a0, (int)a1);
+    abort();
+  }
+  return a1;
+}
+
+int32_t func_f29807_0(double pa0, float pa1, int32_t pa2);
+int32_t main(void);
+
+int32_t func_f29807_0(double pa0, float pa1, int32_t pa2) {
+  int8_t a0[3] = {-125, -44, 77};
+  int16_t * a1[2] = {0, 0};
+  int16_t v0 = -136;
+  int16_t v1 = 72;
+  int32_t v2 = -161;
+  int64_t v3 = 9223372036854775806;
+  int16_t * p0 = 0;
+  int16_t * p1 = 0;
+  int16_t * * pp0 = 0;
+  int16_t * * pp1 = 0;
+  _sym_arr_2_p_i16 * ap0 = 0;
+  int32_t _chk = 0;
+entry: ;
+#ifdef DUMP_TRACE
+  printf("^entry:\n");
+#endif
+  p0 = ((&v0));
+  p1 = ((&v0));
+  pp0 = ((&p0));
+  pp1 = ((&p0));
+  ap0 = ((&a1));
+    ap0 = ((&a1));
+  if (((-2147483524) + (0 * pa2)) != ((0 * v2) - (0 * pa2))) goto b0;
+  else goto exit;
+b0: ;
+#ifdef DUMP_TRACE
+  printf("^b0:\n");
+#endif
+  v2 = ((3062288) - (8 * pa2));
+  if ((((int16_t)(-32767)) + (30664 & v0)) > (((int16_t)(-2106)) - (~v0))) goto b1;
+  else goto exit;
+b1: ;
+#ifdef DUMP_TRACE
+  printf("^b1:\n");
+#endif
+  v1 = (((int16_t)(29069)) + (2 * v0));
+  goto b2;
+b2: ;
+#ifdef DUMP_TRACE
+  printf("^b2:\n");
+#endif
+  v0 = (((int16_t)(32767)) + (~v1) - (6088 & v1));
+    if (((~pa2) + (-19249 * v2) - (-398914)) >= ((0 * v2) - (-2147483640) - (-1))) goto exit;
+  else goto entry;
+exit: ;
+#ifdef DUMP_TRACE
+  printf("^exit:\n");
+#endif
+  _chk = ((0));
+  _chk = (((int32_t)((int64_t)((uint64_t)(a0[0]) << 56) >> 56)) + (_chk));
+  _chk = (((int32_t)((int64_t)((uint64_t)(a0[1]) << 56) >> 56)) + (_chk));
+  _chk = (((int32_t)((int64_t)((uint64_t)(a0[2]) << 56) >> 56)) + (_chk));
+  _chk = (((int32_t)((int64_t)((uint64_t)(v0) << 48) >> 48)) + (_chk));
+  _chk = (((int32_t)((int64_t)((uint64_t)(v1) << 48) >> 48)) + (_chk));
+  _chk = ((_chk) + (v2));
+  _chk = (((int32_t)(v3)) + (_chk));
+  _chk = (((int32_t)(pa0)) + (_chk));
+  _chk = (((int32_t)(pa1)) + (_chk));
+  _chk = ((_chk) + (pa2));
+  return ((_chk));
+}
+
+int32_t main(void) {
+  int32_t r = 0;
+entry: ;
+  r = ((func_f29807_0(((1679360.0000000002)), ((-2121728.0f)), ((382786)))));
+  r = ((_check_chksum_i32(((-28902)), ((r)))));
+  return ((0));
+}
