@@ -474,6 +474,9 @@ class BenchmarkRunner:
       if container_name in self._containers:
         self._containers.remove(container_name)
 
+    if self._stop:
+      return {"puzzle_id": puzzle_idx, "verdict": Verdict.INCOMPLETE_CANCELLED}
+
     # Analyze the result
     analysis = self._analyze_puzzle(puzzle_idx, elapsed, timed_out=timed_out)
 
