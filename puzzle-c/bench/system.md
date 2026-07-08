@@ -34,7 +34,7 @@ That also said, avoid generating the solution file before you solve the puzzle s
 
 Use the checker to verify your solution:
 ```bash
-python3 ./tools/rypuzchk.py {{PUZZLE_FILE}} {{SOLUTION_FILE}}
+./tools/rypuzchk-c {{PUZZLE_FILE}} {{SOLUTION_FILE}}
 ```
 
 `[PASS]` means your solution is correct. `[FAIL]` means something is wrong — read the error message.

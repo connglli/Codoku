@@ -25,7 +25,7 @@
 //
 // Use the following command to verify your solution:
 //
-//   ./puzzle/rypuzchk.py [this_puzzle_file].c [your_solution].c
+//   ./tools/rypuzchk-c [this_puzzle_file].c [your_solution].c
 //
 // ------------------------------------------------
 // General Requirements
