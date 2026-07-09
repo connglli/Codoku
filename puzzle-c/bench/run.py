@@ -91,10 +91,15 @@ def fatal(msg: str) -> None:
 
 
 def sha1_file(path: Path) -> str:
+  import re
+
   h = hashlib.sha1()
   with open(path, "rb") as f:
-    for chunk in iter(lambda: f.read(8192), b""):
-      h.update(chunk)
+    content = f.read()
+  # Conservatively removing all spaces.
+  # This is safe since we don't support strings and comments don't matter.
+  clean_content = re.sub(b"\s+", b"", content)
+  h.update(clean_content)
   return h.hexdigest()
 
 
