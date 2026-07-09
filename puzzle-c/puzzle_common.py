@@ -413,7 +413,7 @@ def collect_replacements(
 
   if node.type == "goto_statement":
     for child in node.children:
-      if child.type == "identifier":
+      if child.type in ("identifier", "statement_identifier"):
         replacements.append((child.start_byte, child.end_byte, "FILL_LABEL"))
         return
 
