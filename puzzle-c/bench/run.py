@@ -550,12 +550,6 @@ class BenchmarkRunner:
       "elapsed_seconds": round(elapsed, 2),
     }
 
-    # If the container timed out, mark it as TIMEOUT
-    if timed_out:
-      analysis["verdict"] = Verdict.COMPLETED_TIMEOUT
-      analysis.update(analyzers.parse_trajectory(self.agent, trajectory_file))
-      return analysis
-
     # Parse trajectory for token/cost/round stats
     traj_stats = analyzers.parse_trajectory(self.agent, trajectory_file)
 
@@ -566,6 +560,12 @@ class BenchmarkRunner:
       analysis["verdict"] = Verdict.INCOMPLETE_ERROR
       analysis["error"] = "Agent failed to complete (empty trajectory)"
       analysis.update(traj_stats)
+      return analysis
+
+    # If the container timed out, mark it as TIMEOUT
+    if timed_out:
+      analysis["verdict"] = Verdict.COMPLETED_TIMEOUT
+      analysis.update(analyzers.parse_trajectory(self.agent, trajectory_file))
       return analysis
 
     # 1. Check if solution.c exists
