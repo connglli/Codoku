@@ -65,7 +65,17 @@ AGENTS = {
 class Verdict(str, Enum):
   # Completed verdicts
   COMPLETED_PASS = "PASS"  # Solution is valid and passed all checks
-  COMPLETED_FAIL = "FAIL"  # Solution is invalid/wrong
+  # Granular failure verdicts — ordered from easiest to hardest stage:
+  COMPLETED_FAIL_BASICS = "FAIL_BASICS"  # Stage 1: basics failure
+  COMPLETED_FAIL_REMASKING = "FAIL_REMASKING"  # Stage 2: re-masked skeleton mismatch
+  COMPLETED_FAIL_PARSE = "FAIL_PARSE"  # Stage 3: solution not compilable/parseable
+  COMPLETED_FAIL_CFG = "FAIL_CFG"  # Stage 4: CFG topology wrong
+  COMPLETED_FAIL_PATH = "FAIL_PATH"  # Stage 5: wrong execution path
+  COMPLETED_FAIL_OUTPUT = "FAIL_OUTPUT"  # Stage 6: wrong output (checksum)
+  COMPLETED_FAIL_FILL_CONST = "FAIL_FILL_CONST"  # Stage 7: constant budget mismatch
+  COMPLETED_FAIL_OTHERS = (
+    "FAIL_OTHERS"  # Other failures (checker did not emit a stage tag)
+  )
   COMPLETED_TIMEOUT = "TIMEOUT"  # Agent timed out; treated as no solutions
   COMPLETED_NO_SOLUTION = "NO_SOLUTION"  # Agent finished but produced no solution.c
   COMPLETED_CHEAT = "CHEAT"  # Agent modified the puzzle.c file (tampering detected)
@@ -73,6 +83,29 @@ class Verdict(str, Enum):
   INCOMPLETE_CANCELLED = "CANCELLED"  # Agent execution was cancelled (e.g. SIGINT)
   INCOMPLETE_ERROR = "ERROR"  # Internal or checker script error
   INCOMPLETE_PENDING = "PENDING"  # Puzzle is queued/waiting to be run
+
+
+# Map checker output tags to Verdict values.
+# Note: Check failures first so that [PASS] doesn't shadow any FAIL tags in the output.
+_CHECKER_TAG_TO_VERDICT: dict[str, Verdict] = {
+  "[FAIL_BASICS]": Verdict.COMPLETED_FAIL_BASICS,
+  "[FAIL_REMASKING]": Verdict.COMPLETED_FAIL_REMASKING,
+  "[FAIL_PARSE]": Verdict.COMPLETED_FAIL_PARSE,
+  "[FAIL_CFG]": Verdict.COMPLETED_FAIL_CFG,
+  "[FAIL_PATH]": Verdict.COMPLETED_FAIL_PATH,
+  "[FAIL_OUTPUT]": Verdict.COMPLETED_FAIL_OUTPUT,
+  "[FAIL_FILL_CONST]": Verdict.COMPLETED_FAIL_FILL_CONST,
+  "[FAIL_OTHERS]": Verdict.COMPLETED_FAIL_OTHERS,
+  "[PASS]": Verdict.COMPLETED_PASS,
+}
+
+
+def verdict_from_checker_output(output: str) -> Verdict:
+  """Derive a granular Verdict from the combined stdout+stderr of rypuzchk."""
+  for tag, verdict in _CHECKER_TAG_TO_VERDICT.items():
+    if tag in output:
+      return verdict
+  return Verdict.COMPLETED_FAIL_OTHERS
 
 
 # ---------------------------------------------------------------------------
@@ -376,7 +409,14 @@ class BenchmarkRunner:
             data = json.load(f)
             verdict = data.get("verdict")
             if verdict in (
-              Verdict.COMPLETED_FAIL,
+              Verdict.COMPLETED_FAIL_BASICS,
+              Verdict.COMPLETED_FAIL_REMASKING,
+              Verdict.COMPLETED_FAIL_PARSE,
+              Verdict.COMPLETED_FAIL_CFG,
+              Verdict.COMPLETED_FAIL_PATH,
+              Verdict.COMPLETED_FAIL_OUTPUT,
+              Verdict.COMPLETED_FAIL_FILL_CONST,
+              Verdict.COMPLETED_FAIL_OTHERS,
               Verdict.COMPLETED_PASS,
               Verdict.COMPLETED_NO_SOLUTION,
               Verdict.COMPLETED_TIMEOUT,
@@ -569,22 +609,17 @@ class BenchmarkRunner:
         timeout=60,
       )
       chk_stdout = chk_result.stdout + chk_result.stderr
-      passed = "[PASS]" in chk_stdout
     except subprocess.TimeoutExpired:
-      passed = False
       chk_stdout = "rypuzchk-c timed out"
     except Exception as e:
-      passed = False
       chk_stdout = str(e)
 
     analysis["checker_output"] = chk_stdout.strip()
 
-    # 4. Verdict
-    if passed:
-      analysis["verdict"] = Verdict.COMPLETED_PASS
-    else:
-      analysis["verdict"] = Verdict.COMPLETED_FAIL
-    log(f"  - checker_passed={passed} ({chk_stdout.strip()})")
+    # 4. Verdict — derived from the tagged output of rypuzchk-c.
+    verdict = verdict_from_checker_output(chk_stdout)
+    analysis["verdict"] = verdict
+    log(f"  - verdict={verdict.value} ({chk_stdout.strip()})")
 
     # 5. Parse trajectory for token/cost/round stats (decoupled via analyzers)
     analysis.update(traj_stats)
@@ -626,10 +661,28 @@ def compute_summary(
   counts: dict[str, int] = {v: 0 for v in Verdict}
   for r in results:
     v = r.get("verdict")
-    counts[v] = counts.get(v) + 1
+    counts[v] = counts.get(v, 0) + 1
 
   passed = counts.get(Verdict.COMPLETED_PASS, 0)
-  failed = counts.get(Verdict.COMPLETED_FAIL, 0)
+  # All granular FAIL_XXX variants plus other FAILs count as failures.
+  fail_basics = counts.get(Verdict.COMPLETED_FAIL_BASICS, 0)
+  fail_remasking = counts.get(Verdict.COMPLETED_FAIL_REMASKING, 0)
+  fail_parse = counts.get(Verdict.COMPLETED_FAIL_PARSE, 0)
+  fail_cfg = counts.get(Verdict.COMPLETED_FAIL_CFG, 0)
+  fail_path = counts.get(Verdict.COMPLETED_FAIL_PATH, 0)
+  fail_output = counts.get(Verdict.COMPLETED_FAIL_OUTPUT, 0)
+  fail_fill_const = counts.get(Verdict.COMPLETED_FAIL_FILL_CONST, 0)
+  fail_others = counts.get(Verdict.COMPLETED_FAIL_OTHERS, 0)
+  failed = (
+    fail_basics
+    + fail_remasking
+    + fail_parse
+    + fail_cfg
+    + fail_path
+    + fail_output
+    + fail_fill_const
+    + fail_others
+  )
   cheated = counts.get(Verdict.COMPLETED_CHEAT, 0)
   no_solution = counts.get(Verdict.COMPLETED_NO_SOLUTION, 0)
   timeouts = counts.get(Verdict.COMPLETED_TIMEOUT, 0)
@@ -666,7 +719,16 @@ def compute_summary(
   summary = {
     "total_puzzles": total,
     "pass": passed,
-    "fail": failed,
+    # Granular failure breakdown:
+    "fail_basics": fail_basics,
+    "fail_remasking": fail_remasking,
+    "fail_parse": fail_parse,
+    "fail_cfg": fail_cfg,
+    "fail_path": fail_path,
+    "fail_output": fail_output,
+    "fail_fill_const": fail_fill_const,
+    "fail_others": fail_others,
+    "fail": failed,  # total of all fail variants
     "cheat": cheated,
     "no_solution": no_solution,
     "timeout": timeouts,
@@ -715,7 +777,16 @@ def print_summary_table(summary: dict[str, Any]) -> None:
   print(f"  {'-' * 3}")
   print(f"  {'Passed':<30} {summary['pass']:>15}")
   print(f"  {'-' * 3}")
-  print(f"  {'Failed':<30} {summary['fail']:>15}")
+  # Granular failure breakdown (easiest → hardest stage):
+  print(f"  {'Failed (total)':<30} {summary['fail']:>15}")
+  print(f"  {'  ↳ fail_basics':<30} {summary.get('fail_basics', 0):>15}")
+  print(f"  {'  ↳ fail_remasking':<30} {summary.get('fail_remasking', 0):>15}")
+  print(f"  {'  ↳ fail_parse':<30} {summary.get('fail_parse', 0):>15}")
+  print(f"  {'  ↳ fail_cfg':<30} {summary.get('fail_cfg', 0):>15}")
+  print(f"  {'  ↳ fail_path':<30} {summary.get('fail_path', 0):>15}")
+  print(f"  {'  ↳ fail_output':<30} {summary.get('fail_output', 0):>15}")
+  print(f"  {'  ↳ fail_fill_const':<30} {summary.get('fail_fill_const', 0):>15}")
+  print(f"  {'  ↳ fail_others':<30} {summary.get('fail_others', 0):>15}")
   print(f"  {'Cheated':<30} {summary['cheat']:>15}")
   print(f"  {'No solution':<30} {summary['no_solution']:>15}")
   print(f"  {'Timeouts':<30} {summary['timeout']:>15}")

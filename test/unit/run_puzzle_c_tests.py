@@ -1,7 +1,7 @@
 """End-to-end tests for the puzzle tooling (rypuzmk / rypuzchk).
 
 rypuzmk masks a rysmith-generated C function into a puzzle (FILL_XXX marks plus
-an instruction banner with machine-readable `//@ PATH:` / `//@ FILL_CONST:`
+an instruction banner with machine-readable `//@ EXEC_PATH:` / `//@ CFG_EDGE:` / `//@ FILL_CONST:`
 markers); rypuzchk validates a candidate solution against that puzzle.
 
 These tests assert the invariants the two tools must jointly uphold:
@@ -164,7 +164,8 @@ def main():
     gt_text = open(base_gt).read()
 
     # (2) machine-readable markers present
-    check("banner has //@ PATH marker", "//@ PATH:" in puzzle_text)
+    check("banner has //@ EXEC_PATH marker", "//@ EXEC_PATH:" in puzzle_text)
+    check("banner has //@ CFG_EDGE marker", "//@ CFG_EDGE:" in puzzle_text)
     check("banner has //@ FILL_CONST markers", "//@ FILL_CONST:" in puzzle_text)
 
     # (3) require/assume dropped from both puzzle and ground truth
@@ -180,8 +181,12 @@ def main():
     )
 
     # (4) a solution that still contains FILL marks is rejected
-    passed, _ = chk(rypuzchk, base_puzzle, base_puzzle)
-    check("puzzle-as-solution rejected (unfilled FILL marks)", not passed)
+    passed, out = chk(rypuzchk, base_puzzle, base_puzzle)
+    check(
+      "puzzle-as-solution rejected with FAIL_BASICS",
+      not passed and "[FAIL_BASICS]" in out,
+      out,
+    )
 
     # (5a) deleting a masked statement is rejected
     idx = first_body_stmt_line(gt_text)
@@ -192,14 +197,22 @@ def main():
       with open(del_path, "w") as f:
         f.writelines(lines[:idx] + lines[idx + 1 :])
       passed, out = chk(rypuzchk, base_puzzle, del_path)
-      check("deleted masked statement rejected", not passed)
+      check(
+        "deleted masked statement rejected with FAIL_REMASKING",
+        not passed and "[FAIL_REMASKING]" in out,
+        out,
+      )
 
       # (5b) duplicating a masked statement is rejected
       dup_path = os.path.join(outdir, "mut_dup.c")
       with open(dup_path, "w") as f:
         f.writelines(lines[:idx] + [lines[idx], lines[idx]] + lines[idx + 1 :])
       passed, out = chk(rypuzchk, base_puzzle, dup_path)
-      check("duplicated masked statement rejected", not passed)
+      check(
+        "duplicated masked statement rejected with FAIL_REMASKING",
+        not passed and "[FAIL_REMASKING]" in out,
+        out,
+      )
 
     # (6) changing a budgeted constant to an off-budget value is rejected
     m = re.search(r"//@ FILL_CONST:\s*(-?\d{2,})\s+\d+", puzzle_text)
@@ -217,7 +230,139 @@ def main():
         with open(off_path, "w") as f:
           f.write(new_gt)
         passed, out = chk(rypuzchk, base_puzzle, off_path)
-        check("off-budget constant rejected", not passed)
+        # Note: mutating a constant used in computation affects final checksum, so it fails at FAIL_OUTPUT or FAIL_PATH.
+        check(
+          "perturbed constant rejected with FAIL_OUTPUT or FAIL_PATH",
+          not passed and any(tag in out for tag in ["[FAIL_OUTPUT]", "[FAIL_PATH]"]),
+          out,
+        )
+
+        # Stage validation: FAIL_PARSE (leaf function malformed/not found in C)
+        parse_path = os.path.join(outdir, "mut_parse_error.c")
+        err_syntax_gt = re.sub(r"\bfunc_", "_func_", gt_text)
+        with open(parse_path, "w") as f:
+          f.write(err_syntax_gt)
+        passed, out = chk(rypuzchk, base_puzzle, parse_path)
+        check(
+          "syntax error inside mask rejected with FAIL_PARSE",
+          not passed and "[FAIL_PARSE]" in out,
+          out,
+        )
+
+        # Stage validation: FAIL_COMPILE (compilation error inside a mask position in C)
+        compile_path = os.path.join(outdir, "mut_compile_error.c")
+        err_compile_gt = re.sub(
+          r"(?<!\d)" + re.escape(val) + r"(?!\d)", "09", gt_text, count=1
+        )
+        with open(compile_path, "w") as f:
+          f.write(err_compile_gt)
+        passed, out = chk(rypuzchk, base_puzzle, compile_path)
+        check(
+          "compilation error inside mask rejected with FAIL_COMPILE",
+          not passed and "[FAIL_COMPILE]" in out,
+          out,
+        )
+
+    # Stage validation: FAIL_FILL_CONST (decrement budget count in banner)
+    m_fill = re.search(r"(//@ FILL_CONST:\s*-?\d+\s+)(\d+)", puzzle_text)
+    if m_fill:
+      cnt = int(m_fill.group(2))
+      if cnt >= 1:
+        mut_puz = (
+          puzzle_text[: m_fill.start(2)] + str(cnt - 1) + puzzle_text[m_fill.end(2) :]
+        )
+        puz_path = os.path.join(outdir, "mut_budget_puz.c")
+        with open(puz_path, "w") as f:
+          f.write(mut_puz)
+        passed, out = chk(rypuzchk, puz_path, base_gt)
+        check(
+          "reduced budget rejected with FAIL_FILL_CONST",
+          not passed and "[FAIL_FILL_CONST]" in out,
+          out,
+        )
+
+    # Stage validation: FAIL_CFG (altered CFG destination in intermediate block)
+    parts = re.split(r"(\b\w+:)", gt_text)
+    mutated = False
+    for i in range(1, len(parts), 2):
+      header = parts[i]
+      body = parts[i + 1]
+      if "entry" in header or "exit" in header:
+        continue
+      m_goto = re.search(r"(\bgoto\s+)(\w+)", body)
+      if m_goto:
+        mut_body = body[: m_goto.start(2)] + "exit" + body[m_goto.end(2) :]
+        parts[i + 1] = mut_body
+        mutated = True
+        break
+    if mutated:
+      cfg_path = os.path.join(outdir, "mut_cfg.c")
+      with open(cfg_path, "w") as f:
+        f.write("".join(parts))
+      passed, out = chk(rypuzchk, base_puzzle, cfg_path)
+      check(
+        "altered CFG destination rejected with FAIL_CFG",
+        not passed and "[FAIL_CFG]" in out,
+        out,
+      )
+
+    # Stage validation: FAIL_PATH (swapped conditional branch destinations in intermediate block)
+    parts = re.split(r"(\b\w+:)", gt_text)
+    mutated = False
+    for i in range(1, len(parts), 2):
+      header = parts[i]
+      body = parts[i + 1]
+      if "entry" in header or "exit" in header:
+        continue
+      m_if = re.search(
+        r"(if\s*\(.*?\)\s*goto\s+)(\w+)(;\s*else\s*goto\s+)(\w+)(;)", body
+      )
+      if m_if:
+        swapped_body = (
+          body[: m_if.start(2)]
+          + m_if.group(4)
+          + body[m_if.end(2) : m_if.start(4)]
+          + m_if.group(2)
+          + body[m_if.end(4) :]
+        )
+        parts[i + 1] = swapped_body
+        mutated = True
+        break
+    if mutated:
+      path_path = os.path.join(outdir, "mut_path.c")
+      with open(path_path, "w") as f:
+        f.write("".join(parts))
+      passed, out = chk(rypuzchk, base_puzzle, path_path)
+      check(
+        "swapped conditional branch destinations rejected with FAIL_PATH",
+        not passed and "[FAIL_PATH]" in out,
+        out,
+      )
+
+    # Stage validation: FAIL_OUTPUT (swap two budgeted constants inside leaf function)
+    const_vals = re.findall(r"//@ FILL_CONST:\s*(\S+)", puzzle_text)
+    distinct_ints = sorted(
+      list(set([v for v in const_vals if re.match(r"^-?\d+$", v)]))
+    )
+    if len(distinct_ints) >= 2:
+      v1, v2 = distinct_ints[0], distinct_ints[1]
+      funcs = re.split(r"(\b(?:uint32_t|int|void)\s+func_\w+)", gt_text)
+      if len(funcs) >= 3:
+        swapped_body = re.sub(
+          r"(?<!\w)" + re.escape(v1) + r"(?!\w)", "__TEMP_VAL__", funcs[2]
+        )
+        swapped_body = re.sub(r"(?<!\w)" + re.escape(v2) + r"(?!\w)", v1, swapped_body)
+        swapped_body = swapped_body.replace("__TEMP_VAL__", v2)
+        funcs[2] = swapped_body
+        out_path = os.path.join(outdir, "mut_output.c")
+        with open(out_path, "w") as f:
+          f.write("".join(funcs))
+        passed, out = chk(rypuzchk, base_puzzle, out_path)
+        check(
+          "swapped budgeted constants rejected with FAIL_OUTPUT",
+          not passed and "[FAIL_OUTPUT]" in out,
+          out,
+        )
 
     # (7) --p-mask selective masking.
     full_fill = body_fill_count(puzzle_text)

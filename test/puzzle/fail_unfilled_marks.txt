@@ -4,12 +4,7 @@
 //
 // @func_8391ca_0() is a function of the following CFG:
 //
-//   entry -> b0
-//   b0 -> b1 exit
-//   b1 -> b2 entry
-//   b2 -> exit
-//   exit
-//
+//@ CFG_EDGE: entry -> b0
 // ------------------------------------------------
 // Task
 // ------------------------------------------------
@@ -18,7 +13,7 @@
 // the function return the expected value for the test case in @main
 // following the below execution path:
 //
-//@ PATH: entry -> b0 -> b1 -> entry -> b0 -> b1 -> entry -> b0 -> b1 -> b2 -> exit
+//@ EXEC_PATH: entry -> b0 -> b1 -> entry -> b0 -> b1 -> entry -> b0 -> b1 -> b2 -> exit
 //
 // ------------------------------------------------
 // Validation
@@ -187,7 +182,7 @@ intrinsic @check_chksum(%expected: i32, %actual: i32) : i32;
 // the function return the expected value for the test case in @main
 // following the below execution path:
 //
-//@ PATH: entry -> b0 -> b1 -> entry -> b0 -> b1 -> entry -> b0 -> b1 -> b2 -> exit
+//@ EXEC_PATH: entry -> b0 -> b1 -> entry -> b0 -> b1 -> entry -> b0 -> b1 -> b2 -> exit
 //
 // ------------------------------------------------
 // Validation

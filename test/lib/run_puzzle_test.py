@@ -5,7 +5,7 @@ verbatim puzzle, a ``=>`` separator line, and one candidate solution:
 
     // EXPECT: PASS              (or FAIL)
     // DESC: <one-line note>
-    <verbatim puzzle>           rypuzmk output, incl. the //@ PATH / //@
+    <verbatim puzzle>           rypuzmk output, incl. the //@ EXEC_PATH / //@
     ...                         FILL_CONST banner the checker consumes
     =>
     <verbatim solution>         a full .sir program

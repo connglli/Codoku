@@ -13,8 +13,8 @@ That also said, avoid generating the solution file before you solve the puzzle s
 ## How to Read the Puzzle
 
 1. Read the puzzle file. Pay attention to:
-   - The **CFG** (control-flow graph) at the top
-   - The **execution path** (`//@ PATH: ...`)
+   - The **CFG** (control-flow graph, `//@ CFG_EDGE`) at the top
+   - The **execution path** (`//@ EXEC_PATH: ...`)
    - The **FILL_CONST budget** (`//@ FILL_CONST: <value> <count>` lines)
    - The **mask marks**: `FILL_VAR`, `FILL_CONST`, `FILL_OP`, `FILL_TYPE`, `FILL_LABEL`, `FILL_FUNC`, `FILL_FIELD`
 

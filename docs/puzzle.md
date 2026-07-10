@@ -71,11 +71,13 @@ authoritative, stable interface between the two tools — the surrounding prose
 can change freely:
 
 ```
-//@ PATH: entry -> b0 -> b1 -> ... -> exit
+//@ EXEC_PATH: entry -> b0 -> b1 -> ... -> exit
+//@ CFG_EDGE: A -> B
 //@ FILL_CONST: <value> <count>
 ```
 
-`//@ PATH:` is the prescribed leaf execution path. Each `//@ FILL_CONST:` line
+`//@ EXEC_PATH:` is the prescribed leaf execution path. Each `//@ CFG_EDGE:` line
+declares a directed edge in the control flow graph. Each `//@ FILL_CONST:` line
 is one entry of the constant budget (see §3).
 
 ### `require` / `assume` are dropped
@@ -106,38 +108,26 @@ The leaf's `^exit` block folds the **final values of every observable variable**
 into a CRC via `@crc32_update`, and `@check_chksum` **aborts** (non-zero exit)
 when the result does not match the embedded expected value. Therefore:
 
-> A solution is *correct* iff `symiri` runs it to completion **and** it follows
-> the prescribed path **and** it respects the `FILL_CONST` budget **and** it
-> re-masks to the same skeleton.
+> A solution is *correct* iff it passes all checker validation stages in order.
 
 This is the operational definition the checker enforces. It is **not** "recover
-the exact original source": several different fills can satisfy all four
-conditions (see §4).
+the exact original source": several different fills can satisfy all conditions
+(see §4).
 
 ---
 
 ## 3. What `rypuzchk` checks
 
-Given `rypuzchk <puzzle.sir> <solution.sir>`, in order:
+Given `rypuzchk <puzzle.sir> <solution.sir>`, the validator performs checks in order, from easiest to hardest:
 
-1. **Parse** the puzzle banner (PATH + FILL_CONST markers) and the solution.
-   A missing `//@ PATH:` marker is a hard error.
-2. **Execute** the solution with `symiri --dump-trace` in a single run. A
-   non-zero exit (UB, or a `check_chksum` mismatch) ⇒ `[FAIL]`. This is the
-   correctness oracle.
-3. **Path**: drop `@main`'s leading block(s) from the trace and require the
-   remaining leaf path to equal `//@ PATH:` exactly (loop counts included).
-4. **`FILL_CONST` budget**: collect the multiset of constants that appear in
-   *masked positions* of the solution and require it to equal the budget
-   exactly — every listed value at its exact count, and **no** off-budget
-   constant in any masked position. However, when no such constants exist,
-   the budget is empty and the solution may use any constants in masked positions.
-   Such puzzles can be generated via `--lift-consts` of `rypuzmk`.
-5. **Intrinsics**: every declared intrinsic must be called somewhere.
-6. **Structural integrity**: re-mask the solution and require it to match the
-   puzzle skeleton byte-for-byte (modulo comments and whitespace). This is the
-   anti-cheating check — it rejects edits outside the `FILL_XXX` marks, new
-   variables, added/removed statements, and added/removed basic blocks.
+1. **Basics (FAIL_BASICS)**: load the puzzle and solution, verify banner requirements (`//@ EXEC_PATH` and `//@ CFG_EDGE`), and verify that the solution contains no unfilled `FILL_XXX` marks.
+2. **Re-masking (FAIL_REMASKING)**: re-mask the solution and require it to match the puzzle skeleton byte-for-byte (modulo comments and whitespace). This is the anti-cheating check.
+3. **Parse/Compile (FAIL_PARSE)**: parse the solution (to AST) and/or compile it (with gcc) to verify that it is a valid, compilable program.
+4. **CFG (FAIL_CFG)**: build the solution's CFG and verify that its edge set matches the declared `//@ CFG_EDGE:` markers exactly. This ensures branch targets in `FILL_LABEL` are topologically correct before execution.
+5. **Path (FAIL_PATH)**: execute the solution and require the trace to match the expected path exactly.
+6. **Output (FAIL_OUTPUT)**: check that the exit code is 0 (check_chksum and correctness check passed).
+7. **`FILL_CONST` budget (FAIL_FILL_CONST)**: verify that the constant budget matches the budget declared in the banner exactly.
+8. **Intrinsics**: every declared intrinsic must be called somewhere (validated under structural integrity / re-masking).
 
 ### The `FILL_CONST` budget, precisely
 

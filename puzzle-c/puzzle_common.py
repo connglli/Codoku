@@ -474,3 +474,70 @@ def apply_replacements(src_bytes: bytes, replacements: list) -> bytes:
   for start, end, repl in valid_repls:
     res[start:end] = repl.encode("utf-8")
   return bytes(res)
+
+
+def build_goto_successors(func_node, src: bytes) -> dict[str, set[str]]:
+  """Extract the goto-level successor map for each labeled block in *func_node*.
+
+  For each C label ``A:`` in the leaf function body, we collect all goto
+  targets that are reachable from A before the next labeled block begins.
+  This gives a conservative CFG: any goto target found in a block's span is
+  treated as a direct successor, regardless of whether the branch is
+  conditional.
+
+  .. note::
+     This implementation assumes there is no implicit fall-through between
+     adjacent labeled blocks (i.e. every block exits via an explicit goto).
+     This assumption currently holds for all rysmith-generated outputs.
+
+  Returns ``{block_label: {successor_labels...}}``.
+  """
+  body = func_node.child_by_field_name("body")
+  if not body:
+    return {}
+
+  # Collect labeled-statement nodes in order.
+  labeled_stmts = [c for c in body.children if c.type == "labeled_statement"]
+  if not labeled_stmts:
+    return {}
+
+  # Build a map from label name → (start_byte, end_byte) of that block's span.
+  label_spans: list[tuple[str, int, int]] = []
+  for i, ls in enumerate(labeled_stmts):
+    # The label name is the first identifier/statement_identifier child.
+    label_name = None
+    for child in ls.children:
+      if child.type in ("identifier", "statement_identifier"):
+        label_name = src[child.start_byte : child.end_byte].decode("utf-8")
+        break
+    if label_name is None:
+      continue
+    span_start = ls.start_byte
+    span_end = (
+      labeled_stmts[i + 1].start_byte if i + 1 < len(labeled_stmts) else body.end_byte
+    )
+    label_spans.append((label_name, span_start, span_end))
+
+  # Extract all goto targets from a byte range of the source.
+  def _gotos_in_range(start: int, end: int) -> set[str]:
+    targets: set[str] = set()
+    # Walk all nodes in the tree to find goto_statement nodes in range.
+    stack = [body]
+    while stack:
+      node = stack.pop()
+      if node.start_byte >= end or node.end_byte <= start:
+        continue
+      if node.type == "goto_statement":
+        for child in node.children:
+          if child.type in ("identifier", "statement_identifier"):
+            targets.add(src[child.start_byte : child.end_byte].decode("utf-8"))
+            break
+      else:
+        stack.extend(node.children)
+    return targets
+
+  succs: dict[str, set[str]] = {}
+  for label_name, span_start, span_end in label_spans:
+    succs[label_name] = _gotos_in_range(span_start, span_end)
+
+  return succs

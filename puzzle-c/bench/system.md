@@ -13,12 +13,12 @@ That also said, avoid generating the solution file before you solve the puzzle s
 ## How to Read the Puzzle
 
 1. Read the puzzle file. Pay attention to:
-   - The **CFG** (control-flow graph) at the top — shows which basic blocks exist and how they connect
-   - The **execution path** (`//@ PATH: ...`) — the exact sequence of basic blocks that must execute
+   - The **CFG** (control-flow graph, `//@ CFG_EDGE: ...`) at the top — shows which basic blocks exist and how they connect
+   - The **execution path** (`//@ EXEC_PATH: ...`) — the exact sequence of basic blocks that must execute
    - The **FILL_CONST budget** (`//@ FILL_CONST: <value> <count>` lines) — constants you must use
    - The **mask marks**: `FILL_VAR`, `FILL_CONST`, `FILL_OP`, `FILL_TYPE`, `FILL_LABEL`, `FILL_FUNC`, `FILL_FIELD`
 
-2. The function body uses labeled C `goto`-based basic blocks (e.g. `entry:`, `b0:`, `exit:`). The PATH tells you which `goto` targets are taken.
+2. The function body uses labeled C `goto`-based basic blocks (e.g. `entry:`, `b0:`, `exit:`). The EXEC_PATH tells you which `goto` targets are taken.
 
 ## How to Fill in the Blanks
 
@@ -54,11 +54,11 @@ gcc -O0 -DDUMP_TRACE {{SOLUTION_FILE}} -o /tmp/sol -lm && /tmp/sol
 
 ## Strategy Tips
 
-- Read the CFG and PATH carefully — they tell you the control flow.
+- Read the CFG and EXEC_PATH carefully — they tell you the control flow.
 - Map out all local variables and their types from the declarations at the top of the function.
 - Trace the execution path block by block, reasoning about what each statement must compute.
 - For each `FILL_CONST`, use the budget (`//@ FILL_CONST:` lines) to constrain your choices.
-- Use the checker (`./tools/rypuzchk`) for the definitive pass/fail verdict.
+- Use the checker (`./tools/rypuzchk-c`) for the definitive pass/fail verdict.
 - If the checker fails with a path mismatch, the `goto` targets are wrong — revisit `FILL_LABEL` marks.
 - If the checker fails with a structural integrity error, you changed something outside the blanks.
 - If the checker fails with a FILL_CONST budget error, you used the wrong constant value or count.

@@ -10,7 +10,7 @@ puzzle checker (`rypuzchk`). The runner is
 ```
 // EXPECT: PASS            (or FAIL)
 // DESC: <one-line note on what this case exercises>
-<verbatim puzzle>          rypuzmk output, including the //@ PATH /
+<verbatim puzzle>          rypuzmk output, including the //@ EXEC_PATH /
 ...                        //@ FILL_CONST banner the checker consumes
 =>
 <verbatim solution>        a full .sir program
@@ -45,7 +45,7 @@ Rejected (`EXPECT: FAIL`), one per correctness criterion:
 |------|-----------|
 | `fail_wrong_value.txt`        | **correctness** — a structurally/budget-valid fill that reads the wrong variable; `check_chksum` rejects the result |
 | `fail_unfilled_marks.txt`     | **parse** — a solution that still contains `FILL_XXX` marks |
-| `fail_wrong_path.txt`         | **path** — swapped branch labels divert execution off the required `//@ PATH` (the divergence also changes the result) |
+| `fail_wrong_path.txt`         | **path** — swapped branch labels divert execution off the required `//@ EXEC_PATH` (the divergence also changes the result) |
 | `fail_rename_local.txt`       | **structural** — alpha-renaming a local (semantics-preserving) rewrites non-FILL text |
 | `fail_insert_stmt.txt`        | **structural** — duplicating an idempotent statement (semantics-preserving) adds a position the puzzle lacks |
 | `fail_commute_revealed.txt`   | **structural** — commuting a *revealed* body expression (semantics-preserving) edits code outside the FILL marks |

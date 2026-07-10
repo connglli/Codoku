@@ -6,7 +6,7 @@ program.  Parallels the RefractIR rypuzmk.cpp but targets the C backend
 output of rysmith (--target c).
 
 Puzzle format:
-  - A machine-readable instruction banner (//@ PATH: … and //@ FILL_CONST: …)
+  - A machine-readable instruction banner (//@ EXEC_PATH: …, //@ CFG_EDGE: …, and //@ FILL_CONST: …)
   - The masked C source with FILL_XXX placeholders in body statements
   - An optional unmasked ground-truth copy (--keep-ground-truth)
 """
@@ -23,6 +23,7 @@ import tempfile
 import tree_sitter_c as tsc
 from puzzle_common import (
   apply_replacements,
+  build_goto_successors,
   collect_defined_functions,
   collect_leaf_locals,
   collect_replacements,
@@ -55,7 +56,7 @@ PUZZLE_HEADER_TEMPLATE = """\
 // the function return the expected value for the test case in main
 // following the below execution path:
 //
-//@ PATH: {{PATH}}
+//@ EXEC_PATH: {{PATH}}
 //
 // ------------------------------------------------
 // Validation
@@ -128,7 +129,12 @@ def _build_trace_replacements(leaf_node, src: bytes) -> list:
 
 
 def self_check_puzzle(
-  puzzle_body: str, gt_body: str, mask_set: set, ts_parser, defined_funcs: set[str]
+  puzzle_body: str,
+  gt_body: str,
+  mask_set: set,
+  ts_parser,
+  defined_funcs: set[str],
+  cfg_edges_list: list[tuple[str, str]],
 ) -> bool:
   """Re-mask the unmasked ground-truth and verify it matches the puzzle body.
 
@@ -190,6 +196,24 @@ def self_check_puzzle(
       file=sys.stderr,
     )
     return False
+
+  # Self-check 2 (CFG): the ground truth's CFG must contain exactly the
+  # edges declared in the //@ CFG_EDGE: banner lines.
+  if cfg_edges_list:
+    gt_succs = build_goto_successors(gt_leaf, gt_bytes)
+    actual_edges = set()
+    for from_node, to_nodes in gt_succs.items():
+      for to_node in to_nodes:
+        actual_edges.add((from_node, to_node))
+    declared_edges = set(cfg_edges_list)
+    if declared_edges != actual_edges:
+      print(
+        f"Error: self-check failed: declared CFG edges do not match ground-truth CFG.\n"
+        f"  Declared: {declared_edges}\n"
+        f"  Actual:   {actual_edges}",
+        file=sys.stderr,
+      )
+      return False
 
   return True
 
@@ -293,7 +317,7 @@ def run_rysmith_loop(args, run_seed: int, tmp_dir: str) -> tuple[str, str]:
   sys.exit(1)
 
 
-def create_puzzle(c_path: str, sir_path: str | None, args) -> None:
+def create_puzzle(c_path: str, sir_path: str, args) -> None:
   """Parse *c_path*, apply masks, and write the puzzle (and optionally the ground truth).
 
   This is the main pipeline function called whether the source came from
@@ -332,10 +356,22 @@ def create_puzzle(c_path: str, sir_path: str | None, args) -> None:
   # are automatically excluded because they have no function_definition node.
   defined_funcs = collect_defined_functions(tree.root_node, src_sanitized)
 
-  # Extract PATH, CFG, and checksum from the companion .sir file (if available).
-  path_str = cfg_str = ""
-  if sir_path:
-    path_str, cfg_str, _ = extract_metadata_from_sir(sir_path)
+  # Extract PATH and checksum from the companion .sir file.
+  path_str, _, _ = extract_metadata_from_sir(sir_path)
+
+  # Extract CFG edges directly from the C leaf function's AST.
+  cfg_edges_list = []
+  succs = build_goto_successors(leaf_node, src_sanitized)
+  for from_node, to_nodes in succs.items():
+    for to_node in to_nodes:
+      cfg_edges_list.append((from_node, to_node))
+  cfg_edges_list.sort()
+  # Build the machine-readable //@ CFG_EDGE: A -> B lines.
+  # Note: The human-readable CFG adjacency listing is no longer used, so we only
+  # generate the //@ CFG_EDGE markers. These will directly replace the {{CFG}}
+  # placeholder in the header template since they work perfectly for both
+  # machine parsing and human reference.
+  cfg_edges_str = "".join(f"//@ CFG_EDGE: {f} -> {t}\n" for f, t in cfg_edges_list)
 
   # --- Selective masking (--p-mask) ---
   # With p == 1.0 every maskable statement is masked.  With p < 1.0 each
@@ -386,7 +422,9 @@ def create_puzzle(c_path: str, sir_path: str | None, args) -> None:
 
   # --- Self-check ---
   # Re-masking the ground truth must reproduce the puzzle body exactly.
-  if not self_check_puzzle(puzzle_body, gt_body, mask_set, ts_parser, defined_funcs):
+  if not self_check_puzzle(
+    puzzle_body, gt_body, mask_set, ts_parser, defined_funcs, cfg_edges_list
+  ):
     sys.exit(1)
 
   # --- Build FILL_CONST budget lines ---
@@ -404,7 +442,7 @@ def create_puzzle(c_path: str, sir_path: str | None, args) -> None:
   # --- Render header ---
   header = (
     PUZZLE_HEADER_TEMPLATE.replace("{{LEAF_NAME}}", leaf_name)
-    .replace("{{CFG}}", cfg_str if cfg_str else "//   [unknown CFG]\n")
+    .replace("{{CFG}}", cfg_edges_str if cfg_edges_str else "//   [unknown CFG]\n")
     .replace("{{PATH}}", path_str if path_str else "[unknown]")
     .replace("{{BUDGET_SECTION}}", budget_section)
   )
@@ -519,7 +557,13 @@ def main() -> None:
     elif args.input.endswith(".c"):
       c_path = args.input
       pot_sir = args.input[:-2] + ".sir"
-      sir_path = pot_sir if os.path.exists(pot_sir) else None
+      if not os.path.exists(pot_sir):
+        print(
+          f"Error: Companion SIR file '{pot_sir}' not found for C input '{args.input}'.",
+          file=sys.stderr,
+        )
+        sys.exit(1)
+      sir_path = pot_sir
     else:
       print(f"Error: Unknown input file extension for '{args.input}'.", file=sys.stderr)
       sys.exit(1)
