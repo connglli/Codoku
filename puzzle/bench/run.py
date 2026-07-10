@@ -71,12 +71,13 @@ class Verdict(str, Enum):
   COMPLETED_PASS = "PASS"  # Solution is valid and passed all checks
   # Granular failure verdicts — ordered from easiest to hardest stage:
   COMPLETED_FAIL_BASICS = "FAIL_BASICS"  # Stage 1: basics failure
-  COMPLETED_FAIL_REMASKING = "FAIL_REMASKING"  # Stage 2: re-masked skeleton mismatch
-  COMPLETED_FAIL_PARSE = "FAIL_PARSE"  # Stage 3: solution not compilable/parseable
-  COMPLETED_FAIL_CFG = "FAIL_CFG"  # Stage 4: CFG topology wrong
-  COMPLETED_FAIL_PATH = "FAIL_PATH"  # Stage 5: wrong execution path
-  COMPLETED_FAIL_OUTPUT = "FAIL_OUTPUT"  # Stage 6: wrong output (checksum)
-  COMPLETED_FAIL_FILL_CONST = "FAIL_FILL_CONST"  # Stage 7: constant budget mismatch
+  COMPLETED_FAIL_PARSE = "FAIL_PARSE"  # Stage 2: solution not compilable/parseable
+  COMPLETED_FAIL_REMASKING = "FAIL_REMASKING"  # Stage 3: re-masked skeleton mismatch
+  COMPLETED_FAIL_COMPILE = "FAIL_COMPILE"  # Stage 4: cosolution not compilable
+  COMPLETED_FAIL_CFG = "FAIL_CFG"  # Stage 5: CFG topology wrong
+  COMPLETED_FAIL_PATH = "FAIL_PATH"  # Stage 6: wrong execution path
+  COMPLETED_FAIL_OUTPUT = "FAIL_OUTPUT"  # Stage 7: wrong output (checksum)
+  COMPLETED_FAIL_FILL_CONST = "FAIL_FILL_CONST"  # Stage 8: constant budget mismatch
   COMPLETED_FAIL_OTHERS = (
     "FAIL_OTHERS"  # Other failures (checker did not emit a stage tag)
   )
@@ -93,8 +94,9 @@ class Verdict(str, Enum):
 # Note: Check failures first so that [PASS] doesn't shadow any FAIL tags in the output.
 _CHECKER_TAG_TO_VERDICT: dict[str, Verdict] = {
   "[FAIL_BASICS]": Verdict.COMPLETED_FAIL_BASICS,
-  "[FAIL_REMASKING]": Verdict.COMPLETED_FAIL_REMASKING,
   "[FAIL_PARSE]": Verdict.COMPLETED_FAIL_PARSE,
+  "[FAIL_REMASKING]": Verdict.COMPLETED_FAIL_REMASKING,
+  "[FAIL_COMPILE]": Verdict.COMPLETED_FAIL_COMPILE,
   "[FAIL_CFG]": Verdict.COMPLETED_FAIL_CFG,
   "[FAIL_PATH]": Verdict.COMPLETED_FAIL_PATH,
   "[FAIL_OUTPUT]": Verdict.COMPLETED_FAIL_OUTPUT,
@@ -423,8 +425,9 @@ class BenchmarkRunner:
             verdict = data.get("verdict")
             if verdict in (
               Verdict.COMPLETED_FAIL_BASICS,
-              Verdict.COMPLETED_FAIL_REMASKING,
               Verdict.COMPLETED_FAIL_PARSE,
+              Verdict.COMPLETED_FAIL_REMASKING,
+              Verdict.COMPLETED_FAIL_COMPILE,
               Verdict.COMPLETED_FAIL_CFG,
               Verdict.COMPLETED_FAIL_PATH,
               Verdict.COMPLETED_FAIL_OUTPUT,
@@ -694,8 +697,9 @@ def compute_summary(
   passed = counts.get(Verdict.COMPLETED_PASS, 0)
   # All granular FAIL_XXX variants plus other FAILs count as failures.
   fail_basics = counts.get(Verdict.COMPLETED_FAIL_BASICS, 0)
-  fail_remasking = counts.get(Verdict.COMPLETED_FAIL_REMASKING, 0)
   fail_parse = counts.get(Verdict.COMPLETED_FAIL_PARSE, 0)
+  fail_remasking = counts.get(Verdict.COMPLETED_FAIL_REMASKING, 0)
+  fail_compile = counts.get(Verdict.COMPLETED_FAIL_COMPILE, 0)
   fail_cfg = counts.get(Verdict.COMPLETED_FAIL_CFG, 0)
   fail_path = counts.get(Verdict.COMPLETED_FAIL_PATH, 0)
   fail_output = counts.get(Verdict.COMPLETED_FAIL_OUTPUT, 0)
@@ -703,8 +707,9 @@ def compute_summary(
   fail_others = counts.get(Verdict.COMPLETED_FAIL_OTHERS, 0)
   failed = (
     fail_basics
-    + fail_remasking
     + fail_parse
+    + fail_remasking
+    + fail_compile
     + fail_cfg
     + fail_path
     + fail_output
@@ -749,8 +754,9 @@ def compute_summary(
     "pass": passed,
     # Granular failure breakdown:
     "fail_basics": fail_basics,
-    "fail_remasking": fail_remasking,
     "fail_parse": fail_parse,
+    "fail_remasking": fail_remasking,
+    "fail_compile": fail_compile,
     "fail_cfg": fail_cfg,
     "fail_path": fail_path,
     "fail_output": fail_output,
@@ -806,8 +812,9 @@ def print_summary_table(summary: dict[str, Any]) -> None:
   # Granular failure breakdown (easiest → hardest stage):
   print(f"  {'Failed (total)':<30} {summary['fail']:>15}")
   print(f"  {'  ↳ fail_basics':<30} {summary.get('fail_basics', 0):>15}")
-  print(f"  {'  ↳ fail_remasking':<30} {summary.get('fail_remasking', 0):>15}")
   print(f"  {'  ↳ fail_parse':<30} {summary.get('fail_parse', 0):>15}")
+  print(f"  {'  ↳ fail_remasking':<30} {summary.get('fail_remasking', 0):>15}")
+  print(f"  {'  ↳ fail_compile':<30} {summary.get('fail_compile', 0):>15}")
   print(f"  {'  ↳ fail_cfg':<30} {summary.get('fail_cfg', 0):>15}")
   print(f"  {'  ↳ fail_path':<30} {summary.get('fail_path', 0):>15}")
   print(f"  {'  ↳ fail_output':<30} {summary.get('fail_output', 0):>15}")
