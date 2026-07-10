@@ -5,6 +5,7 @@
 #include <fstream>
 #include <iostream>
 #include <random>
+#include <set>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -111,7 +112,7 @@ static const char *PUZZLE_HEADER_TEMPLATE = R"TPL(//
 // the function return the expected value for the test case in @main
 // following the below execution path:
 //
-//@ PATH: {{PATH}}
+//@ EXEC_PATH: {{PATH}}
 //
 // ------------------------------------------------
 // Validation
@@ -360,23 +361,25 @@ int main(int argc, char **argv) {
     // Extract path comment
     std::string pathComment = extractPath(src);
 
-    // Build the CFG adjacency listing for the header (one "//  a -> b ..." line per block).
-    std::ostringstream cfgStr;
+    // Build the machine-readable //@ CFG_EDGE: A -> B lines.
+    // Note: The human-readable CFG adjacency listing is no longer used, so we only
+    // generate the //@ CFG_EDGE markers. These will directly replace the {{CFG}}
+    // placeholder in the header template since they work perfectly for both
+    // machine parsing and human reference.
+    std::ostringstream cfgEdgesStr;
     for (size_t i = 0; i < cfg.blocks.size(); ++i) {
       std::string labelName = cfg.blocks[i];
       if (labelName.rfind("^", 0) == 0)
         labelName = labelName.substr(1);
-      cfgStr << "//   " << labelName;
       if (!cfg.succ[i].empty()) {
-        cfgStr << " ->";
         for (auto sIdx: cfg.succ[i]) {
           std::string succName = cfg.blocks[sIdx];
           if (succName.rfind("^", 0) == 0)
             succName = succName.substr(1);
-          cfgStr << " " << succName;
+          // Emit one machine-readable line per directed edge.
+          cfgEdgesStr << "//@ CFG_EDGE: " << labelName << " -> " << succName << "\n";
         }
       }
-      cfgStr << "\n";
     }
 
     // Build the FILL_CONST budget as machine-readable "//@ FILL_CONST: <value> <count>" lines.
@@ -392,7 +395,7 @@ int main(int argc, char **argv) {
     }
 
     std::string header = renderHeader(
-        leaf->name.name, cfgStr.str(), trim(pathComment), fillConstStr.str(),
+        leaf->name.name, cfgEdgesStr.str(), trim(pathComment), fillConstStr.str(),
         result["lift-consts"].as<bool>()
     );
 
@@ -403,9 +406,9 @@ int main(int argc, char **argv) {
     std::ostringstream gtBody;
     SIRMaskedPrinter(gtBody, *leaf, /*enableMasking=*/false).print(prog);
 
-    // Self-check: the ground truth is the canonical solution, so re-masking it
-    // must reproduce the puzzle body. This catches printer/parser round-trip
-    // asymmetries before a broken (unsolvable) puzzle is shipped.
+    // Self-check 1 (re-masking): the ground truth is the canonical solution, so
+    // re-masking it must reproduce the puzzle body. This catches printer/parser
+    // round-trip asymmetries before a broken (unsolvable) puzzle is shipped.
     {
       Program gtProg = parseProgramFromString(gtBody.str());
       const FunDecl *gtLeaf = findLeafFunction(gtProg);
@@ -418,6 +421,65 @@ int main(int argc, char **argv) {
       if (remasked.str() != puzzleBody.str()) {
         std::cerr << "Error: self-check failed: ground truth does not re-mask to the puzzle "
                      "(printer/parser round-trip mismatch).\n";
+        return 1;
+      }
+
+      // Self-check 2 (CFG): the ground truth's CFG must contain exactly the
+      // edges declared in the //@ CFG_EDGE: banner lines. If the declared edges
+      // are wrong, rypuzchk would unfairly reject a correct solution.
+      DiagBag gtDiags;
+      CFG gtCfg = CFG::build(*gtLeaf, gtDiags);
+      if (gtDiags.hasErrors()) {
+        std::cerr << "Error: self-check failed: ground truth CFG build error.\n";
+        return 1;
+      }
+
+      // Collect declared edges from cfgEdgesStr.
+      struct Edge {
+        std::string from, to;
+      };
+
+      std::vector<Edge> declaredEdges;
+      {
+        std::istringstream es(cfgEdgesStr.str());
+        std::string eLine;
+        while (std::getline(es, eLine)) {
+          // Format: "//@ CFG_EDGE: A -> B"
+          const std::string MARK = "//@ CFG_EDGE: ";
+          if (eLine.rfind(MARK, 0) != 0)
+            continue;
+          std::string rest = eLine.substr(MARK.size());
+          // Remove whitespace around "->".
+          size_t arrow = rest.find(" -> ");
+          if (arrow == std::string::npos)
+            continue;
+          declaredEdges.push_back({rest.substr(0, arrow), rest.substr(arrow + 4)});
+        }
+      }
+
+      // Compare: ground-truth CFG edges vs declared.
+      // Build actual edge set (stripping leading ^ from label keys).
+      std::vector<Edge> actualEdges;
+      for (size_t i = 0; i < gtCfg.blocks.size(); ++i) {
+        std::string from = gtCfg.blocks[i];
+        if (from.rfind("^", 0) == 0)
+          from = from.substr(1);
+        for (auto sIdx: gtCfg.succ[i]) {
+          std::string to = gtCfg.blocks[sIdx];
+          if (to.rfind("^", 0) == 0)
+            to = to.substr(1);
+          actualEdges.push_back({from, to});
+        }
+      }
+      auto edgeKey = [](const Edge &e) { return e.from + "->" + e.to; };
+      std::set<std::string> declSet, actSet;
+      for (const auto &e: declaredEdges)
+        declSet.insert(edgeKey(e));
+      for (const auto &e: actualEdges)
+        actSet.insert(edgeKey(e));
+      if (declSet != actSet) {
+        std::cerr << "Error: self-check failed: declared //@ CFG_EDGE: lines do not match "
+                     "the ground-truth CFG. This is a rypuzmk bug — please report.\n";
         return 1;
       }
     }
