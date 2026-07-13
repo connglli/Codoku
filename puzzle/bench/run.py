@@ -507,6 +507,7 @@ class BenchmarkRunner:
     self._containers.append(container_name)
 
     start_time = time.time()
+    end_time = None
     elapsed = 0.0
     log(f"  Starting container for puz-{puzzle_idx:04d}: {container_name}")
 
@@ -516,7 +517,8 @@ class BenchmarkRunner:
         cmd,
         timeout=self.timeout + 60 if self.timeout > 0 else None,
       )
-      elapsed = time.time() - start_time
+      end_time = time.time()
+      elapsed = end_time - start_time
       if result.returncode == 124:
         timed_out = True
         log(
@@ -532,7 +534,8 @@ class BenchmarkRunner:
         f.write(f"=== EXIT CODE: {result.returncode} ===\n")
 
     except subprocess.TimeoutExpired:
-      elapsed = time.time() - start_time
+      end_time = time.time()
+      elapsed = end_time - start_time
       timed_out = True
       log(
         f"  Container for puz-{puzzle_idx:04d} timed out after {elapsed:.0f}s",
@@ -549,7 +552,12 @@ class BenchmarkRunner:
       return {"puzzle_id": puzzle_idx, "verdict": Verdict.INCOMPLETE_CANCELLED}
 
     # Analyze the result
-    analysis = self._analyze_puzzle(puzzle_idx, elapsed, timed_out=timed_out)
+    analysis = self._analyze_puzzle(
+      puzzle_idx,
+      elapsed=elapsed,
+      end_time=end_time,
+      timed_out=timed_out,
+    )
 
     # Save analysis
     analysis_file = puz_dir / "analyses.json"
@@ -559,7 +567,12 @@ class BenchmarkRunner:
     return analysis
 
   def _analyze_puzzle(
-    self, puzzle_idx: int, elapsed: float, timed_out: bool = False
+    self,
+    puzzle_idx: int,
+    *,
+    elapsed: float,
+    end_time: float,
+    timed_out: bool = False,
   ) -> dict[str, Any]:
     """Analyze a single puzzle result after the agent finishes."""
     puz_dir = self.output_dir / f"puz-{puzzle_idx:04d}"
@@ -576,10 +589,11 @@ class BenchmarkRunner:
       "elapsed_seconds": round(elapsed, 2),
     }
 
-    # If the container timed out, mark it as TIMEOUT
-    if timed_out:
-      analysis["verdict"] = Verdict.COMPLETED_TIMEOUT
-      analysis.update(analyzers.parse_trajectory(self.agent, trajectory_file))
+    # Check if trajectory.jsonl exists. If not, mark as INCOMPLETE_ERROR.
+    if not trajectory_file.exists():
+      analysis["verdict"] = Verdict.INCOMPLETE_ERROR
+      analysis["error"] = "Trajectory file missing"
+      analysis.update(analyzers.empty_stats())
       return analysis
 
     # Parse trajectory for token/cost/round stats
@@ -590,7 +604,26 @@ class BenchmarkRunner:
     is_empty_traj = traj_stats.get("num_rounds", 0) == 0
     if is_empty_traj and not solution_file.exists():
       analysis["verdict"] = Verdict.INCOMPLETE_ERROR
-      analysis["error"] = "Agent failed to complete (empty trajectory)"
+      analysis["error"] = "Agent failed to start: trajectory file empty"
+      analysis.update(traj_stats)
+      return analysis
+
+    # Let's check the last-update time of the trajectory file.
+    # If it is more than 10 minutes, it means the agent stopped very early unexpectedly and
+    # didn't proceed. This is a heuristic to detect early failures.
+    traj_file_stats = trajectory_file.stat()
+    last_modified = traj_file_stats.st_mtime
+    if last_modified < end_time - 600:  # 10 minutes
+      analysis["verdict"] = Verdict.INCOMPLETE_ERROR
+      analysis["error"] = (
+        "Agent failed to respond: trajectory file not updated for 10+ minutes"
+      )
+      analysis.update(traj_stats)
+      return analysis
+
+    # If the container timed out, mark it as TIMEOUT
+    if timed_out:
+      analysis["verdict"] = Verdict.COMPLETED_TIMEOUT
       analysis.update(traj_stats)
       return analysis
 
