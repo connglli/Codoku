@@ -21,7 +21,7 @@ from typing import Any
 # ---------------------------------------------------------------------------
 
 
-def _empty_stats() -> dict[str, Any]:
+def empty_stats() -> dict[str, Any]:
   return {
     "num_rounds": 0,
     "input_tokens": 0,
@@ -40,7 +40,7 @@ def _empty_stats() -> dict[str, Any]:
 
 
 def _parse_claude(trajectory_file: Path) -> dict[str, Any]:
-  stats = _empty_stats()
+  stats = empty_stats()
   if not trajectory_file.exists():
     return stats
 
@@ -80,7 +80,7 @@ def _parse_claude(trajectory_file: Path) -> dict[str, Any]:
 
 
 def _parse_opencode(trajectory_file: Path) -> dict[str, Any]:
-  stats = _empty_stats()
+  stats = empty_stats()
   if not trajectory_file.exists():
     return stats
 
@@ -173,5 +173,5 @@ def parse_trajectory(agent: str, trajectory_file: Path) -> dict[str, Any]:
   """Parse an agent's trajectory file into standardised stats."""
   parser = PARSERS.get(agent)
   if parser is None:
-    return _empty_stats()
+    return empty_stats()
   return parser(trajectory_file)
