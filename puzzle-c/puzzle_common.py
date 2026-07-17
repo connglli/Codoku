@@ -87,6 +87,42 @@ def sanitize_statement_expressions(src_bytes: bytes) -> bytes:
   return bytes(res)
 
 
+def get_statement_expr_ranges(src: bytes) -> list[tuple[int, int]]:
+  """Return the (start, end) byte ranges of GNU statement expressions ({ ... }) in src."""
+  ranges = []
+  i = 0
+  while i < len(src):
+    if src[i : i + 2] == b"({":
+      brace_count = 1
+      j = i + 2
+      while j < len(src) - 1:
+        if src[j : j + 2] == b"})" and brace_count == 1:
+          ranges.append((i, j + 2))
+          i = j + 2
+          break
+        elif src[j] == ord("{"):
+          brace_count += 1
+          j += 1
+        elif src[j] == ord("}"):
+          brace_count -= 1
+          j += 1
+        else:
+          j += 1
+      else:
+        i += 1
+    else:
+      i += 1
+  return ranges
+
+
+def is_inside_statement_expr(node, ranges: list[tuple[int, int]]) -> bool:
+  """Check if a node falls entirely inside any statement expression range."""
+  for start, end in ranges:
+    if start <= node.start_byte < end:
+      return True
+  return False
+
+
 def get_leftmost_base(node):
   """Return the leftmost node inside nested member/subscript/pointer accesses.
 
@@ -96,7 +132,6 @@ def get_leftmost_base(node):
     "member_expression",
     "field_expression",
     "subscript_expression",
-    "pointer_expression",
   ):
     arg = node.child_by_field_name("argument")
     if arg is None and node.children:
@@ -192,21 +227,171 @@ def find_leaf_function(root_node, src: bytes):
   return None, None
 
 
+def is_structured_c(func_node) -> bool:
+  """Check if the C function node is structured (block-comment annotated, no C labels).
+
+  Uses a *negative* heuristic: absence of ``labeled_statement`` nodes.  This is
+  valid for rysmith-generated code where the two lowering modes are mutually
+  exclusive — the unstructured backend emits ``entry:;`` / ``b0:;`` labels,
+  the structured backend emits ``// ^entry`` / ``// ^b0`` comments instead.
+  A false negative (structured function that accidentally contains a C label)
+  would silently fall through to the goto-based path, so this should only be
+  called on rysmith-generated leaf functions.
+  """
+  body = func_node.child_by_field_name("body")
+  if not body:
+    return False
+  has_label = False
+
+  def walk(n):
+    nonlocal has_label
+    if n.type == "labeled_statement":
+      has_label = True
+      return
+    for child in n.children:
+      walk(child)
+
+  walk(body)
+  return not has_label
+
+
+def find_block_comments(node, src: bytes):
+  """Find all comments starting with '// ^' inside the node."""
+  comments = []
+
+  def walk(n):
+    if n.type == "comment":
+      text = src[n.start_byte : n.end_byte].decode("utf-8", errors="ignore").strip()
+      if text.startswith("// ^"):
+        comments.append((n, text[4:].strip()))
+    for child in n.children:
+      walk(child)
+
+  walk(node)
+  return comments
+
+
+def is_safety_check(node, src: bytes):
+  """Check if an if_statement is a safety check (traps/aborts, no internal blocks)."""
+  if node.type != "if_statement":
+    return False
+  consequence = node.child_by_field_name("consequence")
+  if consequence:
+    text = src[consequence.start_byte : consequence.end_byte].decode(
+      "utf-8", errors="ignore"
+    )
+    if "// ^" in text:
+      return False
+    if "__builtin_trap" in text or "abort" in text:
+      return True
+  return False
+
+
 def get_maskable_statements(func_node, src: bytes):
   """Collect the ordered list of statements eligible for FILL_XXX masking.
 
   The maskable set is:
-  - Variable declarations before the ``entry`` label (excluding
+  - Variable declarations before the ``entry`` label/comment (excluding
     ``_``-prefixed scratch variables such as ``_chk``).
-  - Statements strictly between the ``entry`` label and the ``exit`` label
+  - Statements strictly between the ``entry`` label/comment and the ``exit`` label/comment
     (excluding bare basic-block label statements).
 
   Returns ``(maskable_list, entry_node, exit_node)``.  All three are ``None``
-  / empty when the expected labels are absent.
+  / empty when the expected labels or comments are absent.
   """
   body = func_node.child_by_field_name("body")
   if not body:
     return [], None, None
+
+  if is_structured_c(func_node):
+    comments = find_block_comments(body, src)
+    comment_map = {label: node for node, label in comments}
+    if "entry" not in comment_map or "exit" not in comment_map:
+      return [], None, None
+    entry_node = comment_map["entry"]
+    exit_node = comment_map["exit"]
+
+    decls_before_entry = []
+    for child in body.children:
+      if child.start_byte < entry_node.start_byte:
+        if child.type == "declaration":
+          declarator = child.child_by_field_name("declarator")
+          name = None
+          if declarator:
+            if declarator.type == "init_declarator":
+              name_node = declarator.child_by_field_name("declarator")
+              if name_node:
+                name = src[name_node.start_byte : name_node.end_byte].decode("utf-8")
+            else:
+              name = src[declarator.start_byte : declarator.end_byte].decode("utf-8")
+          if name and not name.startswith("_"):
+            decls_before_entry.append(child)
+        elif child.type == "expression_statement":
+          if child.children:
+            assignment = child.children[0]
+            if assignment.type == "assignment_expression":
+              lhs = assignment.child_by_field_name("left")
+              name = None
+              if lhs:
+                leftmost = get_leftmost_base(lhs)
+                if leftmost.type == "identifier":
+                  name = src[leftmost.start_byte : leftmost.end_byte].decode("utf-8")
+              if name and not name.startswith("_"):
+                decls_before_entry.append(child)
+
+    def get_loop_header(loop_node):
+      for comment_node, label in comments:
+        if loop_node.start_byte <= comment_node.start_byte < loop_node.end_byte:
+          return label
+      return "exit"
+
+    body_statements = []
+    current_block = [None]
+    statement_expr_ranges = get_statement_expr_ranges(src)
+
+    def walk(n):
+      if n.type.startswith("preproc_") or is_inside_statement_expr(
+        n, statement_expr_ranges
+      ):
+        return
+      if n.type == "comment":
+        text = src[n.start_byte : n.end_byte].decode("utf-8", errors="ignore").strip()
+        if text.startswith("// ^"):
+          current_block[0] = text[4:].strip()
+          return
+      block = current_block[0]
+      if n.type in ("while_statement", "for_statement", "do_statement"):
+        block = get_loop_header(n)
+
+      # Statements in the ^entry and ^exit blocks are shown verbatim (not masked);
+      # skipping them here keeps them out of body_statements.
+      if block is not None and block != "entry" and block != "exit":
+        if n.type in ("expression_statement", "break_statement", "continue_statement"):
+          body_statements.append(n)
+          return
+        elif is_safety_check(n, src):
+          body_statements.append(n)
+          return
+        elif n.type in (
+          "if_statement",
+          "while_statement",
+          "do_statement",
+          "for_statement",
+        ):
+          # for(;;) produced by the structured lowering has no condition node;
+          # the None guard below handles it without special-casing.
+          cond_node = n.child_by_field_name("condition")
+          if cond_node:
+            body_statements.append(cond_node)
+          for child in n.children:
+            if child != cond_node:
+              walk(child)
+          return
+      for child in n.children:
+        walk(child)
+
+    walk(body)
+    return decls_before_entry + body_statements, entry_node, exit_node
 
   labeled_stmts = [c for c in body.children if c.type == "labeled_statement"]
   # At least an entry, an exit, and an intermediate label are expected
@@ -299,6 +484,7 @@ def collect_replacements(
   budget_counts: dict,
   local_names: set[str],
   defined_funcs: set[str],
+  statement_expr_ranges: list = None,
 ) -> None:
   """Recursively walk *node* and append (start, end, FILL_XXX) replacement tuples.
 
@@ -323,6 +509,12 @@ def collect_replacements(
   calls to these are masked; compiler builtins (``__builtin_isfinite``, …) and
   other external symbols are never in this set and thus never masked.
   """
+  if statement_expr_ranges is None:
+    statement_expr_ranges = get_statement_expr_ranges(src)
+
+  if is_inside_statement_expr(node, statement_expr_ranges):
+    return
+
   if not is_body and node.type == "declaration":
     declarator = node.child_by_field_name("declarator")
     if declarator and declarator.type == "init_declarator":
@@ -336,6 +528,7 @@ def collect_replacements(
           budget_counts,
           local_names,
           defined_funcs,
+          statement_expr_ranges,
         )
     return
 
@@ -353,6 +546,7 @@ def collect_replacements(
             budget_counts,
             local_names,
             defined_funcs,
+            statement_expr_ranges,
           )
         return
 
@@ -378,6 +572,7 @@ def collect_replacements(
           budget_counts,
           local_names,
           defined_funcs,
+          statement_expr_ranges,
         )
     return
 
@@ -417,6 +612,26 @@ def collect_replacements(
         replacements.append((child.start_byte, child.end_byte, "FILL_LABEL"))
         return
 
+  # FILL_CTRL is only reached in structured mode: the unstructured body_statements
+  # list never includes break/continue nodes (only expression_statement,
+  # if_statement, and goto_statement), so collect_replacements is never called
+  # with them in that mode.
+  if node.type == "break_statement":
+    if node.children:
+      keyword_child = node.children[0]
+      replacements.append(
+        (keyword_child.start_byte, keyword_child.end_byte, "FILL_CTRL")
+      )
+      return
+
+  if node.type == "continue_statement":
+    if node.children:
+      keyword_child = node.children[0]
+      replacements.append(
+        (keyword_child.start_byte, keyword_child.end_byte, "FILL_CTRL")
+      )
+      return
+
   if node.type in (
     "+",
     "-",
@@ -451,6 +666,7 @@ def collect_replacements(
       budget_counts,
       local_names,
       defined_funcs,
+      statement_expr_ranges,
     )
 
 
@@ -541,3 +757,161 @@ def build_goto_successors(func_node, src: bytes) -> dict[str, set[str]]:
     succs[label_name] = _gotos_in_range(span_start, span_end)
 
   return succs
+
+
+def build_structured_cfg(func_node, src: bytes) -> set[tuple[str, str]]:
+  """Extract the CFG edges directly from the structured C leaf function's AST.
+
+  Performs a pending-state DFS over the function body.  The ``pending`` list
+  carries the set of block labels that could fall through to the *next* node;
+  each ``// ^label`` comment terminates those edges and starts a new pending
+  set.  ``break`` and ``continue`` are resolved against the innermost loop on
+  ``loop_stack``.
+
+  Assumptions (invariants of the rysmith structured lowering):
+  - Every loop is ``for (;;)`` — an unconditional infinite loop.  There is no
+    condition-false exit from the loop header; the only exits are ``break``
+    edges captured inside the body walk.  This is why ``for_statement`` returns
+    ``[]`` (unlike ``while_statement`` which adds an explicit header→exit edge).
+  - ``find_block_comments`` returns comments in DFS (source) order, which is
+    required by ``get_exit_label_after`` to locate the first comment *after*
+    a given node.
+  """
+  body = func_node.child_by_field_name("body")
+  if not body:
+    return set()
+
+  # find_block_comments performs a DFS walk, so the returned list is in
+  # source order — the get_exit_label_after helper below depends on this.
+  comments = find_block_comments(body, src)
+
+  def get_loop_header(loop_node):
+    """Return the label of the first block comment inside loop_node."""
+    for comment_node, label in comments:
+      if loop_node.start_byte <= comment_node.start_byte < loop_node.end_byte:
+        return label
+    return "exit"
+
+  def get_exit_label_after(node):
+    """Return the label of the first block comment that starts after node ends.
+
+    This gives the block that immediately follows a loop in source order,
+    which is the target of any break edges from that loop.
+    """
+    for comment_node, label in comments:
+      if comment_node.start_byte >= node.end_byte:
+        return label
+    return "exit"
+
+  edges: set[tuple[str, str]] = set()
+
+  def walk(n, pending, loop_stack):
+    if n.type == "comment":
+      text = src[n.start_byte : n.end_byte].decode("utf-8", errors="ignore").strip()
+      if text.startswith("// ^"):
+        label = text[4:].strip()
+        # Every pending predecessor falls through to this new block.
+        for p in pending:
+          if p != label:
+            edges.add((p, label))
+        return [label]
+
+    if n.type == "break_statement":
+      # break exits the innermost loop; its target is the block immediately
+      # after that loop's closing brace.
+      if loop_stack:
+        innermost_loop = loop_stack[-1]
+        loop_exit = get_exit_label_after(innermost_loop)
+        for p in pending:
+          edges.add((p, loop_exit))
+      return []
+    elif n.type == "continue_statement":
+      # continue jumps back to the loop header (the first block comment
+      # inside the loop).
+      if loop_stack:
+        innermost_loop = loop_stack[-1]
+        loop_header = get_loop_header(innermost_loop)
+        for p in pending:
+          edges.add((p, loop_header))
+      return []
+    elif n.type == "return_statement":
+      for p in pending:
+        edges.add((p, "exit"))
+      return []
+    elif is_safety_check(n, src):
+      # Safety checks (__builtin_trap / abort) are not CFG boundaries;
+      # they trap on UB and fall through otherwise.
+      return pending
+    elif n.type == "if_statement":
+      consequence = n.child_by_field_name("consequence")
+      alternative = n.child_by_field_name("alternative")
+
+      then_pending = []
+      if consequence:
+        then_pending = walk(consequence, pending, loop_stack)
+
+      # When there is no else branch, the fall-through pending set is
+      # list(pending) — control arrives at the next node from both the
+      # if-not-taken path and any live then_pending returns.
+      else_pending = list(pending)
+      if alternative:
+        else_pending = walk(alternative, pending, loop_stack)
+
+      return then_pending + else_pending
+    elif n.type in ("for_statement", "while_statement", "do_statement"):
+      loop_stack.append(n)
+      body_node = n.child_by_field_name("body")
+
+      loop_header = get_loop_header(n)
+      loop_exit = get_exit_label_after(n)
+
+      # Predecessors of the loop flow into the loop header.
+      for p in pending:
+        if p != loop_header:
+          edges.add((p, loop_header))
+
+      body_pending = []
+      if body_node:
+        body_pending = walk(body_node, [loop_header], loop_stack)
+
+      # Any live pending from the body loops back to the header.
+      for bp in body_pending:
+        if bp != loop_header:
+          edges.add((bp, loop_header))
+
+      loop_stack.pop()
+
+      if n.type == "while_statement":
+        # while can exit via a false condition — add header→exit edge.
+        edges.add((loop_header, loop_exit))
+        return [loop_header]
+      elif n.type == "do_statement":
+        # do-while exits via the trailing condition — body_pending may exit.
+        for bp in body_pending:
+          edges.add((bp, loop_exit))
+        return body_pending
+      else:
+        # for(;;) — rysmith's structured lowering only emits unconditional
+        # infinite loops (no loop condition).  The only exits are break edges
+        # already captured above.  Return [] to signal no fall-through.
+        assert n.child_by_field_name("condition") is None, (
+          "Expected for(;;) from rysmith structured lowering, "
+          "but found a for loop with a condition expression"
+        )
+        return []
+    elif n.type == "expression_statement":
+      return pending
+
+    cb = pending
+    for child in n.children:
+      cb = walk(child, cb, loop_stack)
+    return cb
+
+  walk(body, ["entry"], [])
+
+  filtered_edges = set()
+  for f, t in edges:
+    if f and t and f != t:
+      filtered_edges.add((f, t))
+
+  return filtered_edges

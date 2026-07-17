@@ -49,8 +49,9 @@ def check(name, ok, detail=""):
 
 def make_puzzle(rypuzmk, rysmith, seed, outdir, *options):
   """Generate a puzzle + ground truth for `seed`; return (puzzle_path, gt_path)."""
-  puzzle = os.path.join(outdir, f"p{seed}.c")
-  gt = os.path.join(outdir, f"p{seed}.gt.c")
+  suffix = "_struct" if "--structured" in options else ""
+  puzzle = os.path.join(outdir, f"p{seed}{suffix}.c")
+  gt = os.path.join(outdir, f"p{seed}{suffix}.gt.c")
   r = run(
     [
       rypuzmk,
@@ -138,7 +139,7 @@ def main():
   rypuzmk, rypuzchk, rysmith = sys.argv[1:4]
 
   with tempfile.TemporaryDirectory(prefix="rypuztest_") as outdir:
-    # (1) round-trip across a few seeds
+    # (1a) round-trip across a few seeds
     seeds = [42, 500, 9999]
     base_puzzle, base_gt = None, None
     rt_ok = True
@@ -155,6 +156,97 @@ def main():
       rt_ok = rt_ok and passed
       if s == 42:
         base_puzzle, base_gt = puzzle, gt
+
+    # (1b) structured C round-trip and FILL_CTRL rejection tests
+    struct_base_puzzle, struct_base_gt = None, None
+    for s in [42, 500]:
+      puzzle, gt = make_puzzle(rypuzmk, rysmith, s, outdir, "--structured")
+      if not puzzle:
+        check(f"generate structured seed {s}", False, "rypuzmk --structured failed")
+        continue
+      passed, out = chk(rypuzchk, puzzle, gt)
+      check(
+        f"structured ground truth round-trips (seed {s})",
+        passed,
+        out.strip().splitlines()[-1:],
+      )
+      if s == 42:
+        struct_base_puzzle, struct_base_gt = puzzle, gt
+
+    # FILL_CTRL rejection tests — swap break↔continue and verify the checker
+    # catches them via FAIL_PATH or FAIL_CFG (depending on whether the control
+    # flow change stays within the declared CFG or exits it).
+    if struct_base_puzzle and struct_base_gt:
+      struct_gt_text = open(struct_base_gt).read()
+
+      # (1b-i) puzzle-as-solution still rejected (FILL marks present)
+      passed, out = chk(rypuzchk, struct_base_puzzle, struct_base_puzzle)
+      check(
+        "structured: puzzle-as-solution rejected with FILL marks",
+        not passed and "FILL_" in open(struct_base_puzzle).read(),
+      )
+
+      # (1b-ii) swapping break → continue is rejected
+      if "break;" in struct_gt_text:
+        swapped = struct_gt_text.replace("break;", "continue;", 1)
+        swap_path = os.path.join(outdir, "struct_swap_break.c")
+        with open(swap_path, "w") as f:
+          f.write(swapped)
+        passed, out = chk(rypuzchk, struct_base_puzzle, swap_path)
+        check(
+          "structured: break→continue rejected (FAIL_PATH or FAIL_CFG)",
+          not passed
+          and any(t in out for t in ["[FAIL_PATH]", "[FAIL_CFG]", "[FAIL_REMASKING]"]),
+          out.strip().splitlines()[-1:],
+        )
+      else:
+        check("structured: found break; to swap (seed 42)", False, "no break in gt")
+
+      # (1b-iii) swapping continue → break is rejected (if there is a continue)
+      if "continue;" in struct_gt_text:
+        swapped = struct_gt_text.replace("continue;", "break;", 1)
+        swap_path = os.path.join(outdir, "struct_swap_continue.c")
+        with open(swap_path, "w") as f:
+          f.write(swapped)
+        passed, out = chk(rypuzchk, struct_base_puzzle, swap_path)
+        check(
+          "structured: continue→break rejected (FAIL_PATH or FAIL_CFG)",
+          not passed
+          and any(t in out for t in ["[FAIL_PATH]", "[FAIL_CFG]", "[FAIL_REMASKING]"]),
+          out.strip().splitlines()[-1:],
+        )
+      else:
+        check("structured: no continue; to test (seed 42 has no continue)", True)
+
+      # (1b-iv) deleting a break statement is rejected (structural integrity)
+      if "break;" in struct_gt_text:
+        del_break = struct_gt_text.replace("break;", "", 1)
+        del_path = os.path.join(outdir, "struct_del_break.c")
+        with open(del_path, "w") as f:
+          f.write(del_break)
+        passed, out = chk(rypuzchk, struct_base_puzzle, del_path)
+        check(
+          "structured: deleted break rejected (FAIL_REMASKING or FAIL_COMPILE)",
+          not passed and any(t in out for t in ["[FAIL_REMASKING]", "[FAIL_COMPILE]"]),
+          out.strip().splitlines()[-1:],
+        )
+      else:
+        check("structured: found break to delete (seed 42)", False, "no break in gt")
+
+      # (1b-v) unfilled FILL_CTRL mark is rejected at FAIL_BASICS
+      if "FILL_CTRL" in open(struct_base_puzzle).read():
+        passed, out = chk(rypuzchk, struct_base_puzzle, struct_base_puzzle)
+        check(
+          "structured: FILL_CTRL in puzzle is caught as unfilled mark",
+          not passed and "[FAIL_BASICS]" in out,
+          out.strip().splitlines()[-1:],
+        )
+      else:
+        check(
+          "structured: puzzle has FILL_CTRL marks (seed 42)",
+          False,
+          "no FILL_CTRL in puzzle",
+        )
 
     if not base_puzzle:
       check("seed 42 available for mutation tests", False, "no base puzzle")
@@ -230,10 +322,13 @@ def main():
         with open(off_path, "w") as f:
           f.write(new_gt)
         passed, out = chk(rypuzchk, base_puzzle, off_path)
-        # Note: mutating a constant used in computation affects final checksum, so it fails at FAIL_OUTPUT or FAIL_PATH.
+        # Note: mutating a constant used in computation affects final checksum or budget, failing at FAIL_OUTPUT, FAIL_PATH, or FAIL_FILL_CONST.
         check(
-          "perturbed constant rejected with FAIL_OUTPUT or FAIL_PATH",
-          not passed and any(tag in out for tag in ["[FAIL_OUTPUT]", "[FAIL_PATH]"]),
+          "perturbed constant rejected with FAIL_OUTPUT, FAIL_PATH or FAIL_FILL_CONST",
+          not passed
+          and any(
+            tag in out for tag in ["[FAIL_OUTPUT]", "[FAIL_PATH]", "[FAIL_FILL_CONST]"]
+          ),
           out,
         )
 

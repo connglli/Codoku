@@ -16,9 +16,9 @@ That also said, avoid generating the solution file before you solve the puzzle s
    - The **CFG** (control-flow graph, `//@ CFG_EDGE: ...`) at the top — shows which basic blocks exist and how they connect
    - The **execution path** (`//@ EXEC_PATH: ...`) — the exact sequence of basic blocks that must execute
    - The **FILL_CONST budget** (`//@ FILL_CONST: <value> <count>` lines) — constants you must use
-   - The **mask marks**: `FILL_VAR`, `FILL_CONST`, `FILL_OP`, `FILL_TYPE`, `FILL_LABEL`, `FILL_FUNC`, `FILL_FIELD`
+   - The **mask marks**: `FILL_VAR`, `FILL_CONST`, `FILL_OP`, `FILL_TYPE`, `FILL_LABEL`, `FILL_FUNC`, `FILL_FIELD`, `FILL_CTRL`
 
-2. The function body uses labeled C `goto`-based basic blocks (e.g. `entry:`, `b0:`, `exit:`). The EXEC_PATH tells you which `goto` targets are taken.
+2. The function body uses labeled C `goto`-based basic blocks (for unstructured C) or comment-marked basic blocks and control keywords (for structured C). The EXEC_PATH tells you which basic blocks are executed in sequence.
 
 ## How to Fill in the Blanks
 
@@ -29,6 +29,7 @@ That also said, avoid generating the solution file before you solve the puzzle s
 - `FILL_LABEL` → a `goto` target label name (e.g., `b0`, `exit`)
 - `FILL_FUNC` → a helper function name defined elsewhere in the same file
 - `FILL_FIELD` → a struct field name
+- `FILL_CTRL` → a control keyword (`break` or `continue`)
 
 ## Verification
 
@@ -59,6 +60,6 @@ gcc -O0 -DDUMP_TRACE {{SOLUTION_FILE}} -o /tmp/sol -lm && /tmp/sol
 - Trace the execution path block by block, reasoning about what each statement must compute.
 - For each `FILL_CONST`, use the budget (`//@ FILL_CONST:` lines) to constrain your choices.
 - Use the checker (`./tools/rypuzchk-c`) for the definitive pass/fail verdict.
-- If the checker fails with a path mismatch, the `goto` targets are wrong — revisit `FILL_LABEL` marks.
+- If the checker fails with a path mismatch, the control flow transitions are wrong — revisit `FILL_LABEL` (for gotos) and `FILL_CTRL` (for control keywords) marks.
 - If the checker fails with a structural integrity error, you changed something outside the blanks.
 - If the checker fails with a FILL_CONST budget error, you used the wrong constant value or count.

@@ -46,9 +46,16 @@ syntactic element, not a specific one:
 | `FILL_CONST` | an integer / float / `null` literal in an operand position |
 | `FILL_OP` | **any** operator or operator-like keyword: expression `+`/`-`; atom `* / % & | ^ << >> >>>`; the `as` cast keyword; unary `~`; `addr`, `load`, `store`, `select`, `cmp`, `ptrindex`, `ptrfield`; a relational operator |
 | `FILL_TYPE` | a type (only emitted for the destination type of an `as` cast) |
-| `FILL_LABEL` | a branch target (`^label`) |
+| `FILL_LABEL` | a branch target (`^label`) — **unstructured mode only** |
+| `FILL_CTRL` | a structured control-flow keyword (`break` or `continue`) — **structured mode only** |
 | `FILL_FUNC` | a callee name in `call FILL_FUNC(...)` |
 | `FILL_FIELD` | a struct field name in `ptrfield` |
+
+`FILL_LABEL` and `FILL_CTRL` are mutually exclusive: unstructured C uses
+goto-based control flow and produces `FILL_LABEL` for branch targets, while
+structured C uses `break`/`continue` statements and produces `FILL_CTRL` for
+those keywords.  A `FILL_CTRL` mark is validated indirectly through path
+execution (FAIL_PATH) and CFG topology (FAIL_CFG), not by a dedicated check.
 
 Because the rewrite is lossy, **many** concrete statements mask to the same
 skeleton. That ambiguity is intentional — it is what makes a puzzle a puzzle —
@@ -188,6 +195,13 @@ and loop counts, the exact constants used, and the statement/atom/block shape.
 Key options: `-o/--output`, `--keep-ground-truth` (writes `<output>.gt.sir`),
 `-s/--seed`, `-L/--min-loop-iter`, `-B/--n-bbls`, `-S/--n-stmts`,
 `--rysmith <path>`, `--pkg-res` (see below).
+
+Pass `--structured` (C puzzle variant only) to emit structured control flow
+(`for`/`while`/`do-while` loops with `break`/`continue`) instead of
+`goto`-based flat blocks.  This replaces all `FILL_LABEL` marks with
+`FILL_CTRL` marks and requires the solver to fill in `break` or `continue`
+at each control-flow position.  The CFG topology check and path trace work
+unchanged; the mask alphabet is the only difference.
 
 `rypuzmk` validates the generated leaf (≥ 3 blocks, `^entry` first, `^exit`
 last) and **self-checks** that the ground truth re-masks to the puzzle it

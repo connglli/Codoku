@@ -24,11 +24,14 @@ import tree_sitter_c as tsc
 from puzzle_common import (
   apply_replacements,
   build_goto_successors,
+  build_structured_cfg,
   collect_defined_functions,
   collect_leaf_locals,
   collect_replacements,
+  find_block_comments,
   find_leaf_function,
   get_maskable_statements,
+  is_structured_c,
   sanitize_statement_expressions,
   strip_refractir_prefix,
 )
@@ -102,24 +105,31 @@ def _build_trace_replacements(leaf_node, src: bytes) -> list:
   """Build ``(ins_point, ins_point, text)`` insertions for DUMP_TRACE blocks.
 
   Inserts ``#ifdef DUMP_TRACE / printf("^<name>:\\n"); / #endif`` immediately
-  after each label's colon in the leaf function body.  After prefix stripping,
-  all labels are bare names (``entry``, ``exit``, ``b0``, …) that match the
-  SIR PATH format directly.
+  after each label's colon (for unstructured C) or after each block comment
+  (for structured C) in the leaf function body.
   """
   replacements = []
   body = leaf_node.child_by_field_name("body")
   if not body:
     return replacements
-  for child in body.children:
-    if child.type == "labeled_statement":
-      label_id = child.child_by_field_name("label")
-      if label_id:
-        lbl_name = src[label_id.start_byte : label_id.end_byte].decode("utf-8")
-        # After prefix stripping all leaf labels are ours; instrument all.
-        stmt_child = child.children[2]
-        ins_point = stmt_child.end_byte
-        ins_text = f'\n#ifdef DUMP_TRACE\n  printf("^{lbl_name}:\\n");\n#endif'
-        replacements.append((ins_point, ins_point, ins_text))
+
+  if is_structured_c(leaf_node):
+    comments = find_block_comments(body, src)
+    for comment_node, lbl_name in comments:
+      ins_point = comment_node.end_byte
+      ins_text = f'\n#ifdef DUMP_TRACE\n  printf("^{lbl_name}:\\n");\n#endif'
+      replacements.append((ins_point, ins_point, ins_text))
+  else:
+    for child in body.children:
+      if child.type == "labeled_statement":
+        label_id = child.child_by_field_name("label")
+        if label_id:
+          lbl_name = src[label_id.start_byte : label_id.end_byte].decode("utf-8")
+          # After prefix stripping all leaf labels are ours; instrument all.
+          stmt_child = child.children[2]
+          ins_point = stmt_child.end_byte
+          ins_text = f'\n#ifdef DUMP_TRACE\n  printf("^{lbl_name}:\\n");\n#endif'
+          replacements.append((ins_point, ins_point, ins_text))
   return replacements
 
 
@@ -190,6 +200,17 @@ def self_check_puzzle(
 
   remasked = apply_replacements(gt_bytes, remasked_repls).decode("utf-8")
   if remasked != puzzle_body:
+    import difflib
+
+    print("remasked vs puzzle_body diff:", file=sys.stderr)
+    print(
+      "\n".join(
+        difflib.unified_diff(
+          remasked.splitlines(), puzzle_body.splitlines(), lineterm=""
+        )
+      ),
+      file=sys.stderr,
+    )
     print(
       "Error: self-check failed: ground truth does not re-mask to the puzzle "
       "(printer/AST round-trip mismatch).",
@@ -200,11 +221,14 @@ def self_check_puzzle(
   # Self-check 2 (CFG): the ground truth's CFG must contain exactly the
   # edges declared in the //@ CFG_EDGE: banner lines.
   if cfg_edges_list:
-    gt_succs = build_goto_successors(gt_leaf, gt_bytes)
-    actual_edges = set()
-    for from_node, to_nodes in gt_succs.items():
-      for to_node in to_nodes:
-        actual_edges.add((from_node, to_node))
+    if is_structured_c(gt_leaf):
+      actual_edges = build_structured_cfg(gt_leaf, gt_bytes)
+    else:
+      gt_succs = build_goto_successors(gt_leaf, gt_bytes)
+      actual_edges = set()
+      for from_node, to_nodes in gt_succs.items():
+        for to_node in to_nodes:
+          actual_edges.add((from_node, to_node))
     declared_edges = set(cfg_edges_list)
     if declared_edges != actual_edges:
       print(
@@ -296,6 +320,8 @@ def run_rysmith_loop(args, run_seed: int, tmp_dir: str) -> tuple[str, str]:
       "--target",
       "c",
     ]
+    if args.structured:
+      cmd += ["--structured-lowering", "true"]
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     c_path = sir_path = None
@@ -361,10 +387,13 @@ def create_puzzle(c_path: str, sir_path: str, args) -> None:
 
   # Extract CFG edges directly from the C leaf function's AST.
   cfg_edges_list = []
-  succs = build_goto_successors(leaf_node, src_sanitized)
-  for from_node, to_nodes in succs.items():
-    for to_node in to_nodes:
-      cfg_edges_list.append((from_node, to_node))
+  if is_structured_c(leaf_node):
+    cfg_edges_list = list(build_structured_cfg(leaf_node, src_sanitized))
+  else:
+    succs = build_goto_successors(leaf_node, src_sanitized)
+    for from_node, to_nodes in succs.items():
+      for to_node in to_nodes:
+        cfg_edges_list.append((from_node, to_node))
   cfg_edges_list.sort()
   # Build the machine-readable //@ CFG_EDGE: A -> B lines.
   # Note: The human-readable CFG adjacency listing is no longer used, so we only
@@ -512,6 +541,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     action="store_true",
     help="Omit the FILL_CONST budget section (no magic-number constraints).",
   )
+  p.add_argument(
+    "--structured",
+    action="store_true",
+    help="Generate structured C puzzle using loops and structured control flow instead of goto.",
+  )
 
   # Other options.
   p.add_argument(
@@ -553,7 +587,10 @@ def main() -> None:
       c_path = args.input[:-4] + ".c"
       if not os.path.exists(c_path):
         # Translate the SIR to C via symirc.
-        subprocess.run(["./symirc", sir_path, "-o", c_path], check=True)
+        cmd = ["./symirc", sir_path, "-o", c_path]
+        if args.structured:
+          cmd.append("--structured-lowering")
+        subprocess.run(cmd, check=True)
     elif args.input.endswith(".c"):
       c_path = args.input
       pot_sir = args.input[:-2] + ".sir"

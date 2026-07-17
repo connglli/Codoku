@@ -30,11 +30,13 @@ import tree_sitter_c as tsc
 from puzzle_common import (
   apply_replacements,
   build_goto_successors,
+  build_structured_cfg,
   collect_defined_functions,
   collect_leaf_locals,
   collect_replacements,
   find_leaf_function,
   get_maskable_statements,
+  is_structured_c,
   sanitize_statement_expressions,
   strip_refractir_prefix,
 )
@@ -276,12 +278,14 @@ def check_cfg(
   if not cfg_edges:
     return
 
-  succs = build_goto_successors(func_node, src)
-
-  actual_edges = set()
-  for from_node, to_nodes in succs.items():
-    for to_node in to_nodes:
-      actual_edges.add((from_node, to_node))
+  if is_structured_c(func_node):
+    actual_edges = build_structured_cfg(func_node, src)
+  else:
+    succs = build_goto_successors(func_node, src)
+    actual_edges = set()
+    for from_node, to_nodes in succs.items():
+      for to_node in to_nodes:
+        actual_edges.add((from_node, to_node))
 
   declared_edges = set(cfg_edges)
   if declared_edges != actual_edges:
@@ -488,6 +492,7 @@ def main() -> None:
     "FILL_LABEL",
     "FILL_FUNC",
     "FILL_FIELD",
+    "FILL_CTRL",
   ]:
     if mark in stripped_sol:
       has_fill_marks = True
