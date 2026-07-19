@@ -7,8 +7,10 @@ rylink
 rytwin
 rypuzmk
 rypuzchk
-rypuzmk-c
-rypuzchk-c
+rypuzmk-sir
+rypuzchk-sir
+rypuzmk-tgt
+rypuzchk-tgt
 *.vsix
 
 # Object files
