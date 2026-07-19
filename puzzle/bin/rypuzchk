@@ -1,0 +1,26 @@
+#!/usr/bin/env python3
+"""rypuzchk — Proxy checker routing to rypuzchk-sir or rypuzchk-tgt."""
+
+import os
+import subprocess
+import sys
+
+
+def main():
+    if len(sys.argv) < 3:
+        print("usage: rypuzchk <puzzle> <solution>", file=sys.stderr)
+        sys.exit(2)
+
+    puzzle = sys.argv[1]
+    bindir = os.path.dirname(os.path.abspath(__file__))
+
+    if puzzle.endswith(".sir"):
+        cmd = [os.path.join(bindir, "rypuzchk-sir")] + sys.argv[1:]
+    else:
+        cmd = [os.path.join(bindir, "rypuzchk-tgt")] + sys.argv[1:]
+
+    sys.exit(subprocess.call(cmd))
+
+
+if __name__ == "__main__":
+    main()

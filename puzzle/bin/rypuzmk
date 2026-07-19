@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+"""rypuzmk — Proxy maker routing to rypuzmk-sir or rypuzmk-tgt."""
+
+import os
+import subprocess
+import sys
+
+
+def strip_target_arg(argv):
+    res = []
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--target" and i + 1 < len(argv):
+            i += 2
+        elif argv[i].startswith("--target="):
+            i += 1
+        else:
+            res.append(argv[i])
+            i += 1
+    return res
+
+
+def main():
+    target = "sir"
+    for i, arg in enumerate(sys.argv):
+        if arg == "--target" and i + 1 < len(sys.argv):
+            target = sys.argv[i + 1]
+        elif arg.startswith("--target="):
+            target = arg.split("=", 1)[1]
+
+    bindir = os.path.dirname(os.path.abspath(__file__))
+
+    if target in ("c", "python"):
+        cmd = [os.path.join(bindir, "rypuzmk-tgt")] + sys.argv[1:]
+    else:
+        # Strip --target option before forwarding to C++ binary rypuzmk-sir
+        cmd = [os.path.join(bindir, "rypuzmk-sir")] + strip_target_arg(sys.argv[1:])
+
+    sys.exit(subprocess.call(cmd))
+
+
+if __name__ == "__main__":
+    main()

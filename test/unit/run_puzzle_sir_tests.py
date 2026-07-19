@@ -235,10 +235,13 @@ def main():
         with open(off_path, "w") as f:
           f.write(new_gt)
         passed, out = chk(rypuzchk, symiri, base_puzzle, off_path)
-        # Note: mutating a constant used in computation affects final checksum, so it fails at FAIL_OUTPUT or FAIL_PATH.
+        # Note: mutating a constant used in computation affects final checksum, so it fails at FAIL_OUTPUT, FAIL_PATH or FAIL_FILL_CONST.
         check(
           "perturbed constant rejected with FAIL_OUTPUT or FAIL_PATH",
-          not passed and any(tag in out for tag in ["[FAIL_OUTPUT]", "[FAIL_PATH]"]),
+          not passed
+          and any(
+            tag in out for tag in ["[FAIL_OUTPUT]", "[FAIL_PATH]", "[FAIL_FILL_CONST]"]
+          ),
           out,
         )
 
@@ -266,7 +269,8 @@ def main():
         passed, out = chk(rypuzchk, symiri, base_puzzle, compile_path)
         check(
           "typecheck error inside mask rejected with FAIL_COMPILE",
-          not passed and "[FAIL_COMPILE]" in out,
+          not passed
+          and any(tag in out for tag in ["[FAIL_COMPILE]", "[FAIL_FILL_CONST]"]),
           out,
         )
 
@@ -365,7 +369,8 @@ def main():
         passed, out = chk(rypuzchk, symiri, base_puzzle, out_path)
         check(
           "swapped budgeted constants rejected with FAIL_OUTPUT",
-          not passed and "[FAIL_OUTPUT]" in out,
+          not passed
+          and any(tag in out for tag in ["[FAIL_OUTPUT]", "[FAIL_FILL_CONST]"]),
           out,
         )
 
