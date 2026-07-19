@@ -227,19 +227,22 @@ def generate_puzzles(
   output_dir: Path,
   n: int,
   rypuzmk_opts: list[str],
+  target: str = "c",
 ) -> None:
   """Generate n puzzles under output_dir/puz-NNNN/ + output_dir/oracles/."""
   oracles = output_dir / "oracles"
   oracles.mkdir(parents=True, exist_ok=True)
 
+  ext = "py" if target == "python" else "c"
+
   # Check which puzzles already exist and skip them.
   start_from = 0
   for i in range(1, n + 1):
     puz_dir = output_dir / f"puz-{i:04d}"
-    puzzle_file = puz_dir / "puzzle.c"
-    gt_file = oracles / f"sol-{i:04d}.c"
+    puzzle_file = puz_dir / f"puzzle.{ext}"
+    gt_file = oracles / f"sol-{i:04d}.{ext}"
     hash_file = oracles / f"puz-{i:04d}.hash"
-    puz_copy_file = oracles / f"puz-{i:04d}.c"
+    puz_copy_file = oracles / f"puz-{i:04d}.{ext}"
     if (
       puzzle_file.exists()
       and gt_file.exists()
@@ -266,17 +269,17 @@ def generate_puzzles(
   while i <= n:
     puz_dir = output_dir / f"puz-{i:04d}"
     puz_dir.mkdir(parents=True, exist_ok=True)
-    puzzle_file = puz_dir / "puzzle.c"
-    gt_raw_file = puzzle_file.with_suffix(".gt.c")
-    gt_file = oracles / f"sol-{i:04d}.c"
+    puzzle_file = puz_dir / f"puzzle.{ext}"
+    gt_raw_file = puzzle_file.with_suffix(f".gt.{ext}")
+    gt_file = oracles / f"sol-{i:04d}.{ext}"
     hash_file = oracles / f"puz-{i:04d}.hash"
-    puz_copy_file = oracles / f"puz-{i:04d}.c"
+    puz_copy_file = oracles / f"puz-{i:04d}.{ext}"
 
     result = run_in_container(
       [
         "/opt/rypuz/bin/rypuzmk-c",
         "-o",
-        "puzzle.c",
+        f"puzzle.{ext}",
         "--keep-ground-truth",
       ]
       + rypuzmk_opts,
@@ -294,11 +297,11 @@ def generate_puzzles(
       continue
 
     if not puzzle_file.exists():
-      fatal(f"Error: puzzle.c not generated for puzzle {i}")
+      fatal(f"Error: puzzle.{ext} not generated for puzzle {i}")
     if not gt_raw_file.exists():
       fatal(f"Error: ground-truth not found for puzzle {i}")
 
-    # rypuzmk-c writes ground-truth to <output>.gt.c
+    # rypuzmk-c writes ground-truth to <output>.gt.<ext>
     shutil.move(str(gt_raw_file), str(gt_file))
     # Save a copy of puzzle.c alongside sol-XXXX.c
     shutil.copy(str(puzzle_file), str(puz_copy_file))
@@ -331,6 +334,7 @@ class BenchmarkRunner:
     max_turns: int,
     timeout: int,
     max_budget_usd: int,
+    target: str = "c",
   ):
     self.output_dir = output_dir
     self.n = n
@@ -340,6 +344,8 @@ class BenchmarkRunner:
     self.max_turns = max_turns
     self.timeout = timeout
     self.max_budget_usd = max_budget_usd
+    self.target = target
+    self.ext = "py" if target == "python" else "c"
     self._containers: list[str] = []
     self._stop = False
 
@@ -554,8 +560,9 @@ class BenchmarkRunner:
     """Analyze a single puzzle result after the agent finishes."""
     puz_dir = self.output_dir / f"puz-{puzzle_idx:04d}"
     oracles = self.output_dir / "oracles"
-    puzzle_file = puz_dir / "puzzle.c"
-    solution_file = puz_dir / "solution.c"
+    ext = self.ext
+    puzzle_file = puz_dir / f"puzzle.{ext}"
+    solution_file = puz_dir / f"solution.{ext}"
     trajectory_file = puz_dir / "trajectory.jsonl"
     hash_file = oracles / f"puz-{puzzle_idx:04d}.hash"
 
@@ -604,7 +611,7 @@ class BenchmarkRunner:
       analysis.update(traj_stats)
       return analysis
 
-    # 1. Check if solution.c exists
+    # 1. Check if solution file exists
     has_solution = solution_file.exists()
     analysis["has_solution"] = has_solution
     log(f"  - has_solution={has_solution}")
@@ -614,14 +621,16 @@ class BenchmarkRunner:
       analysis.update(traj_stats)
       return analysis
 
-    # 2. Check if puzzle.c was modified (cheat detection)
+    # 2. Check if puzzle file was modified (cheat detection)
     expected_hash = hash_file.read_text().strip()
     if puzzle_file.exists():
       actual_hash = sha1_file(puzzle_file)
       puzzle_modified = actual_hash != expected_hash
     else:
-      actual_hash = "<puzzle.c deleted>"
-      puzzle_modified = True  # If puzzle.c is missing, treat it as modified (cheating)
+      actual_hash = f"<puzzle.{ext} deleted>"
+      puzzle_modified = (
+        True  # If puzzle file is missing, treat it as modified (cheating)
+      )
 
     analysis["puzzle_modified"] = puzzle_modified
     log(
@@ -638,8 +647,8 @@ class BenchmarkRunner:
       chk_result = run_in_container(
         [
           "/opt/rypuz/bin/rypuzchk-c",
-          f"puz-{puzzle_idx:04d}/puzzle.c",
-          f"puz-{puzzle_idx:04d}/solution.c",
+          f"puz-{puzzle_idx:04d}/puzzle.{ext}",
+          f"puz-{puzzle_idx:04d}/solution.{ext}",
         ],
         workdir=self.output_dir,
         timeout=60,
@@ -940,6 +949,12 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     action="store_true",
     help="Only analyze existing results, do not generate or run",
   )
+  parser.add_argument(
+    "--target",
+    default="c",
+    choices=["c", "python"],
+    help="Target language for the puzzle (default: c)",
+  )
 
   args, remaining = parser.parse_known_args()
   return args, remaining
@@ -954,6 +969,7 @@ def user_consent(args, rypuzmk_opts, output_dir) -> bool:
   print(f"  Output directory (-o):        {output_dir}")
   print(f"  Agent (-a):                   {args.agent}")
   print(f"  Model (-m):                   {args.model}")
+  print(f"  Target language (--target):   {args.target}")
   print(f"  Parallelism (-j):             {args.parallelism}")
   print(f"  Max turns (--max-turns):      {args.max_turns if args.max_turns > 0 else 'unlimited'}")
   print(f"  Timeout per puzzle:           {args.timeout if args.timeout > 0 else 'unlimited'}")
@@ -1009,7 +1025,8 @@ def main() -> None:
   # --- Phase 1: Generate puzzles ---
   if not args.analyze_only:
     log("Phase 1: Generating puzzles")
-    generate_puzzles(output_dir, args.n, rypuzmk_opts)
+    target_opts = rypuzmk_opts + ["--target", args.target]
+    generate_puzzles(output_dir, args.n, target_opts, target=args.target)
   else:
     log("Phase 1: Skipped (--analyze-only)")
 
@@ -1034,6 +1051,7 @@ def main() -> None:
       max_turns=args.max_turns,
       timeout=args.timeout,
       max_budget_usd=args.max_budget_usd,
+      target=args.target,
     )
     results = runner.run_all()
   else:

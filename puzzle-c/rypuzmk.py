@@ -24,13 +24,21 @@ import tree_sitter_c as tsc
 from puzzle_common import (
   apply_replacements,
   build_goto_successors,
+  build_python_cfg,
   build_structured_cfg,
   collect_defined_functions,
   collect_leaf_locals,
+  collect_python_leaf_locals,
+  collect_python_replacements,
   collect_replacements,
   find_block_comments,
   find_leaf_function,
+  # Python support:
+  find_python_block_comments,
+  find_python_leaf_function,
+  get_line_indent,
   get_maskable_statements,
+  get_python_maskable_statements,
   is_structured_c,
   sanitize_statement_expressions,
   strip_refractir_prefix,
@@ -67,7 +75,7 @@ PUZZLE_HEADER_TEMPLATE = """\
 //
 // Use the following command to verify your solution:
 //
-//   ./tools/rypuzchk-c [this_puzzle_file].c [your_solution].c
+//   ./tools/rypuzchk-c [this_puzzle_file].{{EXT}} [your_solution].{{EXT}}
 //
 // ------------------------------------------------
 // General Requirements
@@ -101,14 +109,25 @@ BUDGET_SECTION_TEMPLATE = """\
 # -----------------------------------------------------------------------------
 
 
-def _build_trace_replacements(leaf_node, src: bytes) -> list:
+def _build_trace_replacements(leaf_node, src: bytes, is_python: bool = False) -> list:
   """Build ``(ins_point, ins_point, text)`` insertions for DUMP_TRACE blocks.
 
   Inserts ``#ifdef DUMP_TRACE / printf("^<name>:\\n"); / #endif`` immediately
   after each label's colon (for unstructured C) or after each block comment
   (for structured C) in the leaf function body.
+  For Python, inserts indentation-aware trace prints that check the DUMP_TRACE
+  environment variable.
   """
   replacements = []
+  if is_python:
+    comments = find_python_block_comments(src)
+    comments = [c for c in comments if leaf_node.lineno <= c[3] <= leaf_node.end_lineno]
+    for start, end, label, line in comments:
+      indent = get_line_indent(src, start)
+      ins_text = f'\n{indent}if __import__("os").environ.get("DUMP_TRACE"):\n{indent}    print("^{label}:")'
+      replacements.append((end, end, ins_text))
+    return replacements
+
   body = leaf_node.child_by_field_name("body")
   if not body:
     return replacements
@@ -145,18 +164,93 @@ def self_check_puzzle(
   ts_parser,
   defined_funcs: set[str],
   cfg_edges_list: list[tuple[str, str]],
+  is_python: bool = False,
 ) -> bool:
   """Re-mask the unmasked ground-truth and verify it matches the puzzle body.
 
-  ``gt_body`` already contains the DUMP_TRACE instrumentation (it is the
-  original source with only trace blocks inserted, no masking).  The self-check
+  ``gt_body`` already contains the DUMP_TRACE instrumentation.  The self-check
   re-parses ``gt_body``, derives masking replacements from its AST byte offsets,
-  and applies *only* those (no trace re-insertion — that would double-insert the
-  blocks).  The result must equal ``puzzle_body`` exactly.
+  and applies *only* those.  The result must equal ``puzzle_body`` exactly.
 
   Returns True on success, False on failure.
   """
   gt_bytes = gt_body.encode("utf-8")
+
+  if is_python:
+    import ast
+
+    try:
+      gt_tree = ast.parse(gt_bytes)
+    except Exception as e:
+      print(
+        f"Error: self-check failed: ground truth has syntax errors: {e}",
+        file=sys.stderr,
+      )
+      return False
+    gt_leaf, _ = find_python_leaf_function(gt_tree, gt_bytes)
+    if not gt_leaf:
+      print(
+        "Error: self-check failed: regenerated ground truth has no leaf function.",
+        file=sys.stderr,
+      )
+      return False
+    gt_maskable, entry_line, exit_line = get_python_maskable_statements(
+      gt_leaf, gt_bytes
+    )
+    if not entry_line or not exit_line:
+      print(
+        "Error: self-check failed: ground truth is missing entry/exit comments.",
+        file=sys.stderr,
+      )
+      return False
+    local_names = collect_python_leaf_locals(gt_leaf)
+
+    remasked_repls: list = []
+    gt_budget: dict = {}
+    for idx, stmt in enumerate(gt_maskable):
+      if idx in mask_set:
+        is_body = stmt.lineno > entry_line
+        collect_python_replacements(
+          stmt,
+          gt_bytes,
+          is_body,
+          remasked_repls,
+          gt_budget,
+          local_names,
+          defined_funcs,
+        )
+    remasked = apply_replacements(gt_bytes, remasked_repls).decode("utf-8")
+    if remasked != puzzle_body:
+      import difflib
+
+      print("remasked vs puzzle_body diff:", file=sys.stderr)
+      print(
+        "\n".join(
+          difflib.unified_diff(
+            remasked.splitlines(), puzzle_body.splitlines(), lineterm=""
+          )
+        ),
+        file=sys.stderr,
+      )
+      print(
+        "Error: self-check failed: ground truth does not re-mask to the puzzle.",
+        file=sys.stderr,
+      )
+      return False
+
+    if cfg_edges_list:
+      actual_edges = build_python_cfg(gt_leaf, gt_bytes)
+      declared_edges = set(cfg_edges_list)
+      if declared_edges != actual_edges:
+        print(
+          f"Error: self-check failed: declared CFG edges do not match ground-truth CFG.\n"
+          f"  Declared: {declared_edges}\n"
+          f"  Actual:   {actual_edges}",
+          file=sys.stderr,
+        )
+        return False
+    return True
+
   gt_sanitized = sanitize_statement_expressions(gt_bytes)
   gt_tree = ts_parser.parse(gt_sanitized)
   gt_leaf, _ = find_leaf_function(gt_tree.root_node, gt_sanitized)
@@ -183,8 +277,8 @@ def self_check_puzzle(
   # Derive masking replacements from gt_body's own byte offsets.
   # Do NOT call _build_trace_replacements here — gt_body already has those
   # blocks; re-inserting them would produce double trace output and wrong offsets.
-  remasked_repls: list = []
-  gt_budget: dict = {}
+  remasked_repls = []
+  gt_budget = {}
   for idx, stmt in enumerate(gt_maskable):
     if idx in mask_set:
       is_body = stmt.start_byte > gt_entry.start_byte
@@ -286,12 +380,13 @@ def extract_metadata_from_sir(sir_path: str) -> tuple[str, str, str]:
 
 
 def run_rysmith_loop(args, run_seed: int, tmp_dir: str) -> tuple[str, str]:
-  """Run rysmith repeatedly (up to 100 times) until a C+SIR pair is produced.
+  """Run rysmith repeatedly (up to 100 times) until a source+SIR pair is produced.
 
-  Seeds are incremented on each failed attempt.  Returns ``(c_path, sir_path)``.
+  Seeds are incremented on each failed attempt.  Returns ``(src_path, sir_path)``.
   Exits with code 1 after 100 failures.
   """
   attempt = 0
+  ext = "py" if args.target == "python" else "c"
   while attempt < 100:
     # Clean the temp dir before each attempt.
     for item in os.listdir(tmp_dir):
@@ -318,27 +413,28 @@ def run_rysmith_loop(args, run_seed: int, tmp_dir: str) -> tuple[str, str]:
       "--seed",
       str(run_seed),
       "--target",
-      "c",
+      args.target,
     ]
-    if args.structured:
+    if args.structured and args.target == "c":
       cmd += ["--structured-lowering", "true"]
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    c_path = sir_path = None
+    src_path = sir_path = None
     for f in os.listdir(tmp_dir):
-      if f.endswith(".c"):
-        c_path = os.path.join(tmp_dir, f)
+      if f.endswith(f".{ext}"):
+        src_path = os.path.join(tmp_dir, f)
       elif f.endswith(".sir"):
         sir_path = os.path.join(tmp_dir, f)
 
-    if c_path and sir_path:
-      return c_path, sir_path
+    if src_path and sir_path:
+      return src_path, sir_path
 
     run_seed += 1
     attempt += 1
 
   print(
-    "Error: rysmith did not generate a C+SIR pair after 100 attempts.", file=sys.stderr
+    f"Error: rysmith did not generate a {args.target.upper()}+SIR pair after 100 attempts.",
+    file=sys.stderr,
   )
   sys.exit(1)
 
@@ -349,63 +445,91 @@ def create_puzzle(c_path: str, sir_path: str, args) -> None:
   This is the main pipeline function called whether the source came from
   rysmith generation or was supplied directly via ``--input``.
   """
+  is_python = c_path.endswith(".py")
   with open(c_path, "rb") as f:
     src_raw = f.read()
 
   # Strip the refractir_ prefix from all identifiers to keep the puzzle concise.
   src = strip_refractir_prefix(src_raw)
 
-  # Build the tree-sitter parser once and reuse it in the self-check.
-  C_LANGUAGE = Language(tsc.language(), "c")
-  ts_parser = Parser()
-  ts_parser.set_language(C_LANGUAGE)
+  if is_python:
+    import ast
 
-  src_sanitized = sanitize_statement_expressions(src)
-  tree = ts_parser.parse(src_sanitized)
+    try:
+      tree = ast.parse(src)
+    except Exception as e:
+      print(f"Error: Python syntax error: {e}", file=sys.stderr)
+      sys.exit(1)
 
-  leaf_node, leaf_name = find_leaf_function(tree.root_node, src_sanitized)
-  if not leaf_node:
-    print("Error: Could not find leaf function in C program.", file=sys.stderr)
-    sys.exit(1)
+    leaf_node, leaf_name = find_python_leaf_function(tree, src)
+    if not leaf_node:
+      print("Error: Could not find leaf function in Python program.", file=sys.stderr)
+      sys.exit(1)
 
-  # Validate leaf shape: must have entry and exit labels.
-  maskable, entry_node, exit_node = get_maskable_statements(leaf_node, src_sanitized)
-  if not entry_node or not exit_node:
-    print("Error: Leaf function is missing 'entry' or 'exit' labels.", file=sys.stderr)
-    sys.exit(1)
+    maskable, entry_line, exit_line = get_python_maskable_statements(leaf_node, src)
+    if not entry_line or not exit_line:
+      print(
+        "Error: Leaf function is missing 'entry' or 'exit' comments.",
+        file=sys.stderr,
+      )
+      sys.exit(1)
 
-  # Collect local variable names for FILL_VAR detection.
-  local_names = collect_leaf_locals(leaf_node, src_sanitized)
+    local_names = collect_python_leaf_locals(leaf_node)
+    defined_funcs = set()
+    for node in ast.walk(tree):
+      if isinstance(node, ast.FunctionDef):
+        defined_funcs.add(node.name)
 
-  # Collect all function names defined in this file for FILL_FUNC detection.
-  # Only these are eligible for masking; compiler builtins and external symbols
-  # are automatically excluded because they have no function_definition node.
-  defined_funcs = collect_defined_functions(tree.root_node, src_sanitized)
+    ts_parser = None
+  else:
+    # Build the tree-sitter parser once and reuse it in the self-check.
+    C_LANGUAGE = Language(tsc.language(), "c")
+    ts_parser = Parser()
+    ts_parser.set_language(C_LANGUAGE)
+
+    src_sanitized = sanitize_statement_expressions(src)
+    tree = ts_parser.parse(src_sanitized)
+
+    leaf_node, leaf_name = find_leaf_function(tree.root_node, src_sanitized)
+    if not leaf_node:
+      print("Error: Could not find leaf function in C program.", file=sys.stderr)
+      sys.exit(1)
+
+    # Validate leaf shape: must have entry and exit labels.
+    maskable, entry_node, exit_node = get_maskable_statements(leaf_node, src_sanitized)
+    if not entry_node or not exit_node:
+      print(
+        "Error: Leaf function is missing 'entry' or 'exit' labels.",
+        file=sys.stderr,
+      )
+      sys.exit(1)
+
+    # Collect local variable names for FILL_VAR detection.
+    local_names = collect_leaf_locals(leaf_node, src_sanitized)
+
+    # Collect all function names defined in this file for FILL_FUNC detection.
+    defined_funcs = collect_defined_functions(tree.root_node, src_sanitized)
 
   # Extract PATH and checksum from the companion .sir file.
   path_str, _, _ = extract_metadata_from_sir(sir_path)
 
-  # Extract CFG edges directly from the C leaf function's AST.
+  # Extract CFG edges directly from the leaf function's AST.
   cfg_edges_list = []
-  if is_structured_c(leaf_node):
-    cfg_edges_list = list(build_structured_cfg(leaf_node, src_sanitized))
+  if is_python:
+    cfg_edges_list = list(build_python_cfg(leaf_node, src))
   else:
-    succs = build_goto_successors(leaf_node, src_sanitized)
-    for from_node, to_nodes in succs.items():
-      for to_node in to_nodes:
-        cfg_edges_list.append((from_node, to_node))
+    if is_structured_c(leaf_node):
+      cfg_edges_list = list(build_structured_cfg(leaf_node, src_sanitized))
+    else:
+      succs = build_goto_successors(leaf_node, src_sanitized)
+      for from_node, to_nodes in succs.items():
+        for to_node in to_nodes:
+          cfg_edges_list.append((from_node, to_node))
   cfg_edges_list.sort()
-  # Build the machine-readable //@ CFG_EDGE: A -> B lines.
-  # Note: The human-readable CFG adjacency listing is no longer used, so we only
-  # generate the //@ CFG_EDGE markers. These will directly replace the {{CFG}}
-  # placeholder in the header template since they work perfectly for both
-  # machine parsing and human reference.
+
   cfg_edges_str = "".join(f"//@ CFG_EDGE: {f} -> {t}\n" for f, t in cfg_edges_list)
 
   # --- Selective masking (--p-mask) ---
-  # With p == 1.0 every maskable statement is masked.  With p < 1.0 each
-  # position is independently masked with probability p; we retry up to 100
-  # times to ensure at least one position is masked when p > 0.
   mask_seed = args.seed if args.seed is not None else random.randint(0, 2**31 - 1)
   rng = random.Random(mask_seed)
 
@@ -425,23 +549,39 @@ def create_puzzle(c_path: str, sir_path: str, args) -> None:
       sys.exit(1)
 
   # --- Build replacements ---
-  # DUMP_TRACE instrumentation is always included (both in puzzle and ground truth).
-  trace_replacements = _build_trace_replacements(leaf_node, src_sanitized)
+  trace_replacements = _build_trace_replacements(
+    leaf_node, src if is_python else src_sanitized, is_python=is_python
+  )
 
   budget_counts: dict[str, int] = {}
   mask_replacements = []
-  for idx, stmt in enumerate(maskable):
-    if idx in mask_set:
-      is_body = stmt.start_byte > entry_node.start_byte
-      collect_replacements(
-        stmt,
-        src_sanitized,
-        is_body,
-        mask_replacements,
-        budget_counts,
-        local_names,
-        defined_funcs,
-      )
+
+  if is_python:
+    for idx, stmt in enumerate(maskable):
+      if idx in mask_set:
+        is_body = stmt.lineno > entry_line
+        collect_python_replacements(
+          stmt,
+          src,
+          is_body,
+          mask_replacements,
+          budget_counts,
+          local_names,
+          defined_funcs,
+        )
+  else:
+    for idx, stmt in enumerate(maskable):
+      if idx in mask_set:
+        is_body = stmt.start_byte > entry_node.start_byte
+        collect_replacements(
+          stmt,
+          src_sanitized,
+          is_body,
+          mask_replacements,
+          budget_counts,
+          local_names,
+          defined_funcs,
+        )
 
   puzzle_replacements = trace_replacements + mask_replacements
   puzzle_body = apply_replacements(src, puzzle_replacements).decode("utf-8")
@@ -450,9 +590,14 @@ def create_puzzle(c_path: str, sir_path: str, args) -> None:
   gt_body = apply_replacements(src, trace_replacements).decode("utf-8")
 
   # --- Self-check ---
-  # Re-masking the ground truth must reproduce the puzzle body exactly.
   if not self_check_puzzle(
-    puzzle_body, gt_body, mask_set, ts_parser, defined_funcs, cfg_edges_list
+    puzzle_body,
+    gt_body,
+    mask_set,
+    ts_parser,
+    defined_funcs,
+    cfg_edges_list,
+    is_python=is_python,
   ):
     sys.exit(1)
 
@@ -474,16 +619,28 @@ def create_puzzle(c_path: str, sir_path: str, args) -> None:
     .replace("{{CFG}}", cfg_edges_str if cfg_edges_str else "//   [unknown CFG]\n")
     .replace("{{PATH}}", path_str if path_str else "[unknown]")
     .replace("{{BUDGET_SECTION}}", budget_section)
+    .replace("{{EXT}}", "py" if is_python else "c")
   )
+  if is_python:
+    lines = []
+    for line in header.splitlines():
+      if line.startswith("//@"):
+        lines.append("#//@" + line[3:])
+      elif line.startswith("//"):
+        lines.append("#" + line[2:])
+      else:
+        lines.append(line)
+    header = "\n".join(lines) + "\n"
 
   # --- Write output ---
   if args.output:
     with open(args.output, "w") as f:
       f.write(header + puzzle_body)
     if args.keep_ground_truth:
-      # Derive ground-truth path by replacing the final extension with .gt.c.
       base, ext = os.path.splitext(args.output)
-      gt_path = base + ".gt" + ext if ext else args.output + ".gt.c"
+      gt_path = (
+        base + ".gt" + ext if ext else args.output + f".gt.{'py' if is_python else 'c'}"
+      )
       with open(gt_path, "w") as f:
         f.write(gt_body)
   else:
@@ -497,12 +654,12 @@ def create_puzzle(c_path: str, sir_path: str, args) -> None:
 
 def build_arg_parser() -> argparse.ArgumentParser:
   p = argparse.ArgumentParser(
-    description="C Puzzle Creator — masks a rysmith-generated C function into a fill-in-the-blanks puzzle.",
+    description="Puzzle Creator — masks a rysmith-generated C/Python function into a fill-in-the-blanks puzzle.",
   )
   p.add_argument(
     "input",
     nargs="?",
-    help="Optional concrete .c (or .sir with a sibling .c) file to mask instead of generating one.",
+    help="Optional concrete .c/.py (or .sir with sibling) file to mask instead of generating one.",
   )
   p.add_argument("-o", "--output", help="Output puzzle file path (default: stdout).")
 
@@ -546,12 +703,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     action="store_true",
     help="Generate structured C puzzle using loops and structured control flow instead of goto.",
   )
+  p.add_argument(
+    "--target",
+    default="c",
+    choices=["c", "python"],
+    help="Target language for the puzzle (default: c).",
+  )
 
   # Other options.
   p.add_argument(
     "--keep-ground-truth",
     action="store_true",
-    help="Save the unmasked ground-truth C file as <output>.gt.c.",
+    help="Save the unmasked ground-truth C/Python file as <output>.gt.<ext>.",
   )
   p.add_argument(
     "--rysmith",
@@ -576,7 +739,8 @@ def main() -> None:
 
   if args.keep_ground_truth and not args.output:
     print(
-      "Error: --keep-ground-truth requires --output to be specified.", file=sys.stderr
+      "Error: --keep-ground-truth requires --output to be specified.",
+      file=sys.stderr,
     )
     sys.exit(1)
 
@@ -584,29 +748,36 @@ def main() -> None:
     # Use a caller-supplied file instead of generating one.
     if args.input.endswith(".sir"):
       sir_path = args.input
-      c_path = args.input[:-4] + ".c"
+      ext = "py" if args.target == "python" else "c"
+      c_path = args.input[:-4] + f".{ext}"
       if not os.path.exists(c_path):
-        # Translate the SIR to C via symirc.
-        cmd = ["./symirc", sir_path, "-o", c_path]
-        if args.structured:
+        # Translate the SIR to source via symirc.
+        cmd = ["./symirc", sir_path, "-o", c_path, "--target", args.target]
+        if args.structured and args.target == "c":
           cmd.append("--structured-lowering")
         subprocess.run(cmd, check=True)
-    elif args.input.endswith(".c"):
+    elif args.input.endswith(".c") or args.input.endswith(".py"):
       c_path = args.input
-      pot_sir = args.input[:-2] + ".sir"
+      is_py = args.input.endswith(".py")
+      args.target = "python" if is_py else "c"
+      ext = "py" if is_py else "c"
+      pot_sir = args.input[: -len(ext) - 1] + ".sir"
       if not os.path.exists(pot_sir):
         print(
-          f"Error: Companion SIR file '{pot_sir}' not found for C input '{args.input}'.",
+          f"Error: Companion SIR file '{pot_sir}' not found for input '{args.input}'.",
           file=sys.stderr,
         )
         sys.exit(1)
       sir_path = pot_sir
     else:
-      print(f"Error: Unknown input file extension for '{args.input}'.", file=sys.stderr)
+      print(
+        f"Error: Unknown input file extension for '{args.input}'.",
+        file=sys.stderr,
+      )
       sys.exit(1)
     create_puzzle(c_path, sir_path, args)
   else:
-    # Generate a fresh C program via rysmith.
+    # Generate a fresh program via rysmith.
     run_seed = args.seed if args.seed is not None else random.randint(0, 2**31 - 1)
     with tempfile.TemporaryDirectory(prefix=f"rypuz_tmp_{run_seed}_") as tmp_dir:
       c_path, sir_path = run_rysmith_loop(args, run_seed, tmp_dir)

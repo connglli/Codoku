@@ -49,8 +49,15 @@ if [ -z "${MODEL}" ]; then
 fi
 
 # — Paths ————————————————————————————————————————————————————————————————
-PUZZLE_FILE="${PUZZLE_DIR}/puzzle.c"
-SOLUTION_FILE="${PUZZLE_DIR}/solution.c"
+if [ -f "${PUZZLE_DIR}/puzzle.py" ]; then
+  PUZZLE_FILE="${PUZZLE_DIR}/puzzle.py"
+  SOLUTION_FILE="${PUZZLE_DIR}/solution.py"
+  TEMPLATE_FILE="/opt/rypuz/puzzle-c/system_python.md"
+else
+  PUZZLE_FILE="${PUZZLE_DIR}/puzzle.c"
+  SOLUTION_FILE="${PUZZLE_DIR}/solution.c"
+  TEMPLATE_FILE="/opt/rypuz/puzzle-c/system.md"
+fi
 WORKSPACE="${PUZZLE_DIR}/workspace"
 TRAJECTORY="${PUZZLE_DIR}/trajectory.jsonl"
 SYSTEM_MD="${PUZZLE_DIR}/system.md"
@@ -59,12 +66,11 @@ CACHE_DIR="${PUZZLE_DIR}/agent_cache"
 mkdir -p "${WORKSPACE}"
 
 # — Process system.md template ———————————————————————————————————————————
-# The template (mounted at /opt/rypuz/system.md) contains placeholders
-# like {{PUZZLE_FILE}} that we resolve to this puzzle's concrete paths.
+# The template contains placeholders like {{PUZZLE_FILE}} that we resolve to this puzzle's concrete paths.
 sed -e "s|{{PUZZLE_FILE}}|${PUZZLE_FILE}|g"     \
     -e "s|{{SOLUTION_FILE}}|${SOLUTION_FILE}|g" \
     -e "s|{{WORKSPACE}}|${WORKSPACE}|g"         \
-    /opt/rypuz/puzzle-c/system.md > "${SYSTEM_MD}"
+    "${TEMPLATE_FILE}" > "${SYSTEM_MD}"
 
 # — Helper to run a command with optional timeout —————————————————————————
 run_agent() {
