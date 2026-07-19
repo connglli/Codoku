@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # -----------------------------------------------------------------------
-# opencode.sh — Run OpenCode on a RefractIR puzzle.
+# opencode.sh — Run OpenCode on a puzzle.
 # -----------------------------------------------------------------------
 set -euo pipefail
 

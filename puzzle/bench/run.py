@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-run.py — Push-button benchmark runner for RefractIR puzzle solving.
+run.py — Push-button benchmark runner for puzzle solving.
 
 Usage:
     python puzzle/bench/run.py -n 100 -m claude-opus-4-8 [-o output] [-a claude] [-j 1] [rypuzmk opts]
 
 Workflow:
-    1. Generate N puzzles (skipped if the output directory already has them).
+    1. Generate N puzzles locally using rypuzmk (Skip if already generated).
     2. Detect / build the Docker image (rypuz:latest).
     3. Start J parallel containers, each solving one puzzle.
     4. Analyze results and emit a summary table + result.json.
@@ -41,22 +41,17 @@ import analyzers
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 BENCH_DIR = Path(__file__).resolve().parent
 
-# Image for puzzle generation
-REFRACTIR_IMAGE = "refractir:latest"
-REFRACTIR_DOCKERFILE = REPO_ROOT / "Dockerfile"
-
 # Image for running agents
 BENCH_IMAGE = "rypuz:latest"
 BENCH_DOCKERFILE = BENCH_DIR / "Dockerfile"
 BENCH_ENTRYPOINT = BENCH_DIR / "entrypoint.sh"
-BENCH_SYSTEM_PROMPT = BENCH_DIR / "system.md"
 BENCH_ENV_FILE = BENCH_DIR / "rypuzbench.env"
 BENCH_DOCKER_MEMORY = "8g"
 BENCH_DOCKER_CPUS = "2"
 
 AGENTS = {
-  "claude": BENCH_DIR / "claude.sh",
-  "opencode": BENCH_DIR / "opencode.sh",
+  "claude": "claude.sh",
+  "opencode": "opencode.sh",
   # Future: "codex": BENCH_DIR / "codex.sh",
 }
 
@@ -71,7 +66,7 @@ class Verdict(str, Enum):
   COMPLETED_PASS = "PASS"  # Solution is valid and passed all checks
   # Granular failure verdicts — ordered from easiest to hardest stage:
   COMPLETED_FAIL_BASICS = "FAIL_BASICS"  # Stage 1: basics failure
-  COMPLETED_FAIL_PARSE = "FAIL_PARSE"  # Stage 2: solution not compilable/parseable
+  COMPLETED_FAIL_PARSE = "FAIL_PARSE"  # Stage 2: solution not parseable
   COMPLETED_FAIL_REMASKING = "FAIL_REMASKING"  # Stage 3: re-masked skeleton mismatch
   COMPLETED_FAIL_COMPILE = "FAIL_COMPILE"  # Stage 4: cosolution not compilable
   COMPLETED_FAIL_CFG = "FAIL_CFG"  # Stage 5: CFG topology wrong
@@ -82,8 +77,8 @@ class Verdict(str, Enum):
     "FAIL_OTHERS"  # Other failures (checker did not emit a stage tag)
   )
   COMPLETED_TIMEOUT = "TIMEOUT"  # Agent timed out; treated as no solutions
-  COMPLETED_NO_SOLUTION = "NO_SOLUTION"  # Agent finished but produced no solution.sir
-  COMPLETED_CHEAT = "CHEAT"  # Agent modified the puzzle.sir file (tampering detected)
+  COMPLETED_NO_SOLUTION = "NO_SOLUTION"  # Agent finished but produced no solution.c
+  COMPLETED_CHEAT = "CHEAT"  # Agent modified the puzzle.c file (tampering detected)
   # Incomplete verdicts
   INCOMPLETE_CANCELLED = "CANCELLED"  # Agent execution was cancelled (e.g. SIGINT)
   INCOMPLETE_ERROR = "ERROR"  # Internal or checker script error
@@ -137,7 +132,7 @@ def sha1_file(path: Path) -> str:
     content = f.read()
   # Conservatively removing all spaces.
   # This is safe since we don't support strings and comments don't matter.
-  clean_content = re.sub(b"\s+", b"", content)
+  clean_content = re.sub(rb"\s+", b"", content)
   h.update(clean_content)
   return h.hexdigest()
 
@@ -202,10 +197,11 @@ def build_docker_image(image_name: str, dockerfile_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def run_in_generation_container(
-  args: list[str],
+def run_in_container(
+  command: list[str],
+  workdir: Path,
   *,
-  output_dir: Path | None = None,
+  container_opts: list[str] | None = None,
   capture: bool = True,
   timeout: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
@@ -215,11 +211,11 @@ def run_in_generation_container(
     "run",
     "--rm",
     "-v",
-    f"{REPO_ROOT.resolve()}:/workspace",
+    f"{workdir.resolve()}:/workspace",
   ]
-  if output_dir is not None:
-    cmd += ["-v", f"{output_dir.resolve()}:/output"]
-  cmd += [REFRACTIR_IMAGE] + args
+  if container_opts:
+    cmd += container_opts
+  cmd += [BENCH_IMAGE] + command
 
   log(f"  $ {' '.join(cmd)}")
 
@@ -230,19 +226,27 @@ def generate_puzzles(
   output_dir: Path,
   n: int,
   rypuzmk_opts: list[str],
+  target: str = "sir",
 ) -> None:
   """Generate n puzzles under output_dir/puz-NNNN/ + output_dir/oracles/."""
   oracles = output_dir / "oracles"
   oracles.mkdir(parents=True, exist_ok=True)
 
+  if target == "python":
+    ext = "py"
+  elif target == "sir":
+    ext = "sir"
+  else:
+    ext = "c"
+
   # Check which puzzles already exist and skip them.
   start_from = 0
   for i in range(1, n + 1):
     puz_dir = output_dir / f"puz-{i:04d}"
-    puzzle_file = puz_dir / "puzzle.sir"
-    gt_file = oracles / f"sol-{i:04d}.sir"
+    puzzle_file = puz_dir / f"puzzle.{ext}"
+    gt_file = oracles / f"sol-{i:04d}.{ext}"
     hash_file = oracles / f"puz-{i:04d}.hash"
-    puz_copy_file = oracles / f"puz-{i:04d}.sir"
+    puz_copy_file = oracles / f"puz-{i:04d}.{ext}"
     if (
       puzzle_file.exists()
       and gt_file.exists()
@@ -260,17 +264,7 @@ def generate_puzzles(
     return
 
   # Build the refractir image if not skipped
-  build_docker_image(REFRACTIR_IMAGE, REFRACTIR_DOCKERFILE)
-
-  # Compile tools inside the container
-  log("Compiling tools (rypuzmk, rypuzchk, symiri) inside the Docker container...")
-  result = run_in_generation_container(
-    ["bash", "-c", "make clean && make -j all"],
-    capture=False,
-  )
-  if result.returncode != 0:
-    fatal("Failed to compile tools inside the Docker container.")
-  log("Tools compiled successfully inside the Docker container.")
+  build_docker_image(BENCH_IMAGE, BENCH_DOCKERFILE)
 
   # Start generating puzzles from the last existing index + 1
   log(f"Generating puzzles {start_from + 1}..{n} ({n - start_from} remaining)")
@@ -279,22 +273,22 @@ def generate_puzzles(
   while i <= n:
     puz_dir = output_dir / f"puz-{i:04d}"
     puz_dir.mkdir(parents=True, exist_ok=True)
-    puzzle_file = puz_dir / "puzzle.sir"
-    gt_raw_file = puzzle_file.with_suffix(".gt.sir")
-    gt_file = oracles / f"sol-{i:04d}.sir"
+    puzzle_file = puz_dir / f"puzzle.{ext}"
+    gt_raw_file = puzzle_file.with_suffix(f".gt.{ext}")
+    gt_file = oracles / f"sol-{i:04d}.{ext}"
     hash_file = oracles / f"puz-{i:04d}.hash"
-    puz_copy_file = oracles / f"puz-{i:04d}.sir"
+    puz_copy_file = oracles / f"puz-{i:04d}.{ext}"
 
-    # Build the rypuzmk command arguments for the container.
-    # Use --seed <i> for reproducibility unless the user already passed --seed.
-    container_args = [
-      "./rypuzmk",
-      "-o",
-      "/output/puzzle.sir",
-      "--keep-ground-truth",
-    ] + rypuzmk_opts
-
-    result = run_in_generation_container(container_args, output_dir=puz_dir)
+    result = run_in_container(
+      [
+        "/opt/rypuz/bin/rypuzmk",
+        "-o",
+        f"puzzle.{ext}",
+        "--keep-ground-truth",
+      ]
+      + rypuzmk_opts,
+      workdir=puz_dir,
+    )
     if result.returncode != 0:
       log(
         f"rypuzmk failed for puzzle {i}: {result.stderr.strip()}",
@@ -307,15 +301,15 @@ def generate_puzzles(
       continue
 
     if not puzzle_file.exists():
-      fatal(f"Error: puzzle.sir not generated for puzzle {i}")
+      fatal(f"Error: puzzle.{ext} not generated for puzzle {i}")
     if not gt_raw_file.exists():
       fatal(f"Error: ground-truth not found for puzzle {i}")
 
-    # rypuzmk writes ground-truth to <output>.gt.sir
+    # rypuzmk writes ground-truth to <output>.gt.<ext>
     shutil.move(str(gt_raw_file), str(gt_file))
-    # Save a copy of puzzle.sir alongside sol-XXXX.sir
+    # Save a copy of puzzle.c alongside sol-XXXX.c
     shutil.copy(str(puzzle_file), str(puz_copy_file))
-    # Compute SHA1 hash of puzzle.sir and save to oracles/puz-NNNN.hash
+    # Compute SHA1 hash of puzzle.c and save to oracles/puz-NNNN.hash
     hash_file.write_text(sha1_file(puzzle_file) + "\n")
 
     if i % 10 == 0 or i == n:
@@ -344,6 +338,7 @@ class BenchmarkRunner:
     max_turns: int,
     timeout: int,
     max_budget_usd: int,
+    target: str = "sir",
   ):
     self.output_dir = output_dir
     self.n = n
@@ -353,6 +348,13 @@ class BenchmarkRunner:
     self.max_turns = max_turns
     self.timeout = timeout
     self.max_budget_usd = max_budget_usd
+    self.target = target
+    if target == "python":
+      self.ext = "py"
+    elif target == "sir":
+      self.ext = "sir"
+    else:
+      self.ext = "c"
     self._containers: list[str] = []
     self._stop = False
 
@@ -456,28 +458,13 @@ class BenchmarkRunner:
     puz_dir = self.output_dir / f"puz-{puzzle_idx:04d}"
     (puz_dir / "workspace").mkdir(exist_ok=True)
 
-    agent_script = AGENTS[self.agent]
-    container_puzzle_dir = "/workspace/puzzle"
-
     # Agent script and system prompt are bind-mounted read-only
     # The puzzle directory is bind-mounted read-write
     container_name = f"rypuz-{puzzle_idx:04d}-{int(time.time())}"
 
-    cmd = [
-      "docker",
-      "run",
-      "--rm",
+    container_opts = [
       "--name",
       container_name,
-      # Mount puzzle dir
-      "-v",
-      f"{puz_dir.resolve()}:{container_puzzle_dir}",
-      # Mount common script (read-only)
-      "-v",
-      f"{(BENCH_DIR / 'common.sh').resolve()}:/opt/rypuz/common.sh:ro",
-      # Mount agent script (read-only)
-      "-v",
-      f"{agent_script.resolve()}:/opt/rypuz/agent.sh:ro",
       # Mount global env file (read-only)
       "-v",
       f"{BENCH_ENV_FILE.resolve()}:/opt/rypuz/rypuzbench.env:ro",
@@ -490,10 +477,13 @@ class BenchmarkRunner:
       # NOTE: disabled because agents needs API access
       # "--network",
       # "none",
-      BENCH_IMAGE,
+    ]
+
+    command = [
       # entrypoint args: agent-script puzzle-dir [agent-args...]
-      "/opt/rypuz/agent.sh",
-      container_puzzle_dir,
+      "/opt/rypuz/puzzle/agent.sh",
+      f"/opt/rypuz/puzzle/{AGENTS[self.agent]}",
+      "/workspace",
       "--model",
       self.model,
       "--timeout",
@@ -513,8 +503,10 @@ class BenchmarkRunner:
 
     timed_out = False
     try:
-      result = run_cmd(
-        cmd,
+      result = run_in_container(
+        command,
+        workdir=puz_dir,
+        container_opts=container_opts,
         timeout=self.timeout + 60 if self.timeout > 0 else None,
       )
       end_time = time.time()
@@ -577,8 +569,9 @@ class BenchmarkRunner:
     """Analyze a single puzzle result after the agent finishes."""
     puz_dir = self.output_dir / f"puz-{puzzle_idx:04d}"
     oracles = self.output_dir / "oracles"
-    puzzle_file = puz_dir / "puzzle.sir"
-    solution_file = puz_dir / "solution.sir"
+    ext = self.ext
+    puzzle_file = puz_dir / f"puzzle.{ext}"
+    solution_file = puz_dir / f"solution.{ext}"
     trajectory_file = puz_dir / "trajectory.jsonl"
     hash_file = oracles / f"puz-{puzzle_idx:04d}.hash"
 
@@ -613,7 +606,7 @@ class BenchmarkRunner:
     # didn't proceed. This is a heuristic to detect early failures.
     traj_file_stats = trajectory_file.stat()
     last_modified = traj_file_stats.st_mtime
-    if last_modified < end_time - 600:  # 10 minutes
+    if timed_out and last_modified < end_time - 600:  # 10 minutes
       analysis["verdict"] = Verdict.INCOMPLETE_ERROR
       analysis["error"] = (
         "Agent failed to respond: trajectory file not updated for 10+ minutes"
@@ -627,7 +620,7 @@ class BenchmarkRunner:
       analysis.update(traj_stats)
       return analysis
 
-    # 1. Check if solution.sir exists
+    # 1. Check if solution file exists
     has_solution = solution_file.exists()
     analysis["has_solution"] = has_solution
     log(f"  - has_solution={has_solution}")
@@ -637,15 +630,15 @@ class BenchmarkRunner:
       analysis.update(traj_stats)
       return analysis
 
-    # 2. Check if puzzle.sir was modified (cheat detection)
+    # 2. Check if puzzle file was modified (cheat detection)
     expected_hash = hash_file.read_text().strip()
     if puzzle_file.exists():
       actual_hash = sha1_file(puzzle_file)
       puzzle_modified = actual_hash != expected_hash
     else:
-      actual_hash = "<puzzle.sir deleted>"
+      actual_hash = f"<puzzle.{ext} deleted>"
       puzzle_modified = (
-        True  # If puzzle.sir is missing, treat it as modified (cheating)
+        True  # If puzzle file is missing, treat it as modified (cheating)
       )
 
     analysis["puzzle_modified"] = puzzle_modified
@@ -660,16 +653,13 @@ class BenchmarkRunner:
 
     # 3. Run rypuzchk to validate the solution
     try:
-      container_args = [
-        "./rypuzchk",
-        f"/output/puz-{puzzle_idx:04d}/puzzle.sir",
-        f"/output/puz-{puzzle_idx:04d}/solution.sir",
-        "--symiri",
-        "./symiri",
-      ]
-      chk_result = run_in_generation_container(
-        container_args,
-        output_dir=self.output_dir,
+      chk_result = run_in_container(
+        [
+          "/opt/rypuz/bin/rypuzchk",
+          f"puz-{puzzle_idx:04d}/puzzle.{ext}",
+          f"puz-{puzzle_idx:04d}/solution.{ext}",
+        ],
+        workdir=self.output_dir,
         timeout=60,
       )
       chk_stdout = chk_result.stdout + chk_result.stderr
@@ -889,7 +879,7 @@ def print_summary_table(summary: dict[str, Any]) -> None:
 def parse_args() -> tuple[argparse.Namespace, list[str]]:
   parser = argparse.ArgumentParser(
     prog="run.py",
-    description="RefractIR puzzle benchmark runner",
+    description="Puzzle benchmark runner",
     epilog=textwrap.dedent("""\
             Difficulty options forwarded to rypuzmk:
               -L, --min-loop-iter N   Minimum loop iterations (default: 2)
@@ -966,6 +956,12 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     action="store_true",
     help="Only analyze existing results, do not generate or run",
   )
+  parser.add_argument(
+    "--target",
+    default="sir",
+    choices=["sir", "c", "python"],
+    help="Target language/format for the puzzle (default: sir)",
+  )
 
   args, remaining = parser.parse_known_args()
   return args, remaining
@@ -980,6 +976,7 @@ def user_consent(args, rypuzmk_opts, output_dir) -> bool:
   print(f"  Output directory (-o):        {output_dir}")
   print(f"  Agent (-a):                   {args.agent}")
   print(f"  Model (-m):                   {args.model}")
+  print(f"  Target language (--target):   {args.target}")
   print(f"  Parallelism (-j):             {args.parallelism}")
   print(f"  Max turns (--max-turns):      {args.max_turns if args.max_turns > 0 else 'unlimited'}")
   print(f"  Timeout per puzzle:           {args.timeout if args.timeout > 0 else 'unlimited'}")
@@ -1035,7 +1032,8 @@ def main() -> None:
   # --- Phase 1: Generate puzzles ---
   if not args.analyze_only:
     log("Phase 1: Generating puzzles")
-    generate_puzzles(output_dir, args.n, rypuzmk_opts)
+    target_opts = rypuzmk_opts + ["--target", args.target]
+    generate_puzzles(output_dir, args.n, target_opts, target=args.target)
   else:
     log("Phase 1: Skipped (--analyze-only)")
 
@@ -1060,6 +1058,7 @@ def main() -> None:
       max_turns=args.max_turns,
       timeout=args.timeout,
       max_budget_usd=args.max_budget_usd,
+      target=args.target,
     )
     results = runner.run_all()
   else:

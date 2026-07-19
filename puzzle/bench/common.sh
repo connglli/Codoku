@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # -----------------------------------------------------------------------
-# common.sh — Shared utility logic for RefractIR agent runners.
+# common.sh — Shared utility logic for puzzle agent runners.
 # -----------------------------------------------------------------------
 # Unified agent interface (all agents must follow this contract):
 #
@@ -8,14 +8,13 @@
 #               [--max-turns N] [--max-budget-usd F]
 #
 # Inputs (inside <puzzle-dir>):
-#   puzzle.sir          The puzzle to solve
-#   tools/              Symlinks to RefractIR tools + SMT solvers
-#   references/         Symlinks to reference documentation
+#   puzzle.<ext>        The <ext> puzzle to solve
+#   tools/              Symlinks to puzzle toolchain (rypuzchk, etc.)
 #   workspace/          Writable scratch space
 #   system.md           Instructions (pre-processed with runtime paths)
 #
 # Outputs (agent must produce):
-#   solution.sir        The solved puzzle (if successful)
+#   solution.<ext>      The solved puzzle (if successful)
 #   trajectory.jsonl    Raw agent output / log
 #   agent_cache/        Agent session / cache data
 #
@@ -50,8 +49,19 @@ if [ -z "${MODEL}" ]; then
 fi
 
 # — Paths ————————————————————————————————————————————————————————————————
-PUZZLE_FILE="${PUZZLE_DIR}/puzzle.sir"
-SOLUTION_FILE="${PUZZLE_DIR}/solution.sir"
+if [ -f "${PUZZLE_DIR}/puzzle.py" ]; then
+  PUZZLE_FILE="${PUZZLE_DIR}/puzzle.py"
+  SOLUTION_FILE="${PUZZLE_DIR}/solution.py"
+  TEMPLATE_FILE="/opt/rypuz/puzzle/system_python.md"
+elif [ -f "${PUZZLE_DIR}/puzzle.sir" ]; then
+  PUZZLE_FILE="${PUZZLE_DIR}/puzzle.sir"
+  SOLUTION_FILE="${PUZZLE_DIR}/solution.sir"
+  TEMPLATE_FILE="/opt/rypuz/puzzle/system_sir.md"
+else
+  PUZZLE_FILE="${PUZZLE_DIR}/puzzle.c"
+  SOLUTION_FILE="${PUZZLE_DIR}/solution.c"
+  TEMPLATE_FILE="/opt/rypuz/puzzle/system_c.md"
+fi
 WORKSPACE="${PUZZLE_DIR}/workspace"
 TRAJECTORY="${PUZZLE_DIR}/trajectory.jsonl"
 SYSTEM_MD="${PUZZLE_DIR}/system.md"
@@ -60,12 +70,11 @@ CACHE_DIR="${PUZZLE_DIR}/agent_cache"
 mkdir -p "${WORKSPACE}"
 
 # — Process system.md template ———————————————————————————————————————————
-# The template (mounted at /opt/rypuz/system.md) contains placeholders
-# like {{PUZZLE_FILE}} that we resolve to this puzzle's concrete paths.
+# The template contains placeholders like {{PUZZLE_FILE}} that we resolve to this puzzle's concrete paths.
 sed -e "s|{{PUZZLE_FILE}}|${PUZZLE_FILE}|g"     \
     -e "s|{{SOLUTION_FILE}}|${SOLUTION_FILE}|g" \
     -e "s|{{WORKSPACE}}|${WORKSPACE}|g"         \
-    /opt/rypuz/system.md > "${SYSTEM_MD}"
+    "${TEMPLATE_FILE}" > "${SYSTEM_MD}"
 
 # — Helper to run a command with optional timeout —————————————————————————
 run_agent() {

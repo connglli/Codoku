@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # -----------------------------------------------------------------------
-# claude.sh — Run Claude Code on a C puzzle.
+# claude.sh — Run Claude Code on a puzzle.
 # -----------------------------------------------------------------------
 set -euo pipefail
 

@@ -35,7 +35,7 @@ That also said, avoid generating the solution file before you solve the puzzle s
 
 Use the checker to verify your solution:
 ```bash
-./tools/rypuzchk-c {{PUZZLE_FILE}} {{SOLUTION_FILE}}
+./tools/rypuzchk {{PUZZLE_FILE}} {{SOLUTION_FILE}}
 ```
 
 `[PASS]` means your solution is valid. `[FAIL]` means something is wrong — read the error message.
@@ -59,7 +59,7 @@ DUMP_TRACE=1 python3 {{SOLUTION_FILE}}
 - Map out all local variables and their types from the declarations at the top of the function.
 - Trace the execution path block by block, reasoning about what each statement must compute.
 - For each `FILL_CONST`, use the budget (`#//@ FILL_CONST:` lines) to constrain your choices.
-- Use the checker (`./tools/rypuzchk-c`) for the definitive pass/fail verdict.
+- Use the checker (`./tools/rypuzchk`) for the definitive pass/fail verdict.
 - If the checker fails with a path mismatch, the control flow transitions are wrong — revisit `FILL_CTRL` (for control keywords) marks.
 - If the checker fails with a structural integrity error, you changed something outside the blanks.
 - If the checker fails with a FILL_CONST budget error, you used the wrong constant value or count.
