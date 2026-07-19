@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# entrypoint.sh — Docker image entrypoint for the rypuz-c benchmark sandbox.
+# entrypoint.sh — Docker image entrypoint for the rypuz benchmark sandbox.
 #
 # Activates the Python virtual environment and sources global environment variables,
 # then executes the passed command.

@@ -57,23 +57,25 @@ RUN git clone --depth 1 --branch 0.9.1 \
 RUN git clone --depth 1 --branch main \
       https://github.com/connglli/ReifyPuzzle /tmp/reifypuzzle-src \
     && cd /tmp/reifypuzzle-src \
-    && make -j$(nproc) symiri symirc symirsolve rypuzchk \
-    && mkdir -p /opt/rypuz/tools \
-    && cp symiri symirc symirsolve rypuzchk /opt/rypuz/tools/ \
+    # Build and install the toolchain
+    && mkdir -p /opt/rypuz \
+    && INSTALL_PREFIX=/opt/rypuz make -j$(nproc) install \
+    && python3 -m venv /opt/rypuz/venv \
+    && . /opt/rypuz/venv/bin/activate \
+    && pip install --no-cache-dir -r requirements.txt \
+    # Save references
+    && mkdir -p /opt/rypuz/references/ \
+    && cp docs/SPEC_v0.2.2.md   /opt/rypuz/references/SPEC.md \
+    && cp docs/float.md         /opt/rypuz/references/float.md \
+    && cp docs/intrinsics.md    /opt/rypuz/references/intrinsics.md \
+    && cp docs/undefined.md     /opt/rypuz/references/undefined.md \
+    && cp -r examples/          /opt/rypuz/references/examples/ \
+    && cp -r test/interp/       /opt/rypuz/references/interp/ \
+    # Save benchmark files
+    && mkdir -p /opt/rypuz/puzzle \
+    && cp puzzle/bench/*        /opt/rypuz/puzzle/ \
+    && chmod +x /opt/rypuz/puzzle/*.sh \
     && rm -rf /tmp/reifypuzzle-src
-
-# Reference material
-# These are the docs/examples the puzzle banner points solvers to.
-COPY docs/SPEC_v0.2.2.md   /opt/rypuz/references/SPEC.md
-COPY docs/float.md         /opt/rypuz/references/float.md
-COPY docs/intrinsics.md    /opt/rypuz/references/intrinsics.md
-COPY docs/undefined.md     /opt/rypuz/references/undefined.md
-COPY examples/             /opt/rypuz/references/examples/
-COPY test/interp/          /opt/rypuz/references/interp/
-
-# Others
-COPY puzzle/bench/system.md /opt/rypuz/system.md
-COPY puzzle/bench/common.sh /opt/rypuz/common.sh
 
 # Claude Code & OpenCode
 RUN npm install -g @anthropic-ai/claude-code opencode-ai
@@ -82,13 +84,9 @@ RUN npm install -g @anthropic-ai/claude-code opencode-ai
 RUN groupadd -g ${GID} solver 2>/dev/null || true \
     && useradd -m -u ${UID} -g ${GID} -s /bin/bash solver
 
-# — Entrypoint ————————————————————————————————————————————
-COPY puzzle/bench/entrypoint.sh /opt/rypuz/entrypoint.sh
-RUN chmod +x /opt/rypuz/entrypoint.sh
-
 # — Workspace —————————————————————————————————————————————
-RUN mkdir -p /workspace && chown solver:solver /workspace
+RUN mkdir -p /workspace && chown ${UID}:${GID} /workspace
 WORKDIR /workspace
 USER solver
 
-ENTRYPOINT ["/opt/rypuz/entrypoint.sh"]
+ENTRYPOINT ["/opt/rypuz/puzzle/entrypoint.sh"]

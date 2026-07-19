@@ -75,7 +75,7 @@ PUZZLE_HEADER_TEMPLATE = """\
 //
 // Use the following command to verify your solution:
 //
-//   ./tools/rypuzchk-c [this_puzzle_file].{{EXT}} [your_solution].{{EXT}}
+//   ./tools/rypuzchk [this_puzzle_file].{{EXT}} [your_solution].{{EXT}}
 //
 // ------------------------------------------------
 // General Requirements
