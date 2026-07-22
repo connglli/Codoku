@@ -1108,7 +1108,31 @@ def collect_python_replacements(
   local_names: set[str],
   defined_funcs: set[str],
 ) -> None:
-  """Recursively walk node and append (start, end, FILL_XXX) replacement tuples."""
+  """Recursively walk node and append (start, end, FILL_XXX) replacement tuples.
+
+  Masking rules (mirrors puzzle_common.hpp's SIRMaskedPrinter):
+  - lvalues whose base is in *local_names* → ``FILL_VAR``
+  - number literals → ``FILL_CONST`` (counted in *budget_counts*)
+  - break/continue → ``FILL_CTRL``
+  - function calls:
+      * Retained preamble helpers that still appear under --no-ub-guards
+        (_cast_int, _padd, _pdiff, _peq, _prel, _load, _store, _pidx, _pfield)
+        → ``FILL_OP``
+      * Calls to functions defined in the same file (*defined_funcs*)
+        → ``FILL_FUNC`` (excluding internal helpers like _trap, _f32, …)
+      * Note: under --no-ub-guards (the default for rysmith/rylink output)
+        the arithmetic helpers and the float helpers are never
+        emitted; integer ops lower to inline BinOp expressions and float ops
+        to _f32(a op b).  Those names are intentionally absent from this list.
+  - binary operators in BinOp → ``FILL_OP``
+  - comparison operators → ``FILL_OP``
+  - unary operators → ``FILL_OP``
+  - ternary if/else in IfExp → ``FILL_OP``
+
+  ``is_body`` is True for statements strictly inside the function body (between
+  entry/exit).  For let-initialisers (``is_body=False``) the sentinels ``0``
+  and ``1`` are left visible.
+  """
   if not hasattr(node, "lineno"):
     return
 
@@ -1130,8 +1154,10 @@ def collect_python_replacements(
 
   if isinstance(node, ast.Constant):
     if isinstance(node.value, (int, float, bool)) or node.value is None:
+      if isinstance(node.value, bool) or node.value is None:
+        return
       val_str = str(node.value)
-      if not is_body and node.value in (0, 1, 0.0, 1.0, True, False, None):
+      if not is_body and node.value in (0, 1, 0.0, 1.0):
         return
       start, end = get_node_offsets(node)
       replacements.append((start, end, "FILL_CONST"))
@@ -1146,22 +1172,13 @@ def collect_python_replacements(
   if isinstance(node, ast.Call):
     if isinstance(node.func, ast.Name):
       func_name = node.func.id
+      # [v0.2.3] Preamble helpers that survive under --no-ub-guards and still
+      # appear as call-form expressions in the generated body are masked as
+      # FILL_OP.  The arithmetic helpers are intentionally absent:
+      # they are inlined as Python expressions by the backend under
+      # --no-ub-guards and never appear in generated code.
       if func_name in (
-        "_iadd",
-        "_isub",
-        "_imul",
-        "_sdiv",
-        "_srem",
-        "_shl",
-        "_ashr",
-        "_lshr",
         "_cast_int",
-        "_fadd",
-        "_fsub",
-        "_fmul",
-        "_fdiv",
-        "_ffmod",
-        "_f2i",
         "_padd",
         "_pdiff",
         "_peq",
@@ -1219,6 +1236,7 @@ def collect_python_replacements(
       b"**",
       b"<<",
       b">>",
+      b"//",  # [v0.2.3] must precede b"/" — floor-div is two chars
       b"+",
       b"-",
       b"*",
