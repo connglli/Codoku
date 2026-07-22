@@ -24,7 +24,7 @@ That also said, avoid generating the solution file before you solve the puzzle s
 
 - `FILL_VAR` → a local variable or parameter name (possibly with `[idx]` subscript)
 - `FILL_CONST` → an integer, float, boolean, or None literal (must match the budget exactly — right value, right count)
-- `FILL_OP` → a Python operator or helper function (`_iadd`, `_isub`, `_imul`, `_sdiv`, `_srem`, `_shl`, `_ashr`, `_lshr`, `_cast_int`, `_fadd`, `_fsub`, `_fmul`, `_fdiv`, `_ffmod`, `_f2i`, `_padd`, `_pdiff`, `_peq`, `_prel`, `_load`, `_store`, `_pidx`, `_pfield`, `_Ptr`, `_rd`, `_vrd`, `_f32`, `+`, `-`, `*`, `/`, `%`, `&`, `|`, `^`, `<<`, `>>`, `~`, `==`, `!=`, `<`, `>`, `<=`, `>=`, `if`, `else`)
+- `FILL_OP` → a Python operator or helper function (`_cast_int`, `_padd`, `_pdiff`, `_peq`, `_prel`, `_load`, `_store`, `_pidx`, `_pfield`, `_Ptr`, `_rd`, `_vrd`, `_f32`, `+`, `-`, `*`, `/`, `%`, `&`, `|`, `^`, `<<`, `>>`, `~`, `==`, `!=`, `<`, `>`, `<=`, `>=`, `if`, `else`)
 - `FILL_TYPE` → not used (Python is dynamically typed)
 - `FILL_LABEL` → not used (Python has no goto-based blocks)
 - `FILL_FUNC` → a helper function name defined elsewhere in the same file
