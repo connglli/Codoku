@@ -1205,22 +1205,23 @@ def collect_python_replacements(
         "_store",
         "_pidx",
         "_pfield",
-      ):
-        start, end = get_node_offsets(node.func)
-        replacements.append((start, end, "FILL_OP"))
-      elif func_name in defined_funcs and func_name not in (
-        "_crc32_update_i32",
-        "_check_chksum_i32",
-        "_in_check_chksum",
-        "_trap",
-        "_ichk",
-        "_fin",
-        "_f32",
-        "_f64",
-        "_Ptr",
-        "_rd",
-        "_vrd",
-        "_idx",
+      ) or (
+        func_name in defined_funcs
+        and func_name
+        not in (
+          "_crc32_update_i32",
+          "_check_chksum_i32",
+          "_in_check_chksum",
+          "_trap",
+          "_ichk",
+          "_fin",
+          "_f32",
+          "_f64",
+          "_Ptr",
+          "_rd",
+          "_vrd",
+          "_idx",
+        )
       ):
         start, end = get_node_offsets(node.func)
         replacements.append((start, end, "FILL_FUNC"))

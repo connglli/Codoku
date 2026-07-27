@@ -24,10 +24,10 @@ That also said, avoid generating the solution file before you solve the puzzle s
 
 - `FILL_VAR` → a local variable or parameter name (possibly with `[idx]` subscript)
 - `FILL_CONST` → an integer, float, boolean, or None literal (must match the budget exactly — right value, right count)
-- `FILL_OP` → a Python operator or helper function (`_cast_int`, `_padd`, `_pdiff`, `_peq`, `_prel`, `_load`, `_store`, `_pidx`, `_pfield`, `_Ptr`, `_rd`, `_vrd`, `_f32`, `+`, `-`, `*`, `/`, `%`, `&`, `|`, `^`, `<<`, `>>`, `~`, `==`, `!=`, `<`, `>`, `<=`, `>=`, `if`, `else`)
+- `FILL_OP` → a Python operator (`+`, `-`, `*`, `/`, `%`, `//`, `&`, `|`, `^`, `<<`, `>>`, `~`, `==`, `!=`, `<`, `>`, `<=`, `>=`, `if`, `else`, `not`, `and`, `or`)
 - `FILL_TYPE` → not used (Python is dynamically typed)
 - `FILL_LABEL` → not used (Python has no goto-based blocks)
-- `FILL_FUNC` → a helper function name defined elsewhere in the same file
+- `FILL_FUNC` → a function call name (e.g., `_cast_int`, `_padd`, `_pdiff`, `_peq`, `_prel`, `_load`, `_store`, `_pidx`, `_pfield`, or any function defined in the file)
 - `FILL_FIELD` → not used
 - `FILL_CTRL` → a control keyword (`break` or `continue`)
 
