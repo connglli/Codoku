@@ -1147,6 +1147,18 @@ def collect_python_replacements(
     return n
 
   leftmost = get_py_leftmost_base(node)
+
+  if not is_body and isinstance(node, ast.Assign):
+    collect_python_replacements(
+      node.value,
+      src_bytes,
+      is_body,
+      replacements,
+      budget_counts,
+      local_names,
+      defined_funcs,
+    )
+    return
   if isinstance(leftmost, ast.Name) and leftmost.id in local_names:
     start, end = get_node_offsets(node)
     replacements.append((start, end, "FILL_VAR"))
