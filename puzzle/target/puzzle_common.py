@@ -307,7 +307,10 @@ def get_maskable_statements(func_node, src: bytes):
 
   if is_structured_c(func_node):
     comments = find_block_comments(body, src)
-    comment_map = {label: node for node, label in comments}
+    comment_map = {}
+    for node, label in comments:
+      if label not in comment_map:
+        comment_map[label] = node
     if "entry" not in comment_map or "exit" not in comment_map:
       return [], None, None
     entry_node = comment_map["entry"]
@@ -1025,7 +1028,10 @@ def get_python_maskable_statements(
   """
   comments = find_python_block_comments(src)
   comments = [c for c in comments if leaf_node.lineno <= c[3] <= leaf_node.end_lineno]
-  comment_map = {label: idx for _, _, label, idx in comments}
+  comment_map = {}
+  for _, _, label, idx in comments:
+    if label not in comment_map:
+      comment_map[label] = idx
 
   if "entry" not in comment_map or "exit" not in comment_map:
     return [], 0, 0
