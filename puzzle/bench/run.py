@@ -339,6 +339,7 @@ class BenchmarkRunner:
     timeout: int,
     max_budget_usd: int,
     target: str = "sir",
+    resume_error_state: bool = False,
   ):
     self.output_dir = output_dir
     self.n = n
@@ -349,6 +350,7 @@ class BenchmarkRunner:
     self.timeout = timeout
     self.max_budget_usd = max_budget_usd
     self.target = target
+    self.resume_error_state = resume_error_state
     if target == "python":
       self.ext = "py"
     elif target == "sir":
@@ -450,13 +452,26 @@ class BenchmarkRunner:
         pending.append(i)
     return pending, finished
 
+  def _clean_puzzle_dir_if_needed(self, puz_dir: Path) -> None:
+    """If resume_error_state is False, remove all solver-generated files/directories in puz_dir."""
+    if self.resume_error_state or not puz_dir.exists():
+      return
+    puzzle_filename = f"puzzle.{self.ext}"
+    for item in puz_dir.iterdir():
+      if item.name == puzzle_filename:
+        continue
+      if item.is_symlink() or not item.is_dir():
+        item.unlink(missing_ok=True)
+      else:
+        shutil.rmtree(item, ignore_errors=True)
+
   def _run_single(self, puzzle_idx: int) -> dict[str, Any]:
     """Run the agent on a single puzzle in a Docker container."""
     if self._stop:
       return {"puzzle_id": puzzle_idx, "verdict": Verdict.INCOMPLETE_CANCELLED}
 
     puz_dir = self.output_dir / f"puz-{puzzle_idx:04d}"
-    (puz_dir / "workspace").mkdir(exist_ok=True)
+    self._clean_puzzle_dir_if_needed(puz_dir)
 
     # Agent script and system prompt are bind-mounted read-only
     # The puzzle directory is bind-mounted read-write
@@ -962,6 +977,15 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     choices=["sir", "c", "python"],
     help="Target language/format for the puzzle (default: sir)",
   )
+  parser.add_argument(
+    "--resume-error-state",
+    action="store_true",
+    help=(
+      "Resume solving from the existing error/incomplete state "
+      "without deleting solver outputs from previous attempts "
+      "(default: False, totally restart errored/incomplete puzzles)"
+    ),
+  )
 
   args, remaining = parser.parse_known_args()
   return args, remaining
@@ -983,6 +1007,7 @@ def user_consent(args, rypuzmk_opts, output_dir) -> bool:
   print(f"  Max budget USD:               {args.max_budget_usd if args.max_budget_usd > 0 else 'unlimited'}")
   print(f"  Generate only:                {args.generate_only}")
   print(f"  Analyze only:                 {args.analyze_only}")
+  print(f"  Resume error state:           {args.resume_error_state}")
   if rypuzmk_opts:
     print(f"  Options passed to rypuzmk:    {' '.join(rypuzmk_opts)}")
   print("=" * 68)
@@ -1059,6 +1084,7 @@ def main() -> None:
       timeout=args.timeout,
       max_budget_usd=args.max_budget_usd,
       target=args.target,
+      resume_error_state=args.resume_error_state,
     )
     results = runner.run_all()
   else:
