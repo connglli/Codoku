@@ -12,6 +12,7 @@
 #include "reify/common.hpp"
 #include "reify/expr_gen.hpp"
 #include "reify/intrinsic_whitelist.hpp"
+#include "reify/twin_mini.hpp"
 #include "reify/var_catalogue.hpp"
 
 namespace refractir::reify {
@@ -24,28 +25,6 @@ namespace refractir::reify {
       return std::make_shared<Type>(Type{IntType{IntType::Kind::I32, {}, {}}, {}});
     }
 
-    // The scalar type of a leaf, reconstructed from its captured value.
-    // Scalar StateValues carry their exact bit-width, so this equals the
-    // static type of the leaf cell.
-    TypePtr leafType(const StateValue &v) {
-      if (v.kind == StateValue::Kind::Float) {
-        FloatType ft;
-        ft.kind = v.bits == 32 ? FloatType::Kind::F32 : FloatType::Kind::F64;
-        return std::make_shared<Type>(Type{ft, {}});
-      }
-      if (v.bits == 32)
-        return std::make_shared<Type>(Type{IntType{IntType::Kind::I32, {}, {}}, {}});
-      if (v.bits == 64)
-        return std::make_shared<Type>(Type{IntType{IntType::Kind::I64, {}, {}}, {}});
-      return std::make_shared<Type>(Type{IntType{IntType::Kind::ICustom, (int) v.bits, {}}, {}});
-    }
-
-    LValue leafLV(const std::string &root, const std::vector<Access> &path) {
-      return LValue{LocalId{root, {}}, path, {}};
-    }
-
-    Expr rvalExpr(LValue lv) { return Expr{Atom{RValueAtom{std::move(lv), {}}, {}}, {}, {}}; }
-
     // `<leaf> + %?sym` — the always-solvable additive correction.
     Expr correctionExpr(LValue leaf, const std::string &symName) {
       Expr e = rvalExpr(std::move(leaf));
@@ -56,112 +35,28 @@ namespace refractir::reify {
       return e;
     }
 
-    // `addr <target>` or `null` — the RHS that reproduces a pointer cell.
-    Expr ptrFixExpr(const std::optional<LValue> &target) {
-      if (target)
-        return Expr{Atom{AddrAtom{*target, {}}, {}}, {}, {}};
-      return Expr{Atom{CoefAtom{Coef{NullLit{}}, {}}, {}}, {}, {}};
-    }
-
-    // StateValue → InitVal of the matching static type. Struct fields are
-    // reordered from the StateValue's name-sorted form into declaration
-    // order via the StructDecl.
-    InitVal stateToInit(
-        const StateValue &v, const TypePtr &ty,
-        const std::unordered_map<std::string, const StructDecl *> &structs
-    ) {
-      InitVal iv;
-      switch (v.kind) {
-        case StateValue::Kind::Int:
-          iv.kind = InitVal::Kind::Int;
-          iv.value = IntLit{v.intVal, {}};
-          break;
-        case StateValue::Kind::Float:
-          iv.kind = InitVal::Kind::Float;
-          iv.value = FloatLit{v.floatVal, {}};
-          break;
-        case StateValue::Kind::Array:
-        case StateValue::Kind::Vec: {
-          TypePtr elemT;
-          if (auto at = std::get_if<ArrayType>(&ty->v))
-            elemT = at->elem;
-          else
-            elemT = std::get<VecType>(ty->v).elem;
-          std::vector<InitValPtr> elems;
-          elems.reserve(v.elems.size());
-          for (const auto &e: v.elems)
-            elems.push_back(std::make_shared<InitVal>(stateToInit(e, elemT, structs)));
-          iv.kind = InitVal::Kind::Aggregate;
-          iv.value = std::move(elems);
-          break;
-        }
-        case StateValue::Kind::Struct: {
-          const auto &st = std::get<StructType>(ty->v);
-          const StructDecl *sd = structs.at(st.name.name);
-          std::vector<InitValPtr> elems;
-          elems.reserve(sd->fields.size());
-          for (const auto &f: sd->fields) {
-            const StateValue *fv = nullptr;
-            for (const auto &[nm, val]: v.fields)
-              if (nm == f.name) {
-                fv = &val;
-                break;
-              }
-            elems.push_back(
-                std::make_shared<InitVal>(
-                    fv ? stateToInit(*fv, f.type, structs)
-                       : InitVal{InitVal::Kind::Undef, IntLit{}, {}}
-                )
-            );
-          }
-          iv.kind = InitVal::Kind::Aggregate;
-          iv.value = std::move(elems);
-          break;
-        }
-        case StateValue::Kind::Ptr:
-          // Declared null; a fixup assign before the body sets the real
-          // provenance (aggregate inits admit null but not addr atoms).
-          iv.kind = InitVal::Kind::Null;
-          iv.value = IntLit{};
-          break;
-        default:
-          iv.kind = InitVal::Kind::Undef;
-          iv.value = IntLit{};
-          break;
-      }
-      return iv;
-    }
-
     // One generation attempt. Throws on internal errors (parse/analysis);
     // returns nullopt on UNSAT / verification mismatch.
     std::optional<TwinGenResult> attempt(
-        const Program &prog, const std::vector<TwinGenRoot> &roots, std::mt19937 &rng,
+        const Program &prog, const std::vector<MiniRoot> &roots, std::mt19937 &rng,
         const SymbolicExecutor::SolverFactory &solverFactory, const TwinGenConfig &cfg
     ) {
-      std::unordered_map<std::string, const StructDecl *> structs;
-      for (const auto &sd: prog.structs)
-        structs[sd.name.name] = &sd;
+      const StructMap structs = structMap(prog);
 
       // -- 1. Mini-program skeleton: every root becomes a let initialized
-      // to its entry value. Params of the source function become immutable
-      // lets — the solver treats entry-function params as free symbols, so
-      // they must not be params here.
+      // to its entry value, plus the catalogue the statement generator
+      // draws its operands from.
       Program mini;
       mini.structs = prog.structs;
       FunDecl f;
       f.name = GlobalId{kMiniFun, {}};
       f.retType = makeI32();
 
+      declareRoots(roots, structs, f.lets);
+
       VarCatalogue cat;
       cat.structDecls = prog.structs;
       for (const auto &r: roots) {
-        LetDecl d;
-        d.isMutable = !r.isParam;
-        d.name = LocalId{r.name, {}};
-        d.type = r.type;
-        d.init = stateToInit(r.init, r.type, structs);
-        f.lets.push_back(std::move(d));
-
         VarEntry ve;
         ve.name = r.name;
         ve.type = r.type;
@@ -180,12 +75,7 @@ namespace refractir::reify {
       entry.label = BlockLabel{"^entry", {}};
       // Pointer cells are declared null; set their real entry provenance
       // before any generated statement can read them.
-      for (const auto &r: roots)
-        for (const auto &fx: r.ptrFixes)
-          if (fx.initTarget)
-            entry.instrs.push_back(
-                Instr{AssignInstr{leafLV(r.name, fx.path), ptrFixExpr(fx.initTarget), {}}}
-            );
+      entry.instrs = ptrInitInstrs(roots);
       auto body = genBlockStmts(rng, &sym, cat, cfg.nStmts, /*onPath=*/true, ecfg);
       const bool bodyStores = std::any_of(body.begin(), body.end(), [](const Instr &i) {
         return std::holds_alternative<StoreInstr>(i);
@@ -242,11 +132,13 @@ namespace refractir::reify {
       // -- 3b. Reproduce every pointer cell's exit provenance. Whatever
       // the generated body did to a pointer (reassigned it, left it), the
       // final fixup lands it on the captured s' target.
-      for (const auto &r: roots)
-        for (const auto &fx: r.ptrFixes)
-          entry.instrs.push_back(
-              Instr{AssignInstr{leafLV(r.name, fx.path), ptrFixExpr(fx.finalTarget), {}}}
-          );
+      {
+        auto fin = ptrFinalInstrs(roots);
+        entry.instrs.insert(
+            entry.instrs.end(), std::make_move_iterator(fin.begin()),
+            std::make_move_iterator(fin.end())
+        );
+      }
 
       // -- 4. Equality requires pinning the final state to s', one per
       // leaf, against same-typed immutable lets (bare literals in a Cond
@@ -348,7 +240,7 @@ namespace refractir::reify {
   } // namespace
 
   std::optional<TwinGenResult> generateTwin(
-      const Program &prog, const std::vector<TwinGenRoot> &roots, std::mt19937 &rng,
+      const Program &prog, const std::vector<MiniRoot> &roots, std::mt19937 &rng,
       const SymbolicExecutor::SolverFactory &solverFactory, const TwinGenConfig &cfg
   ) {
     if (roots.empty())

@@ -26,32 +26,15 @@
 
 #include "ast/ast.hpp"
 #include "reify/state_profile.hpp"
+#include "reify/twin_mini.hpp"
 #include "solver/solver.hpp"
 
 namespace refractir::reify {
 
-  // A pointer leaf of a root, with the lvalues whose addresses reproduce
-  // the captured pointer at block entry and exit (nullopt = null pointer).
-  // The mini-program declares the cell `null`, assigns `addr <initTarget>`
-  // before the generated body, and reassigns `addr <finalTarget>` after it
-  // — sound whatever the body did to the cell in between.
-  struct TwinGenPtrFix {
-    std::vector<Access> path; // leaf path within the root
-    TypePtr type;             // static `ptr T` of the cell
-    std::optional<LValue> initTarget;
-    std::optional<LValue> finalTarget;
-  };
-
-  // One state root the twin must model: its declaration shape in the entry
-  // function plus its concrete entry / exit values.
-  struct TwinGenRoot {
-    std::string name;
-    TypePtr type;
-    bool isParam = false;                // immutable in the mini-program (never written)
-    StateValue init;                     // value at block entry (s)
-    StateValue target;                   // required value at block exit (s')
-    std::vector<TwinGenPtrFix> ptrFixes; // every pointer leaf of the root
-  };
+  // The roots a twin must model (MiniRoot / MiniPtrFix) and the conversions
+  // from a captured state back into declarations and instructions live in
+  // reify/twin_mini.hpp — they are shared with every other consumer that
+  // materializes a region's live-in state, and stay solver-free.
 
   struct TwinGenConfig {
     int nStmts = 3;             // random statements per attempt
@@ -69,12 +52,11 @@ namespace refractir::reify {
   // Generator callback used by TwinTransform. Returns the concrete twin-block
   // body, or nullopt when no attempt verified (the pass then falls back to
   // constant reconstruction).
-  using TwinGenFn = std::function<std::optional<TwinGenResult>(
-      const Program &, const std::vector<TwinGenRoot> &, std::mt19937 &
-  )>;
+  using TwinGenFn = std::function<
+      std::optional<TwinGenResult>(const Program &, const std::vector<MiniRoot> &, std::mt19937 &)>;
 
   std::optional<TwinGenResult> generateTwin(
-      const Program &prog, const std::vector<TwinGenRoot> &roots, std::mt19937 &rng,
+      const Program &prog, const std::vector<MiniRoot> &roots, std::mt19937 &rng,
       const SymbolicExecutor::SolverFactory &solverFactory, const TwinGenConfig &cfg
   );
 

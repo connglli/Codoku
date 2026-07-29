@@ -377,7 +377,7 @@ int main(int argc, char **argv) {
     gcfg.retries = result["twin-retries"].as<int>();
     auto factory = ctx.solverFactory;
     twinGen = [gcfg,
-               factory](const Program &p, const std::vector<TwinGenRoot> &roots, std::mt19937 &r) {
+               factory](const Program &p, const std::vector<MiniRoot> &roots, std::mt19937 &r) {
       return generateTwin(p, roots, r, factory, gcfg);
     };
   }

@@ -1131,20 +1131,20 @@ namespace refractir::reify {
         for (const auto &d: plan.defs)
           if (!guarded.count(d.root))
             return;
-        std::vector<TwinGenRoot> roots;
+        std::vector<MiniRoot> roots;
         roots.reserve(plan.guardRoots.size());
         for (const auto &r: plan.guardRoots) {
           auto si = s.find(r.name);
           auto ti = sPrime.find(r.name);
           if (si == s.end() || ti == sPrime.end())
             return;
-          TwinGenRoot g{r.name, r.type, r.isParam, *si->second, *ti->second, {}};
+          MiniRoot g{r.name, r.type, r.isParam, *si->second, *ti->second, {}};
           // Pointer cells: entry target from the guard leaves (state s),
           // exit target from the diff when the cell changed, else the same.
           for (const auto &leaf: r.leaves) {
             if (!leaf.isPtr())
               continue;
-            TwinGenPtrFix fx{leaf.path, leaf.ptrType, leaf.ptrTarget, leaf.ptrTarget};
+            MiniPtrFix fx{leaf.path, leaf.ptrType, leaf.ptrTarget, leaf.ptrTarget};
             const std::string key = leafKey(r.name, leaf.path);
             for (const auto &d: plan.defs)
               if (d.isPtr() && leafKey(d.root, d.path) == key) {

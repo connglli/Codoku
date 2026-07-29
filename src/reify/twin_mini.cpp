@@ -1,0 +1,130 @@
+#include "reify/twin_mini.hpp"
+
+namespace refractir::reify {
+
+  StructMap structMap(const Program &prog) {
+    StructMap m;
+    for (const auto &sd: prog.structs)
+      m[sd.name.name] = &sd;
+    return m;
+  }
+
+  TypePtr leafType(const StateValue &v) {
+    if (v.kind == StateValue::Kind::Float) {
+      FloatType ft;
+      ft.kind = v.bits == 32 ? FloatType::Kind::F32 : FloatType::Kind::F64;
+      return std::make_shared<Type>(Type{ft, {}});
+    }
+    if (v.bits == 32)
+      return std::make_shared<Type>(Type{IntType{IntType::Kind::I32, {}, {}}, {}});
+    if (v.bits == 64)
+      return std::make_shared<Type>(Type{IntType{IntType::Kind::I64, {}, {}}, {}});
+    return std::make_shared<Type>(Type{IntType{IntType::Kind::ICustom, (int) v.bits, {}}, {}});
+  }
+
+  LValue leafLV(const std::string &root, const std::vector<Access> &path) {
+    return LValue{LocalId{root, {}}, path, {}};
+  }
+
+  Expr rvalExpr(LValue lv) { return Expr{Atom{RValueAtom{std::move(lv), {}}, {}}, {}, {}}; }
+
+  Expr ptrFixExpr(const std::optional<LValue> &target) {
+    if (target)
+      return Expr{Atom{AddrAtom{*target, {}}, {}}, {}, {}};
+    return Expr{Atom{CoefAtom{Coef{NullLit{}}, {}}, {}}, {}, {}};
+  }
+
+  InitVal stateToInit(const StateValue &v, const TypePtr &ty, const StructMap &structs) {
+    InitVal iv;
+    switch (v.kind) {
+      case StateValue::Kind::Int:
+        iv.kind = InitVal::Kind::Int;
+        iv.value = IntLit{v.intVal, {}};
+        break;
+      case StateValue::Kind::Float:
+        iv.kind = InitVal::Kind::Float;
+        iv.value = FloatLit{v.floatVal, {}};
+        break;
+      case StateValue::Kind::Array:
+      case StateValue::Kind::Vec: {
+        TypePtr elemT;
+        if (auto at = std::get_if<ArrayType>(&ty->v))
+          elemT = at->elem;
+        else
+          elemT = std::get<VecType>(ty->v).elem;
+        std::vector<InitValPtr> elems;
+        elems.reserve(v.elems.size());
+        for (const auto &e: v.elems)
+          elems.push_back(std::make_shared<InitVal>(stateToInit(e, elemT, structs)));
+        iv.kind = InitVal::Kind::Aggregate;
+        iv.value = std::move(elems);
+        break;
+      }
+      case StateValue::Kind::Struct: {
+        const auto &st = std::get<StructType>(ty->v);
+        const StructDecl *sd = structs.at(st.name.name);
+        std::vector<InitValPtr> elems;
+        elems.reserve(sd->fields.size());
+        for (const auto &f: sd->fields) {
+          const StateValue *fv = nullptr;
+          for (const auto &[nm, val]: v.fields)
+            if (nm == f.name) {
+              fv = &val;
+              break;
+            }
+          elems.push_back(
+              std::make_shared<InitVal>(
+                  fv ? stateToInit(*fv, f.type, structs)
+                     : InitVal{InitVal::Kind::Undef, IntLit{}, {}}
+              )
+          );
+        }
+        iv.kind = InitVal::Kind::Aggregate;
+        iv.value = std::move(elems);
+        break;
+      }
+      case StateValue::Kind::Ptr:
+        // Declared null; a fixup assign before the body sets the real
+        // provenance (aggregate inits admit null but not addr atoms).
+        iv.kind = InitVal::Kind::Null;
+        iv.value = IntLit{};
+        break;
+      default:
+        iv.kind = InitVal::Kind::Undef;
+        iv.value = IntLit{};
+        break;
+    }
+    return iv;
+  }
+
+  void declareRoots(
+      const std::vector<MiniRoot> &roots, const StructMap &structs, std::vector<LetDecl> &lets
+  ) {
+    for (const auto &r: roots) {
+      LetDecl d;
+      d.isMutable = !r.isParam;
+      d.name = LocalId{r.name, {}};
+      d.type = r.type;
+      d.init = stateToInit(r.init, r.type, structs);
+      lets.push_back(std::move(d));
+    }
+  }
+
+  std::vector<Instr> ptrInitInstrs(const std::vector<MiniRoot> &roots) {
+    std::vector<Instr> out;
+    for (const auto &r: roots)
+      for (const auto &fx: r.ptrFixes)
+        if (fx.initTarget)
+          out.push_back(Instr{AssignInstr{leafLV(r.name, fx.path), ptrFixExpr(fx.initTarget), {}}});
+    return out;
+  }
+
+  std::vector<Instr> ptrFinalInstrs(const std::vector<MiniRoot> &roots) {
+    std::vector<Instr> out;
+    for (const auto &r: roots)
+      for (const auto &fx: r.ptrFixes)
+        out.push_back(Instr{AssignInstr{leafLV(r.name, fx.path), ptrFixExpr(fx.finalTarget), {}}});
+    return out;
+  }
+
+} // namespace refractir::reify

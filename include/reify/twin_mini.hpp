@@ -1,0 +1,95 @@
+#pragma once
+
+// twin_mini — the shared scaffolding for the single-function "mini
+// programs" rytwin builds out of a captured state.
+//
+// Several parts of rytwin need to materialize a region's live-in state as
+// RefractIR: the solver-driven twin generator (reify/twin_gen.hpp) seeds a
+// random body with it, and any consumer that wants to *run* a region from
+// an arbitrary state seeds an interpreter harness the same way. Both start
+// from the same description — a list of roots, each with its declared type
+// and a concrete entry value — and both need the same conversions from a
+// captured StateValue back into declarations and instructions.
+//
+// This header owns that description and those conversions. It is
+// deliberately free of any solver dependency so an interpreter-only
+// consumer can build a mini program without linking the solver.
+
+#include <optional>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#include "ast/ast.hpp"
+#include "reify/state_profile.hpp"
+
+namespace refractir::reify {
+
+  // A pointer leaf of a root, with the lvalues whose addresses reproduce
+  // the captured pointer at region entry and exit (nullopt = null pointer).
+  // The mini program declares the cell `null`, assigns `addr <initTarget>`
+  // before the body, and reassigns `addr <finalTarget>` after it — sound
+  // whatever the body did to the cell in between.
+  struct MiniPtrFix {
+    std::vector<Access> path; // leaf path within the root
+    TypePtr type;             // static `ptr T` of the cell
+    std::optional<LValue> initTarget;
+    std::optional<LValue> finalTarget;
+  };
+
+  // One state root a mini program must model: its declaration shape in the
+  // entry function plus its concrete entry / exit values.
+  struct MiniRoot {
+    std::string name;
+    TypePtr type;
+    bool isParam = false;             // immutable in the mini program (never written)
+    StateValue init;                  // value at region entry (s)
+    StateValue target;                // required value at region exit (s')
+    std::vector<MiniPtrFix> ptrFixes; // every pointer leaf of the root
+  };
+
+  using StructMap = std::unordered_map<std::string, const StructDecl *>;
+
+  StructMap structMap(const Program &prog);
+
+  // --- captured state -> AST --------------------------------------------
+
+  // StateValue -> InitVal of the matching static type. Struct fields are
+  // reordered from the StateValue's name-sorted form into declaration
+  // order via the StructDecl.
+  InitVal stateToInit(const StateValue &v, const TypePtr &ty, const StructMap &structs);
+
+  // The scalar type of a leaf, reconstructed from its captured value.
+  // Scalar StateValues carry their exact bit-width, so this equals the
+  // static type of the leaf cell.
+  TypePtr leafType(const StateValue &v);
+
+  // --- small AST builders -----------------------------------------------
+
+  LValue leafLV(const std::string &root, const std::vector<Access> &path);
+
+  Expr rvalExpr(LValue lv);
+
+  // `addr <target>` or `null` — the RHS that reproduces a pointer cell.
+  Expr ptrFixExpr(const std::optional<LValue> &target);
+
+  // --- root scaffolding -------------------------------------------------
+
+  // Declare every root as a let initialized to its entry value, appending
+  // to `lets`. Params of the source function become IMMUTABLE lets: the
+  // solver treats entry-function params as free symbols, so a root must
+  // never become a param of the mini program.
+  void declareRoots(
+      const std::vector<MiniRoot> &roots, const StructMap &structs, std::vector<LetDecl> &lets
+  );
+
+  // Assignments that set each pointer cell's entry provenance. The cells
+  // are declared `null` (aggregate initializers admit `null` but not
+  // `addr` atoms), so these must run before anything can read them.
+  std::vector<Instr> ptrInitInstrs(const std::vector<MiniRoot> &roots);
+
+  // Assignments that land each pointer cell on its captured exit
+  // provenance, whatever the body did to it in between.
+  std::vector<Instr> ptrFinalInstrs(const std::vector<MiniRoot> &roots);
+
+} // namespace refractir::reify
