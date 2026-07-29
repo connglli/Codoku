@@ -183,9 +183,6 @@ int main(int argc, char **argv) {
                 cxxopts::value<int>()->default_value("3"))
     ("twin-retries", "Generation attempts per twin before falling back",
                 cxxopts::value<int>()->default_value("3"))
-    ("twin-guard", "Guard surface: exact (per-leaf equality) or bijection "
-                "(bijection-mixed leaves — collision-free but opaque)",
-                cxxopts::value<std::string>()->default_value("exact"))
     ("twin-scope", "Twin unit: block (one basic block) or region (the maximal "
                 "dominance region — collapses sequences and whole loops)",
                 cxxopts::value<std::string>()->default_value("block"))
@@ -227,13 +224,6 @@ int main(int argc, char **argv) {
       result.count("seed") ? result["seed"].as<uint32_t>() : (uint32_t) std::random_device{}();
 
   bool twinSmith = result.count("no-twin-smith") == 0;
-
-  std::string guardStyle = result["twin-guard"].as<std::string>();
-  if (guardStyle != "exact" && guardStyle != "bijection") {
-    std::cerr << "rytwin: --twin-guard must be exact or bijection (got '" << guardStyle << "')\n";
-    return 2;
-  }
-  GuardStyle guard = guardStyle == "bijection" ? GuardStyle::Bijection : GuardStyle::Exact;
 
   std::string scopeStr = result["twin-scope"].as<std::string>();
   if (scopeStr != "block" && scopeStr != "region") {
@@ -392,7 +382,7 @@ int main(int argc, char **argv) {
     };
   }
   TransformPipeline pipe;
-  pipe.add(makeTwinTransform(std::move(selectPolicy), std::move(twinGen), guard, scope));
+  pipe.add(makeTwinTransform(std::move(selectPolicy), std::move(twinGen), scope));
   TransformReport rep = pipe.run(prog, ctx);
   if (!rep.ok) {
     std::cerr << "rytwin: pass failed: " << rep.message << "\n";

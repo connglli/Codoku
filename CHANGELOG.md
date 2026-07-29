@@ -70,10 +70,7 @@ considered and dropped (spec §13).
 - **`rytwin`** (new tool): transforms a generated program into a
   semantically-equivalent variant via SMT-checked twin blocks, driven
   by `rysmith --emit-state` per-program-point state profiles.
-  `--twin-guard bijection` optionally hides each twin's guard behind a
-  collision-free nonlinear `iW` bijection (opaque `>>> & ^`, no literal
-  `state == s`), so deducing twin ≡ orig needs a solver. `--twin-scope
-  region` widens the twin unit from a single block to a whole dominance
+  `--twin-scope region` widens the twin unit from a single block to a whole dominance
   region — collapsing straight-line runs and entire loops into one guarded
   block that jumps straight to the region exit. `--twin-select interesting`
   swaps the uniform `--p-twin` coin for a selection policy that softmax-tilts

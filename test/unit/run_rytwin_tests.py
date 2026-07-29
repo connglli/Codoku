@@ -402,178 +402,6 @@ def test_guard_compiles_c_and_wasm(rytwin, rysmith):
       )
 
 
-# --- bijection guard (--twin-guard bijection) ---------------------------
-#
-# The bijection guard replaces the exact per-leaf `operand == const` with a
-# bijective mix of each integer leaf (murmur-style `x ^= x>>>s; x *= odd`)
-# compared against the pre-mixed constant. A bijection collides with
-# nothing, so discrimination — and hence equivalence — is identical to the
-# exact guard; only the surface changes (opaque `*`/`>>>` arithmetic, and
-# the raw live-in constant no longer appears verbatim).
-
-BIJ_FIXTURE = """// SOLVED: %pa0=7
-fun @sigfix(%pa0: i32) : i32 {
-  let mut %a: i32 = 3;
-  let mut %b: i32 = 1234567;
-  ^entry:
-    br ^work;
-  ^work:
-    %a = 2 * %a + %pa0;
-    br ^exit;
-  ^exit:
-    ret %a;
-}
-"""
-
-
-def test_bijection_guard_option(rytwin, rysmith):
-  """--twin-guard bijection is accepted and still grafts; an unknown value
-  is rejected with a non-zero exit (mirrors the exact default)."""
-  with tempfile.TemporaryDirectory() as d:
-    sirs = gen_pool(rysmith, d)
-    if not sirs:
-      check("bijection-option setup (rysmith gen)", False, "generation failed")
-      return
-    got = first_twinned(rytwin, sirs, extra=["--twin-guard", "bijection"])
-    check("rytwin accepts --twin-guard bijection", got is not None, "")
-    r = run([rytwin, sirs[0], "--twin-guard", "bogus", "-o", sirs[0] + ".x.sir"])
-    check("invalid --twin-guard rejected", r.returncode != 0, f"rc={r.returncode}")
-
-
-def test_bijection_guard_obfuscated(rytwin):
-  """The bijection guard mixes each integer leaf: its body carries `>>>`
-  (logical-shift) mixing ops and no longer shows the raw live-in constant
-  1234567, whereas the exact guard shows 1234567 verbatim and never shifts.
-  (`&` is not a discriminator — the exact guard AND-folds with it too.)"""
-  with tempfile.TemporaryDirectory() as d:
-    p1 = os.path.join(d, "sigfix.sir")
-    open(p1, "w").write(BIJ_FIXTURE)
-
-    def guard_body(extra):
-      p2 = os.path.join(d, "p2.sir")
-      r = run(
-        [rytwin, p1, "--p-twin", "1.0", "--seed", "3", "--validate"]
-        + extra
-        + ["-o", p2]
-      )
-      body = (
-        "".join(guard_fun_bodies(open(p2).read()).values()) if r.returncode == 0 else ""
-      )
-      return r, body
-
-    er, ebody = guard_body([])
-    sr, sbody = guard_body(["--twin-guard", "bijection"])
-    check("exact fixture twinned", er.returncode == 0, er.stderr[:160])
-    check("bijection fixture twinned + validated", sr.returncode == 0, sr.stderr[:160])
-    check("exact guard shows the raw live-in constant", "1234567" in ebody, "")
-    check("exact guard uses no shift-mixing ops", ">>>" not in ebody, "")
-    check("bijection guard hides the raw constant", "1234567" not in sbody, "")
-    check("bijection guard mixes with >>>", ">>>" in sbody, "")
-
-
-def test_bijection_default_is_exact(rytwin):
-  """Omitting --twin-guard keeps the exact guard: no mixing ops appear, so
-  the default behaviour is unchanged."""
-  with tempfile.TemporaryDirectory() as d:
-    p1 = os.path.join(d, "sigfix.sir")
-    open(p1, "w").write(BIJ_FIXTURE)
-    p2 = os.path.join(d, "p2.sir")
-    r = run([rytwin, p1, "--p-twin", "1.0", "--seed", "3", "-o", p2])
-    check("default fixture twinned", r.returncode == 0, r.stderr[:160])
-    if r.returncode != 0:
-      return
-    body = "".join(guard_fun_bodies(open(p2).read()).values())
-    check("default guard is exact (no shift-mixing ops)", ">>>" not in body, "")
-
-
-def test_bijection_guard_equivalence(rytwin, rysmith, symiri):
-  """The zero-collision property, empirically: with the bijection guard,
-  p1 === p2 on the profiled input AND on random other inputs (where the
-  guard must not fire)."""
-  with tempfile.TemporaryDirectory() as d:
-    sirs = gen_pool(rysmith, d, n="12", seed="202")
-    if not sirs:
-      check("bijection-equivalence setup (rysmith gen)", False, "generation failed")
-      return
-    equivalence_over_pool(
-      rytwin, symiri, d, sirs, "bijection", extra=["--twin-guard", "bijection"]
-    )
-
-
-def test_bijection_guard_compiles(rytwin, rysmith):
-  """The mixer ops (lshr/and/xor) survive the C backend: a bijection-guard
-  p2 compiles and its @main checksum-assert binary runs clean."""
-  import shutil
-
-  with tempfile.TemporaryDirectory() as d:
-    sirs = gen_pool(rysmith, d, emit_state=False, extra=["--emit-main"])
-    if not sirs:
-      check("bijection-backend setup (rysmith gen)", False, "generation failed")
-      return
-    got = first_twinned(
-      rytwin, sirs, extra=["--twin-guard", "bijection", "--target", "c", "--emit-main"]
-    )
-    if not got:
-      check("bijection-backend setup (twinnable program)", False, "no twin grafted")
-      return
-    _, p2, _ = got
-    body = "".join(guard_fun_bodies(open(p2).read()).values())
-    check("bijection guard actually mixed", ">>>" in body, "")
-    p2c = p2[:-4] + ".c"
-    cc = shutil.which("cc") or shutil.which("gcc")
-    if not cc or not os.path.exists(p2c):
-      check("bijection p2.c emitted", os.path.exists(p2c), "")
-      return
-    exe = os.path.join(d, "p2.bin")
-    rc = run([cc, "-O1", "-o", exe, p2c, "-lm"])
-    check("bijection p2.c compiles", rc.returncode == 0, rc.stderr[:200])
-    if rc.returncode == 0:
-      rr = run([exe])
-      check("bijection p2 binary runs clean", rr.returncode == 0, f"rc={rr.returncode}")
-
-
-def test_bijection_guard_small_width(rytwin):
-  """Edge: a narrow (i8) live-in root still validates under the bijection
-  guard — the finalizer clamps its shifts to the leaf width and stays a
-  bijection on every width."""
-  fixture = """// SOLVED: %pa0=5
-fun @narrow(%pa0: i8) : i8 {
-  let mut %a: i8 = 9;
-  let mut %b: i8 = 100;
-  ^entry:
-    br ^work;
-  ^work:
-    %a = %a + %pa0;
-    br ^exit;
-  ^exit:
-    ret %a;
-}
-"""
-  with tempfile.TemporaryDirectory() as d:
-    p1 = os.path.join(d, "narrow.sir")
-    open(p1, "w").write(fixture)
-    p2 = os.path.join(d, "p2.sir")
-    r = run(
-      [
-        rytwin,
-        p1,
-        "--p-twin",
-        "1.0",
-        "--seed",
-        "3",
-        "--twin-guard",
-        "bijection",
-        "--validate",
-        "-o",
-        p2,
-      ]
-    )
-    check("narrow (i8) bijection twin validated", r.returncode == 0, r.stderr[:200])
-    if r.returncode == 0:
-      body = "".join(guard_fun_bodies(open(p2).read()).values())
-      check("narrow guard still mixes on i8", ">>>" in body, body[:120])
-
-
 # --- region twins (--twin-scope region) ---------------------------------
 #
 # The region scope generalizes the twin unit from one block to the maximal
@@ -755,44 +583,6 @@ def test_scope_region_equivalence(rytwin, rysmith, symiri):
     equivalence_over_pool(
       rytwin, symiri, d, sirs, "region", extra=["--twin-scope", "region"]
     )
-
-
-def test_scope_region_with_bijection(rytwin, symiri):
-  """Region scope composes with the bijection guard: the loop collapses and
-  the guard is bijection-mixed, and p1 === p2."""
-  with tempfile.TemporaryDirectory() as d:
-    p1 = os.path.join(d, "loopreg.sir")
-    open(p1, "w").write(LOOP_FIXTURE)
-    p2 = os.path.join(d, "p2.sir")
-    r = run(
-      [
-        rytwin,
-        p1,
-        "--p-twin",
-        "1.0",
-        "--seed",
-        "3",
-        "--twin-scope",
-        "region",
-        "--twin-guard",
-        "bijection",
-        "--validate",
-        "-o",
-        p2,
-      ]
-    )
-    check("region + bijection twinned + validated", r.returncode == 0, r.stderr[:200])
-    if r.returncode != 0:
-      return
-    src = open(p2).read()
-    gbody = "".join(guard_fun_bodies(src).values())
-    tbodies = twin_block_bodies(src)
-    check(
-      "region collapses under bijection guard",
-      any("br ^done" in b for b in tbodies),
-      "",
-    )
-    check("guard is bijection-mixed", ">>>" in gbody, "")
 
 
 # --- interesting-region selection (--twin-select) -----------------------
@@ -1856,30 +1646,6 @@ def main():
       lambda: test_guard_compiles_c_and_wasm(rytwin, rysmith),
     ),
     (
-      "bijection guard: --twin-guard option accepted/validated",
-      lambda: test_bijection_guard_option(rytwin, rysmith),
-    ),
-    (
-      "bijection guard: mixes leaves, hides raw constants",
-      lambda: test_bijection_guard_obfuscated(rytwin),
-    ),
-    (
-      "bijection guard: default stays exact",
-      lambda: test_bijection_default_is_exact(rytwin),
-    ),
-    (
-      "bijection guard: zero-collision equivalence (profiled + other)",
-      lambda: test_bijection_guard_equivalence(rytwin, rysmith, symiri),
-    ),
-    (
-      "bijection guard: mixer survives the C backend",
-      lambda: test_bijection_guard_compiles(rytwin, rysmith),
-    ),
-    (
-      "bijection guard: narrow (i8) width validates",
-      lambda: test_bijection_guard_small_width(rytwin),
-    ),
-    (
       "region scope: --twin-scope option accepted/rejected",
       lambda: test_scope_flag(rytwin),
     ),
@@ -1898,10 +1664,6 @@ def main():
     (
       "region scope: equivalence sweep (profiled + other)",
       lambda: test_scope_region_equivalence(rytwin, rysmith, symiri),
-    ),
-    (
-      "region scope: composes with the bijection guard",
-      lambda: test_scope_region_with_bijection(rytwin, symiri),
     ),
     (
       "select: --twin-select option accepted/rejected",
