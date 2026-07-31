@@ -105,7 +105,7 @@ REIFY_SRCS = src/reify/cfg_gen.cpp src/reify/path_sampler.cpp \
              src/reify/func_pool.cpp src/reify/cg_gen.cpp \
              src/reify/call_realize.cpp src/reify/state_profile.cpp \
              src/reify/transform.cpp src/reify/twin_transform.cpp \
-             src/reify/twin_gen.cpp src/reify/twin_mini.cpp \
+             src/reify/twin_mini.cpp \
              src/reify/twin_probe.cpp src/reify/twin_trace.cpp
 RYSMITH_SRCS = src/rysmith.cpp $(SOLVER_CORE_SRCS) $(REIFY_SRCS) $(BACKEND_SRCS) $(INTERP_IMPL_SRCS)
 # [v0.2.2] rylink links the C / WASM backends in-process so the bundle's
@@ -114,9 +114,10 @@ RYSMITH_SRCS = src/rysmith.cpp $(SOLVER_CORE_SRCS) $(REIFY_SRCS) $(BACKEND_SRCS)
 # and reset every sourceStem to "", collapsing --split-by-source to a
 # single program.c.
 RYLINK_SRCS = src/rylink.cpp $(REIFY_SRCS) $(BACKEND_SRCS) $(INTERP_IMPL_SRCS)
-# rytwin synthesizes twin blocks via the SMT solver, so — like rysmith —
-# it links the solver core + backend impl (SOLVER_IMPL_OBJ).
-RYTWIN_SRCS = src/rytwin.cpp $(SOLVER_CORE_SRCS) $(REIFY_SRCS) $(BACKEND_SRCS) $(INTERP_IMPL_SRCS)
+# rytwin builds twin bodies from the profiled trace and decides guards by
+# interpretation, so it links neither the symbolic executor nor an SMT
+# backend — unlike rysmith and rylink.
+RYTWIN_SRCS = src/rytwin.cpp $(REIFY_SRCS) $(BACKEND_SRCS) $(INTERP_IMPL_SRCS)
 
 COMMON_OBJS = $(COMMON_SRCS:.cpp=.o)
 TEST_OBJS = $(TEST_SRCS:.cpp=.o)
@@ -125,7 +126,7 @@ COMPILER_OBJS = $(COMPILER_SRCS:.cpp=.o)
 SOLVER_OBJS = $(SOLVER_MAIN_SRCS:.cpp=.o) $(SOLVER_IMPL_OBJ)
 RYSMITH_OBJS = $(RYSMITH_SRCS:.cpp=.o) $(SOLVER_IMPL_OBJ)
 RYLINK_OBJS = $(RYLINK_SRCS:.cpp=.o)
-RYTWIN_OBJS = $(RYTWIN_SRCS:.cpp=.o) $(SOLVER_IMPL_OBJ)
+RYTWIN_OBJS = $(RYTWIN_SRCS:.cpp=.o)
 
 TARGET_INTERP = symiri
 TARGET_COMPILER = symirc

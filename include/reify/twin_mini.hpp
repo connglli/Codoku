@@ -3,17 +3,14 @@
 // twin_mini — the shared scaffolding for the single-function "mini
 // programs" rytwin builds out of a captured state.
 //
-// Several parts of rytwin need to materialize a region's live-in state as
-// RefractIR: the solver-driven twin generator (reify/twin_gen.hpp) seeds a
-// random body with it, and any consumer that wants to *run* a region from
-// an arbitrary state seeds an interpreter harness the same way. Both start
-// from the same description — a list of roots, each with its declared type
-// and a concrete entry value — and both need the same conversions from a
+// Any consumer that wants to *run* a region from an arbitrary state has to
+// materialize that state as RefractIR first: a list of roots, each with its
+// declared type and a concrete entry value, plus the conversions from a
 // captured StateValue back into declarations and instructions.
 //
-// This header owns that description and those conversions. It is
-// deliberately free of any solver dependency so an interpreter-only
-// consumer can build a mini program without linking the solver.
+// This header owns that description and those conversions. It is free of any
+// solver dependency, so a consumer can build a mini program without linking
+// the solver — which rytwin, its only user today, does not.
 
 #include <optional>
 #include <string>

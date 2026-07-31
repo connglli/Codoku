@@ -19,6 +19,7 @@
 #include "frontend/diagnostics.hpp"
 #include "interp/type_layout.hpp"
 #include "reify/state_profile.hpp"
+#include "reify/twin_trace.hpp"
 #include "reify/type_gen.hpp"
 
 namespace refractir::reify {
@@ -43,18 +44,8 @@ namespace refractir::reify {
 
     Expr simpleExpr(Atom a) { return Expr{std::move(a), {}, {}}; }
 
-    Coef litCoef(const StateValue &v) {
-      if (v.kind == StateValue::Kind::Float)
-        return Coef{FloatLit{v.floatVal, {}}};
-      return Coef{IntLit{v.intVal, {}}};
-    }
-
     Instr assignInstr(const std::string &lhs, Expr rhs) {
       return Instr{AssignInstr{localLV(lhs), std::move(rhs), {}}};
-    }
-
-    Instr assignLV(LValue lhs, Expr rhs) {
-      return Instr{AssignInstr{std::move(lhs), std::move(rhs), {}}};
     }
 
     // `%dst = cmp == %a, %b` — both operands are same-typed locals, so the
@@ -379,7 +370,7 @@ namespace refractir::reify {
       std::vector<GuardRoot> guardRoots; // the entire guardable state, in
                                          // profile (name-sorted) order
       std::vector<LeafRef> defs;         // per-leaf constant reconstruction of s'
-      std::vector<Instr> twinInstrs;     // solver-generated B' (empty = use defs)
+      std::vector<Instr> twinInstrs;     // the region's flattened executed trace
       std::string exitLabel;             // block the twin jumps to (region exit)
     };
 
@@ -793,22 +784,6 @@ namespace refractir::reify {
       return args;
     }
 
-    // Add `decls` to the program's intrinsic section, skipping declarations
-    // it already has (same name, return type, and arity).
-    void mergeIntrinsics(Program &prog, std::vector<IntrinsicDecl> &&decls) {
-      for (auto &d: decls) {
-        bool dup = false;
-        for (const auto &e: prog.intrinsics)
-          if (e.name.name == d.name.name && e.params.size() == d.params.size() &&
-              TypeUtils::areTypesEqual(e.retType, d.retType)) {
-            dup = true;
-            break;
-          }
-        if (!dup)
-          prog.intrinsics.push_back(std::move(d));
-      }
-    }
-
     // --- candidate region planning + scoring -------------------------------
 
     // One planned candidate region rooted at trace point `t` (plan filled, no
@@ -826,21 +801,21 @@ namespace refractir::reify {
     }
 
     // Plan the region rooted at trace point `t` under the given claims (empty
-    // when enumerating globally). Region scope extends the window while the
-    // entry dominates the executed, same-frame, unclaimed block; the exit is
-    // the first block it does not dominate, or the frame's returning block.
-    // Returns the candidate or nullopt with a reason; a rejected region falls
-    // back to a single-block twin.
+    // when enumerating globally). The window extends while the entry dominates
+    // the executed, same-frame, unclaimed block; the exit is the first block it
+    // does not dominate, or the frame's returning block. Returns the candidate
+    // or nullopt with a reason; a rejected region falls back to the one-block
+    // window rooted at the same entry.
     std::optional<Cand> planCandidate(
         const FunDecl &fn, const std::vector<const StatePoint *> &pts, std::size_t t,
-        TwinScope scope, const CFG &cfg, const DomTree &dt,
+        const CFG &cfg, const DomTree &dt,
         const std::unordered_map<std::string, const Block *> &byLabel,
         const std::unordered_set<std::string> &claims, const StructMap &structs,
         const TypeLayout &layout, std::string &why
     ) {
       const std::string &label = pts[t]->block;
       std::size_t tEnd = t + 1;
-      if (scope == TwinScope::Region) {
+      {
         const std::size_t eIdx = blockIndex(cfg, label);
         std::size_t j = t + 1, last = t + 1;
         while (j < pts.size() && pts[j]->frame == pts[t]->frame) {
@@ -876,10 +851,23 @@ namespace refractir::reify {
           return false;
         }
         plan.exitLabel = pts[end]->block;
-        return planRegion(
-            fn, blocks, /*scanTerms=*/scope == TwinScope::Region, pts[t]->vars, pts[end]->vars,
-            toStateMap(pts[t]->vars), structs, layout, plan, &why
-        );
+        if (!planRegion(
+                fn, blocks, /*scanTerms=*/true, pts[t]->vars, pts[end]->vars,
+                toStateMap(pts[t]->vars), structs, layout, plan, &why
+            ))
+          return false;
+        // The twin body is the executed trace, so it follows the window and
+        // not the (deduplicated) block list: a block the loop ran three times
+        // contributes its statements three times, in that order.
+        std::vector<std::string> executed;
+        executed.reserve(end - t);
+        for (std::size_t k = t; k < end; ++k)
+          executed.push_back(pts[k]->block);
+        auto body = flattenTrace(executed, plan.exitLabel, byLabel, &why);
+        if (!body)
+          return false;
+        plan.twinInstrs = std::move(body->stmts);
+        return true;
       };
 
       Cand c;
@@ -916,8 +904,7 @@ namespace refractir::reify {
 
     class TwinTransform : public Transform {
     public:
-      TwinTransform(SelectionPolicy select, TwinGenFn twinGen, TwinScope scope) :
-          select_(std::move(select)), twinGen_(std::move(twinGen)), scope_(scope) {}
+      explicit TwinTransform(SelectionPolicy select) : select_(std::move(select)) {}
 
       std::string_view name() const override { return "TwinTransform"; }
 
@@ -974,17 +961,14 @@ namespace refractir::reify {
             return m;
           };
 
-          // Synthesize the solver body, log, and record a chosen candidate.
-          auto commit = [&](const std::string &fnName, const std::vector<const StatePoint *> &pts,
-                            Cand &c, std::unordered_map<std::string, TwinPlan> &decided) {
-            StateMap s = toStateMap(pts[c.t]->vars);
-            StateMap sPrime = toStateMap(pts[c.usedEnd]->vars);
-            maybeGenerateTwin(prog, c.plan, s, sPrime, ctx);
+          // Log and record a chosen candidate. The body was built with the
+          // plan (it is the trace itself), so there is nothing to synthesize.
+          auto commit = [&](const std::string &fnName, Cand &c,
+                            std::unordered_map<std::string, TwinPlan> &decided) {
             vlog(
-                fnName + " " + c.label + ": grafted " + (c.nBlocks > 1 ? "region" : "block") +
-                " -> " + c.plan.exitLabel + " (" + std::to_string(c.nBlocks) + " blk, " +
-                (c.plan.twinInstrs.empty() ? "const" : "solver") + " body)" +
-                (c.fellBack ? " [region fell back to block]" : "")
+                fnName + " " + c.label + ": grafted region -> " + c.plan.exitLabel + " (" +
+                std::to_string(c.nBlocks) + " blk, " + std::to_string(c.plan.twinInstrs.size()) +
+                " stmts)" + (c.fellBack ? " [window fell back to one block]" : "")
             );
             decided.emplace(c.label, std::move(c.plan));
           };
@@ -1011,10 +995,7 @@ namespace refractir::reify {
                 labelStem.erase(0, 1);
               std::string guardName = "@__twg_" + fnStem + "_" + labelStem;
               guardFuns.push_back(buildGuardFun(guardName, dit->second, structs));
-              if (scope_ == TwinScope::Region)
-                graftRegion(b, dit->second, guardName, nb);
-              else
-                graftBlock(b, dit->second, guardName, nb);
+              graftRegion(b, dit->second, guardName, nb);
               ++rep.sites;
             }
             fn->blocks = std::move(nb);
@@ -1051,7 +1032,7 @@ namespace refractir::reify {
                 continue;
               std::string why;
               if (auto c = planCandidate(
-                      *fn, pts, t, scope_, cfg, dt, byLabel, noClaims, structs, layout, why
+                      *fn, pts, t, cfg, dt, byLabel, noClaims, structs, layout, why
                   )) {
                 CandidateInfo info = candidateInfo(*c, cfg); // features before moving `c`
                 pool.push_back({fnName, std::move(*c), info});
@@ -1089,7 +1070,7 @@ namespace refractir::reify {
             }
             for (std::size_t k = a.cand.t; k < a.cand.usedEnd; ++k)
               claimed.insert(key(k));
-            commit(a.fnName, pts, a.cand, decidedByFn[a.fnName]);
+            commit(a.fnName, a.cand, decidedByFn[a.fnName]);
           }
           for (const auto &fnName: fnOrder) {
             FunDecl *fn = findFn(fnName);
@@ -1114,53 +1095,6 @@ namespace refractir::reify {
       }
 
     private:
-      // Try the injected solver-backed generator for B'. The generated body
-      // must reproduce s' for every guarded root, so it is only sound when
-      // the guarded set covers every root the block writes (defs) and every
-      // root has a target value in s'. On any miss, plan.twinInstrs stays
-      // empty and graft falls back to constant reconstruction.
-      void maybeGenerateTwin(
-          Program &prog, TwinPlan &plan, const StateMap &s, const StateMap &sPrime,
-          TransformContext &ctx
-      ) {
-        if (!twinGen_)
-          return;
-        std::unordered_set<std::string> guarded;
-        for (const auto &r: plan.guardRoots)
-          guarded.insert(r.name);
-        for (const auto &d: plan.defs)
-          if (!guarded.count(d.root))
-            return;
-        std::vector<MiniRoot> roots;
-        roots.reserve(plan.guardRoots.size());
-        for (const auto &r: plan.guardRoots) {
-          auto si = s.find(r.name);
-          auto ti = sPrime.find(r.name);
-          if (si == s.end() || ti == sPrime.end())
-            return;
-          MiniRoot g{r.name, r.type, r.isParam, *si->second, *ti->second, {}};
-          // Pointer cells: entry target from the guard leaves (state s),
-          // exit target from the diff when the cell changed, else the same.
-          for (const auto &leaf: r.leaves) {
-            if (!leaf.isPtr())
-              continue;
-            MiniPtrFix fx{leaf.path, leaf.ptrType, leaf.ptrTarget, leaf.ptrTarget};
-            const std::string key = leafKey(r.name, leaf.path);
-            for (const auto &d: plan.defs)
-              if (d.isPtr() && leafKey(d.root, d.path) == key) {
-                fx.finalTarget = d.ptrTarget;
-                break;
-              }
-            g.ptrFixes.push_back(std::move(fx));
-          }
-          roots.push_back(std::move(g));
-        }
-        if (auto res = twinGen_(prog, roots, ctx.rng)) {
-          plan.twinInstrs = std::move(res->instrs);
-          mergeIntrinsics(prog, std::move(res->intrinsics));
-        }
-      }
-
       // The guard block (label = base): branch on the guard-function call to
       // the twin or orig arm.
       static Block guardBlock(
@@ -1176,52 +1110,10 @@ namespace refractir::reify {
         return guard;
       }
 
-      // The twin arm's instructions: the solver-generated body, or a constant
-      // reconstruction of the leaves the region writes.
-      static std::vector<Instr> twinInstrs(TwinPlan &plan) {
-        if (!plan.twinInstrs.empty())
-          return std::move(plan.twinInstrs);
-        std::vector<Instr> out;
-        for (const auto &d: plan.defs) {
-          Atom rhs = d.isPtr() ? ptrRhsAtom(d) : coefAtom(litCoef(d.val));
-          out.push_back(assignLV(d.lvalue(), simpleExpr(std::move(rhs))));
-        }
-        return out;
-      }
-
-      // Block scope: guard / twin / orig / merge. The twin reproduces the
-      // block's instruction effect; both arms reconverge at merge, which
-      // re-runs the block's own (preserved) terminator.
-      static void
-      graftBlock(Block &b, TwinPlan &plan, const std::string &guardName, std::vector<Block> &out) {
-        const std::string base = b.label.name;
-        const std::string twinL = base + "__twin", origL = base + "__orig",
-                          mergeL = base + "__merge";
-
-        out.push_back(guardBlock(base, plan, guardName, twinL, origL));
-
-        Block twin;
-        twin.label = BlockLabel{twinL, {}};
-        twin.instrs = twinInstrs(plan);
-        twin.term = brTo(mergeL);
-        out.push_back(std::move(twin));
-
-        Block orig;
-        orig.label = BlockLabel{origL, {}};
-        orig.instrs = std::move(b.instrs);
-        orig.term = brTo(mergeL);
-        out.push_back(std::move(orig));
-
-        Block merge;
-        merge.label = BlockLabel{mergeL, {}};
-        merge.term = std::move(b.term);
-        out.push_back(std::move(merge));
-      }
-
-      // Region scope: guard / twin / orig. The twin reproduces the region's
-      // net effect and jumps straight to the observed exit, skipping every
-      // intermediate block; orig keeps the entry block intact (instructions
-      // and terminator) so the region runs normally when the guard misses.
+      // guard / twin / orig. The twin replays the region's executed trace and
+      // jumps straight to the observed exit, skipping every intermediate
+      // block; orig keeps the entry block intact (instructions and
+      // terminator) so the region runs normally when the guard misses.
       static void
       graftRegion(Block &b, TwinPlan &plan, const std::string &guardName, std::vector<Block> &out) {
         const std::string base = b.label.name;
@@ -1231,7 +1123,7 @@ namespace refractir::reify {
 
         Block twin;
         twin.label = BlockLabel{twinL, {}};
-        twin.instrs = twinInstrs(plan);
+        twin.instrs = std::move(plan.twinInstrs);
         twin.term = brTo(plan.exitLabel);
         out.push_back(std::move(twin));
 
@@ -1243,8 +1135,6 @@ namespace refractir::reify {
       }
 
       SelectionPolicy select_;
-      TwinGenFn twinGen_;
-      TwinScope scope_;
     };
 
   } // namespace
@@ -1281,9 +1171,8 @@ namespace refractir::reify {
     };
   }
 
-  std::unique_ptr<Transform>
-  makeTwinTransform(SelectionPolicy select, TwinGenFn twinGen, TwinScope scope) {
-    return std::make_unique<TwinTransform>(std::move(select), std::move(twinGen), scope);
+  std::unique_ptr<Transform> makeTwinTransform(SelectionPolicy select) {
+    return std::make_unique<TwinTransform>(std::move(select));
   }
 
 } // namespace refractir::reify

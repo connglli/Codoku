@@ -282,30 +282,28 @@ fun @guardfix(%pa0: i32) : i32 {
 
 def test_guard_unique_names(rytwin, rysmith):
   """[Stage 2] One guard function per twin site, names unique; the rewritten
-  program re-analyzes (rytwin exits 0)."""
+  program re-analyzes (rytwin exits 0). A region often swallows a whole leaf,
+  so this checks every twinned program in the pool rather than hunting for
+  one that happens to carry two sites."""
   with tempfile.TemporaryDirectory() as d:
     sirs = gen_pool(rysmith, d, emit_state=False)
     if not sirs:
       check("guard-names setup (rysmith gen)", False, "generation failed")
       return
-    found = False
+    checked = bad = 0
     for p1 in sirs:
       p2 = p1[:-4] + ".p2.sir"
       r = run([rytwin, p1, "--p-twin", "1.0", "--seed", "3", "-o", p2])
       m = re.search(r"\((\d+) twin", r.stdout)
-      if r.returncode != 0 or not m or int(m.group(1)) < 2:
+      if r.returncode != 0 or not m:
         continue
-      found = True
+      checked += 1
       n = int(m.group(1))
       names = GUARD_FN_RE.findall(open(p2).read())
-      check(
-        "guard fn per site, all names distinct",
-        len(names) == n and len({nm for nm, _ in names}) == n,
-        f"twins={n} fns={names}",
-      )
-      break
-    if not found:
-      check("guard-names setup (>=2-twin program)", False, "none found")
+      if len(names) != n or len({nm for nm, _ in names}) != n:
+        bad += 1
+    check("guard-names setup (twinned programs)", checked > 0, "none twinned")
+    check("guard fn per site, all names distinct", bad == 0, f"{bad}/{checked} bad")
 
 
 def test_guard_aggregates_and_vectors(rytwin, rysmith, symiri):
@@ -451,18 +449,111 @@ fun @loopreg(%n: i32) : i32 {
 """
 
 
-def test_scope_flag(rytwin):
-  """--twin-scope region is accepted; an unknown value exits non-zero."""
+def test_removed_flags_rejected(rytwin):
+  """The twin body is the region's own executed trace, so the flags that
+  configured the solver-driven generator — and the block/region choice it
+  was tuned per — no longer exist. Each must be rejected rather than
+  silently ignored."""
   with tempfile.TemporaryDirectory() as d:
     p1 = os.path.join(d, "seqreg.sir")
     open(p1, "w").write(SEQ_FIXTURE)
     p2 = os.path.join(d, "p2.sir")
-    r = run(
-      [rytwin, p1, "--p-twin", "1.0", "--seed", "3", "--twin-scope", "region", "-o", p2]
+    for flag in (
+      ["--twin-scope", "region"],
+      ["--twin-scope", "block"],
+      ["--no-twin-smith"],
+      ["--twin-retries", "2"],
+      ["--twin-stmts", "4"],
+    ):
+      r = run([rytwin, p1, *flag, "-o", p2])
+      check(f"{flag[0]} rejected", r.returncode != 0, f"rc={r.returncode}")
+
+
+def test_no_solver_linked(rytwin):
+  """Deciding a twin body no longer asks the solver anything, so rytwin
+  must not link an SMT backend at all. The backend is linked statically
+  here, so its symbols — not ldd — are the evidence."""
+  r = subprocess.run(["nm", "-C", rytwin], capture_output=True, text=True)
+  if r.returncode != 0:
+    check("nm unavailable — skipped", True, "")
+    return
+  hits = [
+    ln
+    for ln in r.stdout.splitlines()
+    if "bitwuzla" in ln.lower() or "::smt::" in ln.lower()
+  ]
+  check("rytwin carries no SMT backend symbols", not hits, f"{len(hits)} symbols")
+
+
+def test_trace_body_unrolls_loop(rytwin):
+  """The twin body is the executed trace laid straight: a loop that ran
+  three times contributes its body three times, with no branch in between.
+  A memoized constant (or a solved one-liner) would show it once or not at
+  all."""
+  with tempfile.TemporaryDirectory() as d:
+    p1 = os.path.join(d, "loopreg.sir")
+    open(p1, "w").write(LOOP_FIXTURE)
+    p2 = os.path.join(d, "p2.sir")
+    r = run([rytwin, p1, "--p-twin", "1.0", "--seed", "3", "--validate", "-o", p2])
+    check("loop fixture twinned", r.returncode == 0, r.stderr[:200])
+    if r.returncode != 0:
+      return
+    bodies = twin_block_bodies(open(p2).read())
+    unrolled = [b for b in bodies if b.count("%s = %s + %i;") >= 3]
+    check("a twin body repeats the loop body 3x", unrolled, str(bodies)[:300])
+    if unrolled:
+      # twin_block_bodies keeps the block's terminator, which is the single
+      # jump to the region exit; no branch may appear before it.
+      inner = unrolled[0].splitlines()[:-1]
+      check(
+        "the unrolled body is straight-line",
+        not [ln for ln in inner if ln.startswith("br ")],
+        str(inner)[:200],
+      )
+
+
+def test_trace_body_replays_region_stmts(rytwin):
+  """A multi-block region contributes every block's statements, in the
+  order they executed."""
+  with tempfile.TemporaryDirectory() as d:
+    p1 = os.path.join(d, "seqreg.sir")
+    open(p1, "w").write(SEQ_FIXTURE)
+    p2 = os.path.join(d, "p2.sir")
+    r = run([rytwin, p1, "--p-twin", "1.0", "--seed", "3", "--validate", "-o", p2])
+    check("sequence fixture twinned", r.returncode == 0, r.stderr[:200])
+    if r.returncode != 0:
+      return
+    hit = None
+    for b in twin_block_bodies(open(p2).read()):
+      if "%a = %a + %p0;" in b and "%a = %a + %b;" in b:
+        hit = b
+        break
+    check("a twin body holds both blocks' statements", hit is not None, "")
+    if hit:
+      check(
+        "in execution order (^e before ^b1)",
+        hit.index("%a = %a + %p0;") < hit.index("%a = %a + %b;"),
+        hit[:200],
+      )
+
+
+def test_default_scope_is_region(rytwin):
+  """Region is the only unit now, so the ^e twin jumps straight to the
+  region exit ^x without being asked to."""
+  with tempfile.TemporaryDirectory() as d:
+    p1 = os.path.join(d, "seqreg.sir")
+    open(p1, "w").write(SEQ_FIXTURE)
+    p2 = os.path.join(d, "p2.sir")
+    r = run([rytwin, p1, "--p-twin", "1.0", "--seed", "3", "-o", p2])
+    check("default fixture twinned", r.returncode == 0, r.stderr[:160])
+    if r.returncode != 0:
+      return
+    bodies = twin_block_bodies(open(p2).read())
+    check(
+      "a twin collapses ^e->^x by default",
+      any("br ^x" in b for b in bodies),
+      str(bodies)[:300],
     )
-    check("rytwin accepts --twin-scope region", r.returncode == 0, r.stderr[:160])
-    rb = run([rytwin, p1, "--twin-scope", "bogus", "-o", p2 + ".x"])
-    check("invalid --twin-scope rejected", rb.returncode != 0, f"rc={rb.returncode}")
 
 
 def test_scope_region_sequence(rytwin, symiri):
@@ -480,8 +571,6 @@ def test_scope_region_sequence(rytwin, symiri):
         "1.0",
         "--seed",
         "3",
-        "--twin-scope",
-        "region",
         "--validate",
         "-o",
         p2,
@@ -522,8 +611,6 @@ def test_scope_region_loop(rytwin, symiri):
         "1.0",
         "--seed",
         "3",
-        "--twin-scope",
-        "region",
         "--validate",
         "-o",
         p2,
@@ -580,9 +667,7 @@ def test_scope_region_equivalence(rytwin, rysmith, symiri):
     if not sirs:
       check("region-equivalence setup (rysmith gen)", False, "generation failed")
       return
-    equivalence_over_pool(
-      rytwin, symiri, d, sirs, "region", extra=["--twin-scope", "region"]
-    )
+    equivalence_over_pool(rytwin, symiri, d, sirs, "region", extra=None)
 
 
 # --- interesting-region selection (--twin-select) -----------------------
@@ -633,8 +718,6 @@ def test_select_flag(rytwin):
         "1.0",
         "--seed",
         "3",
-        "--twin-scope",
-        "region",
         "--twin-select",
         "interesting",
         "-o",
@@ -662,8 +745,6 @@ def test_select_interesting_wins_overlap(rytwin, symiri):
         "1.0",
         "--seed",
         "3",
-        "--twin-scope",
-        "region",
         "--twin-select",
         "interesting",
         "--verbose",
@@ -711,7 +792,7 @@ def test_select_interesting_equivalence(rytwin, rysmith, symiri):
       d,
       sirs,
       "interesting",
-      extra=["--twin-scope", "region", "--twin-select", "interesting"],
+      extra=["--twin-select", "interesting"],
     )
 
 
@@ -736,8 +817,6 @@ def test_select_softmax_probability(rytwin):
           "0.15",
           "--seed",
           str(s),
-          "--twin-scope",
-          "region",
           "--twin-select",
           "interesting",
           "--verbose",
@@ -785,10 +864,14 @@ def twin_block_bodies(src):
 
 
 def has_computed_rhs(body):
-  """True if some assignment's RHS references a local — i.e. the twin is a
-  computation, not a constant reconstruction. `addr`/`null` RHSs are the
-  positional pointer reconstruction both twin kinds emit; they don't count."""
+  """True if the body computes something from the live-in state rather than
+  restating constants: an assignment or a store whose value references a
+  local. `addr`/`null` RHSs are pointer reconstruction and don't count."""
   for line in body.splitlines():
+    if line.startswith("store ") and "," in line:
+      if "%" in line.split(",", 1)[1]:
+        return True
+      continue
     if " = " in line and not line.startswith("require") and not line.startswith("br"):
       rhs = line.split(" = ", 1)[1]
       if rhs.startswith("addr ") or rhs.startswith("null"):
@@ -839,7 +922,7 @@ def test_twin_fully_concrete(rytwin, rysmith):
     check("no %? symbol left in p2", "%?" not in open(got[1]).read(), "")
 
 
-def test_twin_gen_equivalence(rytwin, rysmith, symiri):
+def test_twin_body_equivalence(rytwin, rysmith, symiri):
   """[Stage 3] The full equivalence sweep holds with generated twins."""
   with tempfile.TemporaryDirectory() as d:
     sirs = gen_pool(rysmith, d, seed="303", emit_state=False)
@@ -847,27 +930,6 @@ def test_twin_gen_equivalence(rytwin, rysmith, symiri):
       check("twin-gen equivalence setup", False, "generation failed")
       return
     equivalence_over_pool(rytwin, symiri, d, sirs, "twin-gen", extra=None)
-
-
-def test_twin_gen_fallback(rytwin, rysmith):
-  """[Stage 3] --no-twin-smith twins via constant reconstruction, and
-  a generation budget of zero falls back instead of crashing."""
-  with tempfile.TemporaryDirectory() as d:
-    sirs = gen_pool(rysmith, d, emit_state=False)
-    if not sirs:
-      check("twin-gen fallback setup", False, "generation failed")
-      return
-    got = first_twinned(rytwin, sirs, extra=["--no-twin-smith"])
-    check("--no-twin-smith twins via constants", got is not None, "")
-    if got:
-      bodies = twin_block_bodies(open(got[1]).read())
-      check(
-        "constant twins have no computed RHS",
-        bodies and not any(has_computed_rhs(b) for b in bodies),
-        "",
-      )
-    got = first_twinned(rytwin, sirs, extra=["--twin-retries", "0"])
-    check("zero retries falls back cleanly", got is not None, "")
 
 
 def test_twin_requires_stripped(rytwin, rysmith):
@@ -968,7 +1030,12 @@ def test_store_block_twinnable(rytwin, symiri):
     if r.returncode != 0:
       return
     src = open(p2).read()
-    check("store block grafted", "^work__twin" in src, "")
+    check("store region grafted", "^entry__twin" in src, "")
+    check(
+      "the store is replayed in the twin",
+      any("store %p," in b for b in twin_block_bodies(src)),
+      "",
+    )
     check(
       "store twin validated + fired",
       "validated: OK" in r.stdout and "0 twin exec" not in r.stdout,
@@ -1296,7 +1363,8 @@ def test_label_collision_across_functions(rytwin, symiri):
     names = {nm for nm, _ in GUARD_FN_RE.findall(src)}
     check(
       "one guard per function, frame-scoped names",
-      "@__twg_leafa_work" in names and "@__twg_leafb_work" in names,
+      len([n for n in names if n.startswith("@__twg_leafa_")]) == 1
+      and len([n for n in names if n.startswith("@__twg_leafb_")]) == 1,
       str(names),
     )
     check(
@@ -1646,8 +1714,20 @@ def main():
       lambda: test_guard_compiles_c_and_wasm(rytwin, rysmith),
     ),
     (
-      "region scope: --twin-scope option accepted/rejected",
-      lambda: test_scope_flag(rytwin),
+      "twin body: flags of the removed solver generator are rejected",
+      lambda: test_removed_flags_rejected(rytwin),
+    ),
+    (
+      "twin body: rytwin links no SMT backend",
+      lambda: test_no_solver_linked(rytwin),
+    ),
+    (
+      "twin body: a loop is unrolled into the trace",
+      lambda: test_trace_body_unrolls_loop(rytwin),
+    ),
+    (
+      "twin body: every block of the region is replayed",
+      lambda: test_trace_body_replays_region_stmts(rytwin),
     ),
     (
       "region scope: collapses a block sequence to its exit",
@@ -1658,8 +1738,8 @@ def main():
       lambda: test_scope_region_loop(rytwin, symiri),
     ),
     (
-      "region scope: default stays single-block",
-      lambda: test_scope_default_is_block(rytwin),
+      "region scope: region is the default unit",
+      lambda: test_default_scope_is_region(rytwin),
     ),
     (
       "region scope: equivalence sweep (profiled + other)",
@@ -1682,23 +1762,19 @@ def main():
       lambda: test_select_softmax_probability(rytwin),
     ),
     (
-      "twin_gen: twin blocks are generated computations",
+      "twin body: twins compute from the live-in state",
       lambda: test_twin_is_generated(rytwin, rysmith),
     ),
     (
-      "twin_gen: twins fully concrete",
+      "twin body: twins fully concrete",
       lambda: test_twin_fully_concrete(rytwin, rysmith),
     ),
     (
-      "twin_gen: equivalence sweep",
-      lambda: test_twin_gen_equivalence(rytwin, rysmith, symiri),
+      "twin body: equivalence sweep",
+      lambda: test_twin_body_equivalence(rytwin, rysmith, symiri),
     ),
     (
-      "twin_gen: fallback paths",
-      lambda: test_twin_gen_fallback(rytwin, rysmith),
-    ),
-    (
-      "twin_gen: equality requires stripped",
+      "twin body: no equality requires in the graft",
       lambda: test_twin_requires_stripped(rytwin, rysmith),
     ),
     (
@@ -1742,15 +1818,15 @@ def main():
       lambda: test_ptr_program_targets(rytwin, symiri),
     ),
     (
-      "twin_gen+ptr: store fixture twin is generated",
+      "twin body+ptr: store fixture twin computes",
       lambda: test_ptr_state_twin_generated(rytwin, symiri),
     ),
     (
-      "twin_gen+ptr: rylink program gets generated twins",
+      "twin body+ptr: rylink program gets computing twins",
       lambda: test_rylink_generated_twins(rytwin, symiri),
     ),
     (
-      "twin_gen+ptr: pointered pool generates concretized twins",
+      "twin body+ptr: pointered pool twins are concrete",
       lambda: test_ptr_pool_generated(rytwin, rysmith),
     ),
     ("rytwin: missing args usage", lambda: test_missing_args_usage(rytwin)),

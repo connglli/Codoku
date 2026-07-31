@@ -1,46 +1,59 @@
 #pragma once
 
-// TwinTransform — the equivalence-preserving block-twin rewrite behind rytwin.
+// TwinTransform — the equivalence-preserving region-twin rewrite behind rytwin.
 //
 // For the profiled entry function, TwinTransform walks the executed trace (the
-// StateProfile in TransformContext). For each eligible on-path block B, with
+// StateProfile in TransformContext). For each eligible on-path region R, with
 // probability `pTwin`, it grafts an equivalent alternative:
 //
-//     ^X (guard):  br call @__twg_<fn>_<X>(<state>) != 0, ^X__twin, ^X__orig
-//     ^X__twin:    B'  ->  ^X__merge      (B' reproduces B's effect at s)
-//     ^X__orig:    B   ->  ^X__merge      (the original block body)
-//     ^X__merge:   <B's original terminator>
+//     ^X:         br call @__twg_<fn>_<X>(<state>) != 0, ^X__twin, ^X__orig
+//     ^X__twin:   R'                              ->  br ^<exit>
+//     ^X__orig:   R's entry block, unchanged      ->  its own terminator
 //
-// `s` is the concrete state B sees on the profiled input (from the
-// profile); `B'` reproduces `s' = B(s)` for the variables B writes; and
-// the guard fires only when the live-in state equals `s`, so on the
-// profiled input the twin runs and on every other state the original runs.
-// Thus p1(i) == p2(i) for every input i.
+// `^X` is the region entry's own label, taken over by the guard so that every
+// predecessor still branches to `^X` and no edge needs rewriting; `__twin` /
+// `__orig` are literal suffixes, which keeps the labels distinct when one
+// function holds several twin sites. `^<exit>` is not generated at all — it is
+// the block the region left to, already in the function under its own name.
+// There is no merge block: the twin jumps straight to that exit, and the orig
+// arm keeps the entry's own terminator, so the two arms rejoin at the exit.
 //
-// The guard is a per-site generated function `@__twg_<fn>_<label> : i1`
-// that consumes the ENTIRE definitely-initialized state at B's entry — a
-// conjunction of per-leaf equalities, which is total (no UB) and
-// collision-free, so it can only fire on exactly `s`. Covering the whole
-// state (not just B's read set) maximizes discrimination; soundness only
-// needs guard-set ⊇ read-set(B), which planRegion guarantees by rejecting
-// any block whose reads are not guardable. Scalar roots cross into the
-// guard by value, vector roots per-lane, and aggregate roots by address
-// (`ptr [N] T` / `ptr @S` parameters navigated with ptrindex/ptrfield +
-// load — all in-bounds by construction, so total on every input).
+// The unit is the maximal single-entry region rooted at an executed block:
+// every later block the entry *dominates* on the executed path, up to the
+// first block it does not (or the function's return). A whole loop collapses
+// when its header is the region entry; a straight-line run collapses to one
+// block, which is the degenerate case rather than a separate mode.
 //
-// Candidate blocks may contain memory operations (load/store/addr/ptr
-// navigation): a block's effect is the bit-exact frame-state diff, store
-// effects surface as diffs of the pointee root, and pointer leaves carry
-// provenance so the guard compares them against `addr`-reconstructed
-// expected values and the twin reproduces them positionally. Blocks with
-// non-intrinsic calls stay ineligible — a callee handed a pointer into an
-// outer frame could mutate state the frame diff does not see.
+// `R'` is the region's own executed trace, flattened (see reify/twin_trace.hpp):
+// the statements the profiled run performed, concatenated in execution order
+// with the branches dropped and each loop iteration laid out in turn. It
+// computes what the region computes for every state that follows the same path
+// UB-free — established by construction rather than by search, so no solver is
+// involved anywhere in rytwin.
 //
-// `B'` is solver-generated through the injected `TwinGenFn` (see
-// reify/twin_gen.hpp): random statements whose net effect from `s` is
-// exactly `s'`, verified bit-exactly. When generation is disabled or no
-// attempt verifies, `B'` falls back to a constant reconstruction of the
-// leaves the block writes.
+// The guard is a per-site generated function `@__twg_<fn>_<label> : i1`. It
+// consumes the ENTIRE definitely-initialized state at the region's entry as a
+// conjunction of per-leaf equalities against `s`, the state the region sees on
+// the profiled input. That conjunction is total (no UB) and collision-free, so
+// the twin arm runs on the profiled input and the original runs on every other
+// state: p1(i) == p2(i) for every input i. Scalar roots cross into the guard by
+// value, vector roots per-lane, and aggregate roots by address (`ptr [N] T` /
+// `ptr @S` parameters navigated with ptrindex/ptrfield + load — all in-bounds
+// by construction, so total on every input).
+//
+// Note the asymmetry: soundness needs only guard-set ⊇ read-set(R) — which
+// planRegion guarantees by rejecting any region whose reads are not guardable —
+// and the trace body is correct on a whole path domain, so pinning every leaf
+// to one state is far stricter than either requires. The guard, not the body,
+// is now the narrow half of the design.
+//
+// Candidate regions may contain memory operations (load/store/addr/ptr
+// navigation). Eligibility is decided from the bit-exact frame-state diff, in
+// which store-through-pointer effects surface as diffs of the pointee root;
+// the body itself needs no reconstruction, since replaying the trace re-derives
+// pointer leaves by running the same navigation the region ran. Regions with
+// non-intrinsic calls stay ineligible — a callee handed a pointer into an outer
+// frame could mutate state the frame diff does not see.
 
 #include <functional>
 #include <memory>
@@ -48,36 +61,16 @@
 
 #include "reify/hyperparameters.hpp"
 #include "reify/transform.hpp"
-#include "reify/twin_gen.hpp"
 
 namespace refractir::reify {
 
-  // How much of the CFG each twin replaces.
-  //
-  //   Block  — one basic block (the historical unit). The guard fires on the
-  //            block's entry state, the twin reproduces its effect, and
-  //            control resumes at the block's observed successor.
-  //   Region — the maximal single-entry region rooted at the block: every
-  //            later block the entry *dominates* on the executed path, up to
-  //            the first block it does not (or the function's return). The
-  //            guard fires on the region's entry state, the twin reproduces
-  //            the region's *net* effect, and control jumps straight to the
-  //            region exit — skipping every intermediate block and every loop
-  //            iteration in between. Sound by the same argument as Block:
-  //            RefractIR is deterministic, so the full entry state fixes the
-  //            entire continuation, and the twin is a memoized shortcut for
-  //            exactly that state. A whole loop collapses when its header is
-  //            the region entry; a straight-line run collapses to a single
-  //            block. Block is the degenerate one-block region.
-  enum class TwinScope { Block, Region };
-
   // Interestingness features of one candidate region, handed to a
-  // SelectionPolicy. A single block is the degenerate one-block region, so
-  // these describe blocks and multi-block regions alike.
+  // SelectionPolicy. A one-block region is the degenerate case, so these
+  // describe short and long regions alike.
   struct CandidateInfo {
     long loopItersCollapsed = 0; // repeated blocks in the window (a loop swallowed)
     long distinctBlocks = 0;     // region size
-    long changedLeaves = 0;      // state-diff leaves the twin must reproduce
+    long changedLeaves = 0;      // leaves the region's net effect changes
     long fanIn = 0;              // predecessors of the region entry
   };
 
@@ -101,11 +94,7 @@ namespace refractir::reify {
   SelectionPolicy interestingPolicy(double pTwin, double temp = rytwin::hp::kInterestingTemp);
 
   // Build the twin transform. `select` scores candidate regions into twin
-  // probabilities (see SelectionPolicy). `twinGen` generates the twin body;
-  // an empty function selects constant reconstruction. `scope` selects the
-  // twin unit (see TwinScope).
-  std::unique_ptr<Transform> makeTwinTransform(
-      SelectionPolicy select, TwinGenFn twinGen = {}, TwinScope scope = TwinScope::Block
-  );
+  // probabilities (see SelectionPolicy).
+  std::unique_ptr<Transform> makeTwinTransform(SelectionPolicy select);
 
 } // namespace refractir::reify

@@ -68,11 +68,13 @@ considered and dropped (spec §13).
   the packed spill by address; Python folds the lane list). `@reduce_mul`
   is intentionally absent (nonlinear).
 - **`rytwin`** (new tool): transforms a generated program into a
-  semantically-equivalent variant via SMT-checked twin blocks, driven
-  by `rysmith --emit-state` per-program-point state profiles.
-  `--twin-scope region` widens the twin unit from a single block to a whole dominance
-  region — collapsing straight-line runs and entire loops into one guarded
-  block that jumps straight to the region exit. `--twin-select interesting`
+  semantically-equivalent variant via guarded twin regions, driven
+  by `rysmith --emit-state` per-program-point state profiles. The twin
+  unit is a whole dominance region — collapsing straight-line runs and
+  entire loops into one guarded block that jumps straight to the region
+  exit — and its body is the region's own executed trace, flattened
+  (branches dropped, loop iterations laid end to end), so rytwin needs
+  no SMT solver at all. `--twin-select interesting`
   swaps the uniform `--p-twin` coin for a selection policy that softmax-tilts
   each region's twin probability by how hard its twin is to prove equivalent
   (loop-collapse dominating), concentrating twins on the hardest regions.

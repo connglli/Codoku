@@ -38,14 +38,7 @@
 #include "reify/func_desc.hpp"
 #include "reify/state_profile.hpp"
 #include "reify/transform.hpp"
-#include "reify/twin_gen.hpp"
 #include "reify/twin_transform.hpp"
-#include "solver/solver.hpp"
-#if defined(USE_BITWUZLA)
-#include "solver/bitwuzla_impl.hpp"
-#elif defined(USE_ALIVESMT)
-#include "solver/alive_impl.hpp"
-#endif
 
 namespace fs = std::filesystem;
 using namespace refractir;
@@ -127,19 +120,6 @@ static std::vector<std::string> resolveParamArgs(
   return args;
 }
 
-static SymbolicExecutor::SolverFactory makeSolverFactory() {
-  return [](const SymbolicExecutor::Config &cfg) -> std::unique_ptr<smt::ISolver> {
-#if defined(USE_BITWUZLA)
-    return std::make_unique<solver::BitwuzlaSolver>(cfg.timeout_ms, cfg.seed, cfg.num_smt_threads);
-#elif defined(USE_ALIVESMT)
-    return std::make_unique<solver::AliveSolver>(cfg.timeout_ms, cfg.seed, cfg.num_smt_threads);
-#else
-    (void) cfg;
-    throw std::runtime_error("No solver backend compiled in");
-#endif
-  };
-}
-
 // rysmith names a concrete file `func_<id>_<i>.sir` (single init) or
 // `func_<id>_<i><a..z>.sir` (multi-init); the shared descriptor is
 // `func_<id>_<i>.json`. Recover the descriptor stem by dropping a trailing
@@ -175,17 +155,8 @@ int main(int argc, char **argv) {
                 "directory following rysmith's naming; without a sidecar the profile is "
                 "computed in-process by interpreting p1 on its solved input.",
                 cxxopts::value<std::string>())
-    ("p-twin",  "Probability of grafting a twin for each candidate block",
+    ("p-twin",  "Probability of grafting a twin for each candidate region",
                 cxxopts::value<double>()->default_value("0.5"))
-    ("no-twin-smith", "Disable rysmith-style twin generation; reconstruct the "
-                "post state with constants instead")
-    ("twin-stmts", "Random statements per generated twin",
-                cxxopts::value<int>()->default_value("3"))
-    ("twin-retries", "Generation attempts per twin before falling back",
-                cxxopts::value<int>()->default_value("3"))
-    ("twin-scope", "Twin unit: block (one basic block) or region (the maximal "
-                "dominance region — collapses sequences and whole loops)",
-                cxxopts::value<std::string>()->default_value("block"))
     ("twin-select", "Which regions to twin: random (coin per candidate) or "
                 "interesting (per-region softmax probability of interestingness)",
                 cxxopts::value<std::string>()->default_value("random"))
@@ -222,15 +193,6 @@ int main(int argc, char **argv) {
   double pTwin = result["p-twin"].as<double>();
   uint32_t seed =
       result.count("seed") ? result["seed"].as<uint32_t>() : (uint32_t) std::random_device{}();
-
-  bool twinSmith = result.count("no-twin-smith") == 0;
-
-  std::string scopeStr = result["twin-scope"].as<std::string>();
-  if (scopeStr != "block" && scopeStr != "region") {
-    std::cerr << "rytwin: --twin-scope must be block or region (got '" << scopeStr << "')\n";
-    return 2;
-  }
-  TwinScope scope = scopeStr == "region" ? TwinScope::Region : TwinScope::Block;
 
   std::string selectStr = result["twin-select"].as<std::string>();
   if (selectStr != "random" && selectStr != "interesting") {
@@ -364,25 +326,13 @@ int main(int argc, char **argv) {
   // context borrows it by reference so every draw stays deterministic.
   std::mt19937 rng(seed);
   TransformContext ctx(rng);
-  ctx.solverFactory = makeSolverFactory();
   if (result.count("verbose"))
     ctx.verbose = &std::cerr;
   if (desc)
     ctx.descriptors[entry] = *desc;
   ctx.profiles[profile->func] = *profile;
-  TwinGenFn twinGen;
-  if (twinSmith) {
-    TwinGenConfig gcfg;
-    gcfg.nStmts = result["twin-stmts"].as<int>();
-    gcfg.retries = result["twin-retries"].as<int>();
-    auto factory = ctx.solverFactory;
-    twinGen = [gcfg,
-               factory](const Program &p, const std::vector<MiniRoot> &roots, std::mt19937 &r) {
-      return generateTwin(p, roots, r, factory, gcfg);
-    };
-  }
   TransformPipeline pipe;
-  pipe.add(makeTwinTransform(std::move(selectPolicy), std::move(twinGen), scope));
+  pipe.add(makeTwinTransform(std::move(selectPolicy)));
   TransformReport rep = pipe.run(prog, ctx);
   if (!rep.ok) {
     std::cerr << "rytwin: pass failed: " << rep.message << "\n";

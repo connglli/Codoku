@@ -66,7 +66,7 @@ namespace refractir::reify {
   }
 
   // Append one IntrinsicDecl per used instantiation. This is the single
-  // place a whitelist entry becomes a declaration; func_gen and twin_gen
+  // place a whitelist entry becomes a declaration; func_gen
   // both emit their `intrinsic` sections through it. The declaration is
   // reconstructed entirely from the canonical signature: each IntrinsicSigType slot
   // expands to a concrete type given the used element type and lane count.
