@@ -371,6 +371,7 @@ namespace refractir::reify {
                                          // profile (name-sorted) order
       std::vector<LeafRef> defs;         // per-leaf constant reconstruction of s'
       std::vector<Instr> twinInstrs;     // the region's flattened executed trace
+      std::vector<PathCheck> checks;     // the branches that body assumes
       std::string exitLabel;             // block the twin jumps to (region exit)
     };
 
@@ -868,6 +869,7 @@ namespace refractir::reify {
         if (!body)
           return false;
         plan.twinInstrs = std::move(body->stmts);
+        plan.checks = std::move(body->checks);
         return true;
       };
 
@@ -969,7 +971,8 @@ namespace refractir::reify {
             vlog(
                 fnName + " " + c.label + ": grafted region -> " + c.plan.exitLabel + " (" +
                 std::to_string(c.nBlocks) + " blk, " + std::to_string(c.plan.twinInstrs.size()) +
-                " stmts)" + (c.fellBack ? " [window fell back to one block]" : "")
+                " stmts, " + std::to_string(c.plan.checks.size()) + " path cond)" +
+                (c.fellBack ? " [window fell back to one block]" : "")
             );
             decided.emplace(c.label, std::move(c.plan));
           };

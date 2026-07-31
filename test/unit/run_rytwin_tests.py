@@ -537,6 +537,119 @@ def test_trace_body_replays_region_stmts(rytwin):
       )
 
 
+# A chain of unconditional branches: nothing about the path is in question,
+# so the trace assumes no conditions at all.
+CHAIN_FIXTURE = """// SOLVED: %p0=3
+fun @chain(%p0: i32) : i32 {
+  let mut %a: i32 = 1;
+^entry:
+  %a = %a + %p0;
+  br ^b1;
+^b1:
+  %a = 2 * %a;
+  br ^b2;
+^b2:
+  %a = %a - 3;
+  br ^done;
+^done:
+  ret %a;
+}
+"""
+
+# A branch that opens and rejoins inside the region: the twin replays the
+# taken side only, so the guard must keep the state on that side.
+DIAMOND_FIXTURE = """// SOLVED: %p0=3
+fun @diamond(%p0: i32) : i32 {
+  let mut %a: i32 = 1;
+^entry:
+  br ^head;
+^head:
+  br %p0 > 0, ^pos, ^neg;
+^pos:
+  %a = %a + 10;
+  br ^join;
+^neg:
+  %a = %a - 10;
+  br ^join;
+^join:
+  %a = 2 * %a;
+  br ^done;
+^done:
+  ret %a;
+}
+"""
+
+
+def graft_log(rytwin, d, fixture, name, args):
+  """Twin `fixture` with --verbose and return (result, the graft log lines)."""
+  p1 = os.path.join(d, name + ".sir")
+  open(p1, "w").write(fixture)
+  p2 = os.path.join(d, name + ".p2.sir")
+  r = run([rytwin, p1, "--p-twin", "1.0", "--seed", "3", "-v", *args, "-o", p2])
+  lines = [ln for ln in r.stderr.splitlines() if "grafted" in ln]
+  return r, lines, p1, p2
+
+
+def path_cond_count(line):
+  m = re.search(r"(\d+) path cond", line)
+  return int(m.group(1)) if m else None
+
+
+def test_trace_records_path_conditions(rytwin):
+  """Flattening drops the branches, so the trace has to carry the conditions
+  it assumed and the way each one went — otherwise nothing records that the
+  twin is valid only while the state keeps taking that path."""
+  with tempfile.TemporaryDirectory() as d:
+    r, lines, _, _ = graft_log(rytwin, d, LOOP_FIXTURE, "loopreg", [])
+    check("loop fixture twinned", r.returncode == 0 and lines, r.stderr[:200])
+    if lines:
+      check(
+        "a loop region carries one condition per header visit",
+        path_cond_count(lines[0]) == 4,
+        lines[0],
+      )
+  with tempfile.TemporaryDirectory() as d:
+    r, lines, _, _ = graft_log(rytwin, d, CHAIN_FIXTURE, "chain", [])
+    check("chain fixture twinned", r.returncode == 0 and lines, r.stderr[:200])
+    if lines:
+      check(
+        "an all-unconditional region carries none",
+        path_cond_count(lines[0]) == 0,
+        lines[0],
+      )
+  with tempfile.TemporaryDirectory() as d:
+    r, lines, _, _ = graft_log(rytwin, d, SEQ_FIXTURE, "seqreg", [])
+    check("sequence fixture twinned", r.returncode == 0 and lines, r.stderr[:200])
+    if lines:
+      check(
+        "the region's own entry branch counts too",
+        path_cond_count(lines[0]) == 1,
+        lines[0],
+      )
+
+
+def test_trace_records_diamond_condition(rytwin, symiri):
+  """A branch taken inside the region contributes exactly one condition, and
+  the twin replays only the side that ran."""
+  with tempfile.TemporaryDirectory() as d:
+    r, lines, p1, p2 = graft_log(rytwin, d, DIAMOND_FIXTURE, "diamond", ["--validate"])
+    check("diamond fixture twinned", r.returncode == 0 and lines, r.stderr[:200])
+    if not lines:
+      return
+    check(
+      "the diamond contributes one condition", path_cond_count(lines[0]) == 1, lines[0]
+    )
+    body = "\n".join(twin_block_bodies(open(p2).read()))
+    check(
+      "the twin replays the taken side only",
+      "%a = %a + 10;" in body and "%a = %a - 10;" not in body,
+      body[:200],
+    )
+    r1 = symiri_result(symiri, p1, "@diamond", ["3"])
+    r2 = symiri_result(symiri, p2, "@diamond", ["3"])
+    check("diamond program equivalent", r1[1:] == r2[1:], f"{r1} vs {r2}")
+
+
 def test_default_scope_is_region(rytwin):
   """Region is the only unit now, so the ^e twin jumps straight to the
   region exit ^x without being asked to."""
@@ -1783,6 +1896,14 @@ def main():
     (
       "twin body: rytwin links no SMT backend",
       lambda: test_no_solver_linked(rytwin),
+    ),
+    (
+      "twin body: the trace records the conditions it assumed",
+      lambda: test_trace_records_path_conditions(rytwin),
+    ),
+    (
+      "twin body: a branch inside the region is one condition",
+      lambda: test_trace_records_diamond_condition(rytwin, symiri),
     ),
     (
       "twin body: a loop is unrolled into the trace",

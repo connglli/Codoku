@@ -21,6 +21,13 @@
 // still rewritten past recognition by the disguise pass, and the longest is
 // bounded by the profiled run itself.
 //
+// Dropping the branches is what makes the body straight-line, but it also
+// makes the body *silently* path-specific: replayed from a state that would
+// have branched elsewhere, it computes the wrong thing. So the conditions are
+// not thrown away — each one is recorded with the way the profiled run went
+// and the point in the body where it applies. A guard is sound exactly when it
+// admits only states that decide every recorded condition the same way.
+//
 // `require` / `assume` instructions are carried over unchanged. They held on
 // the profiled path, and a guard that admits only states following that path
 // keeps them holding; a later pass may drop the ones it can prove redundant.
@@ -37,11 +44,22 @@
 
 namespace refractir::reify {
 
+  // One branch the profiled run decided, and the way it went. `afterStmt` is
+  // the number of statements that precede it in `stmts`, so the condition is
+  // read in the state the body has reached at that point — the same state the
+  // original evaluated it in.
+  struct PathCheck {
+    std::size_t afterStmt = 0;
+    Cond cond;
+    bool taken = false; // true = the `then` label ran
+  };
+
   struct TraceBody {
-    std::vector<Instr> stmts; // the executed statements, in execution order
-    std::string exitLabel;    // where control left the region
-    std::size_t steps = 0;    // block executions replayed (loop repeats counted)
-    std::size_t blocks = 0;   // distinct blocks covered
+    std::vector<Instr> stmts;      // the executed statements, in execution order
+    std::vector<PathCheck> checks; // the branches this body assumes, in order
+    std::string exitLabel;         // where control left the region
+    std::size_t steps = 0;         // block executions replayed (loop repeats counted)
+    std::size_t blocks = 0;        // distinct blocks covered
   };
 
   // Flatten the executed block sequence `executed` (in execution order, with
