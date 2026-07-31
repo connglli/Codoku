@@ -65,6 +65,14 @@ namespace refractir::reify {
 
   LValue leafLV(const std::string &root, const std::vector<Access> &path);
 
+  // The canonical name of one scalar leaf: `%a`, `%a[1]`, `%s.f0`. This is the
+  // key every consumer indexes leaves by, so a captured state leaf and the
+  // lvalue an instruction writes agree by construction. The LValue overload
+  // returns nullopt when an index is not a literal, since such a leaf has no
+  // one name.
+  std::string leafKey(const std::string &root, const std::vector<Access> &path);
+  std::optional<std::string> leafKey(const LValue &lv);
+
   Expr rvalExpr(LValue lv);
 
   // `addr <target>` or `null` — the RHS that reproduces a pointer cell.

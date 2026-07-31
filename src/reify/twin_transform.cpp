@@ -19,6 +19,8 @@
 #include "frontend/diagnostics.hpp"
 #include "interp/type_layout.hpp"
 #include "reify/state_profile.hpp"
+#include "reify/twin_interval.hpp"
+#include "reify/twin_mini.hpp"
 #include "reify/twin_trace.hpp"
 #include "reify/type_gen.hpp"
 
@@ -268,17 +270,6 @@ namespace refractir::reify {
     }
 
     // Canonical key for a (root, path) leaf so repeated writes dedup.
-    std::string leafKey(const std::string &root, const std::vector<Access> &path) {
-      std::string k = root;
-      for (const auto &acc: path) {
-        if (auto af = std::get_if<AccessField>(&acc))
-          k += "." + af->field;
-        else
-          k += "[" + std::to_string(std::get<IntLit>(std::get<AccessIndex>(acc).index).value) + "]";
-      }
-      return k;
-    }
-
     struct LeafRef {
       std::string root;
       std::vector<Access> path;
@@ -795,7 +786,26 @@ namespace refractir::reify {
       std::string label;
       TwinPlan plan;
       bool fellBack = false;
+      // What the interval pass made of the trace at the profiled state. It
+      // does not gate the graft; it says how much room a guard has to widen.
+      std::string interval;
     };
+
+    // The profiled state as an interval environment: every scalar leaf pinned
+    // to the one value it holds. This is the narrowest box there is — the point
+    // guard — so the pass proving it is the floor, not an achievement.
+    IntervalEnv pointBox(const std::vector<std::pair<std::string, StateValue>> &vars) {
+      IntervalEnv env;
+      for (const auto &[name, val]: vars) {
+        std::vector<StateLeaf> leaves;
+        bool hasPtr = false, hasUndef = false;
+        enumStateLeaves(val, leaves, hasPtr, hasUndef);
+        for (const auto &lf: leaves)
+          if (lf.val.kind == StateValue::Kind::Int)
+            env[leafKey(name, lf.path)] = Interval{lf.val.intVal, lf.val.intVal, false};
+      }
+      return env;
+    }
 
     std::size_t blockIndex(const CFG &cfg, const std::string &lbl) {
       auto it = cfg.indexOf.find(lbl);
@@ -834,6 +844,7 @@ namespace refractir::reify {
                  lb != byLabel.end() && std::holds_alternative<RetTerm>(lb->second->term))
           tEnd = last;
       }
+      std::string note;
       auto tryPlan = [&](std::size_t end, TwinPlan &plan, std::size_t &nBlocks) -> bool {
         std::vector<const Block *> blocks;
         std::unordered_set<std::string> seen;
@@ -868,6 +879,8 @@ namespace refractir::reify {
         auto body = flattenTrace(executed, plan.exitLabel, byLabel, &why);
         if (!body)
           return false;
+        const IntervalVerdict iv = checkTrace(fn, structs, *body, pointBox(pts[t]->vars));
+        note = iv.ok ? "ok" : iv.reason;
         plan.twinInstrs = std::move(body->stmts);
         plan.checks = std::move(body->checks);
         return true;
@@ -889,6 +902,7 @@ namespace refractir::reify {
         }
         c.fellBack = true;
       }
+      c.interval = note;
       return c;
     }
 
@@ -971,8 +985,8 @@ namespace refractir::reify {
             vlog(
                 fnName + " " + c.label + ": grafted region -> " + c.plan.exitLabel + " (" +
                 std::to_string(c.nBlocks) + " blk, " + std::to_string(c.plan.twinInstrs.size()) +
-                " stmts, " + std::to_string(c.plan.checks.size()) + " path cond)" +
-                (c.fellBack ? " [window fell back to one block]" : "")
+                " stmts, " + std::to_string(c.plan.checks.size()) + " path cond, interval " +
+                c.interval + ")" + (c.fellBack ? " [window fell back to one block]" : "")
             );
             decided.emplace(c.label, std::move(c.plan));
           };
