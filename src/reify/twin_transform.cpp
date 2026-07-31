@@ -791,43 +791,40 @@ namespace refractir::reify {
       std::string interval;
     };
 
-    // The profiled state as an interval environment: every scalar leaf pinned
-    // to the one value it holds. This is the narrowest box there is — the point
+    // The profiled state, leaf by leaf: every integer pinned to the one value
+    // it holds, every float to its exact value, every pointer to the cell its
+    // recorded provenance names. This is the narrowest box there is — the point
     // guard — so the pass proving it is the floor, not an achievement.
-    IntervalEnv pointBox(const std::vector<std::pair<std::string, StateValue>> &vars) {
-      IntervalEnv env;
-      for (const auto &[name, val]: vars) {
-        std::vector<StateLeaf> leaves;
-        bool hasPtr = false, hasUndef = false;
-        enumStateLeaves(val, leaves, hasPtr, hasUndef);
-        for (const auto &lf: leaves)
-          if (lf.val.kind == StateValue::Kind::Int)
-            env[leafKey(name, lf.path)] = Interval{lf.val.intVal, lf.val.intVal, false};
-      }
-      return env;
-    }
-
-    // Where every pointer leaf points at region entry, resolved from the
-    // provenance the profile recorded. A pointer whose target cannot be named
-    // is left out rather than guessed at.
-    PtrEnv pointPtrs(
+    EntryState pointBox(
         const FunDecl &fn, const std::vector<std::pair<std::string, StateValue>> &vars,
         const StructMap &structs, const TypeLayout &layout
     ) {
-      PtrEnv out;
+      EntryState out;
       for (const auto &[name, val]: vars) {
         auto decl = findRoot(fn, name);
-        if (!decl)
-          continue;
         std::vector<StateLeaf> leaves;
         bool hasPtr = false, hasUndef = false;
         enumStateLeaves(val, leaves, hasPtr, hasUndef);
         for (auto &lf: leaves) {
-          if (lf.val.kind != StateValue::Kind::Ptr)
-            continue;
-          LeafRef ref{name, lf.path, lf.val, {}, {}};
-          if (fillPtrLeaf(ref, fn, structs, layout, decl->type))
-            out[leafKey(name, lf.path)] = ref.ptrTarget;
+          const std::string key = leafKey(name, lf.path);
+          switch (lf.val.kind) {
+            case StateValue::Kind::Int:
+              out.ints[key] = Interval{lf.val.intVal, lf.val.intVal, false};
+              break;
+            case StateValue::Kind::Float:
+              out.floats[key] = lf.val.floatVal;
+              break;
+            case StateValue::Kind::Ptr: {
+              if (!decl)
+                break;
+              LeafRef ref{name, lf.path, lf.val, {}, {}};
+              if (fillPtrLeaf(ref, fn, structs, layout, decl->type))
+                out.ptrs[key] = ref.ptrTarget;
+              break;
+            }
+            default:
+              break;
+          }
         }
       }
       return out;
@@ -905,9 +902,8 @@ namespace refractir::reify {
         auto body = flattenTrace(executed, plan.exitLabel, byLabel, &why);
         if (!body)
           return false;
-        const IntervalVerdict iv = checkTrace(
-            fn, structs, *body, pointBox(pts[t]->vars), pointPtrs(fn, pts[t]->vars, structs, layout)
-        );
+        const IntervalVerdict iv =
+            checkTrace(fn, structs, *body, pointBox(fn, pts[t]->vars, structs, layout));
         note = iv.ok ? "ok" : iv.reason;
         plan.twinInstrs = std::move(body->stmts);
         plan.checks = std::move(body->checks);

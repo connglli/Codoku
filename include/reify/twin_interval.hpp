@@ -71,6 +71,20 @@ namespace refractir::reify {
   // target, and every load through it would be a dead end.
   using PtrEnv = std::unordered_map<std::string, std::optional<LValue>>;
 
+  // Floats are carried as exact values rather than ranges. A guard pins every
+  // float leaf it mentions (bounding a float needs rounding-aware arithmetic,
+  // which buys nothing while they stay pinned), and a pinned float is a
+  // constant — so the domain that fits them is equality, not an interval.
+  using FloatEnv = std::unordered_map<std::string, double>;
+
+  // The state a trace is checked against: what each leaf may hold at region
+  // entry, per kind. A leaf missing from all three is simply unknown.
+  struct EntryState {
+    IntervalEnv ints;
+    FloatEnv floats;
+    PtrEnv ptrs;
+  };
+
   struct IntervalVerdict {
     bool ok = false;
     // Why the trace could not be proven — the failing operation and what it
@@ -82,8 +96,7 @@ namespace refractir::reify {
   // of the locals the body touches (widths bound the arithmetic) and `structs`
   // resolves field types.
   IntervalVerdict checkTrace(
-      const FunDecl &fn, const StructMap &structs, const TraceBody &body, const IntervalEnv &entry,
-      const PtrEnv &ptrs
+      const FunDecl &fn, const StructMap &structs, const TraceBody &body, const EntryState &entry
   );
 
 } // namespace refractir::reify

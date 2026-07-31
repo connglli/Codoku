@@ -754,6 +754,34 @@ fun @main() : i32 {
 """
 
 
+# Floating-point work: a pinned float is a constant, so the pass can follow
+# it exactly — through arithmetic, a branch on a float, and a cast back to an
+# integer.
+FLOAT_FIXTURE = """// SOLVED: %p0=3
+fun @floats(%p0: i32) : i32 {
+  let mut %f: f64 = 1.5;
+  let mut %g: f64 = 0.0;
+  let mut %r: f64 = 0.0;
+  let mut %i: i32 = 0;
+^entry:
+  %g = 2.0 * %f;
+  br ^work;
+^work:
+  %r = %g + 1.25;
+  %r = %r / %f;
+  br %r > 0.0, ^pos, ^neg;
+^pos:
+  %i = %r as i32;
+  br ^done;
+^neg:
+  %i = 0 - %p0;
+  br ^done;
+^done:
+  ret %i;
+}
+"""
+
+
 def interval_note(line):
   m = re.search(r"interval (ok|[^)]+)", line)
   return m.group(1) if m else None
@@ -794,6 +822,22 @@ def test_interval_pass_follows_memory(rytwin, symiri):
     r1 = symiri_result(symiri, p1, "@loaddiv", ["3"])
     r2 = symiri_result(symiri, p2, "@loaddiv", ["3"])
     check("memory-bearing twin still equivalent", r1[1:] == r2[1:], f"{r1} vs {r2}")
+
+
+def test_interval_pass_follows_floats(rytwin, symiri):
+  """A float leaf the guard pins is a constant, so float arithmetic, a branch
+  on a float, and a cast back to an integer are all followable — none of them
+  should stop a region being proven."""
+  with tempfile.TemporaryDirectory() as d:
+    r, lines, p1, p2 = graft_log(rytwin, d, FLOAT_FIXTURE, "floats", ["--validate"])
+    check("float fixture twinned", r.returncode == 0 and lines, r.stderr[:200])
+    if not lines:
+      return
+    check("float work is proven", interval_note(lines[0]) == "ok", lines[0])
+    check("the float branch is settled", "1 path cond" in lines[0], lines[0])
+    r1 = symiri_result(symiri, p1, "@floats", ["3"])
+    r2 = symiri_result(symiri, p2, "@floats", ["3"])
+    check("float program equivalent", r1[1:] == r2[1:], f"{r1} vs {r2}")
 
 
 def test_interval_pass_seeds_pointers_from_the_profile(rytwin):
@@ -2100,6 +2144,10 @@ def main():
     (
       "interval: values are followed through memory",
       lambda: test_interval_pass_follows_memory(rytwin, symiri),
+    ),
+    (
+      "interval: float values are followed exactly",
+      lambda: test_interval_pass_follows_floats(rytwin, symiri),
     ),
     (
       "interval: pointers set up before the region are known",

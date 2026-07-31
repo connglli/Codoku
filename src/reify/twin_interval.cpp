@@ -1,6 +1,7 @@
 #include "reify/twin_interval.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <optional>
 #include <variant>
@@ -74,9 +75,8 @@ namespace refractir::reify {
 
     class Checker {
     public:
-      Checker(
-          const FunDecl &fn, const StructMap &structs, const IntervalEnv &entry, const PtrEnv &ptrs
-      ) : env_(entry), ptrs_(ptrs), structs_(structs) {
+      Checker(const FunDecl &fn, const StructMap &structs, const EntryState &entry) :
+          env_(entry.ints), floats_(entry.floats), ptrs_(entry.ptrs), structs_(structs) {
         for (const auto &p: fn.params)
           types_[p.name.name] = p.type;
         for (const auto &l: fn.lets)
@@ -112,16 +112,16 @@ namespace refractir::reify {
 
       // --- types -----------------------------------------------------------
 
-      // Width of the value an lvalue names, or 0 when it is not a scalar
-      // integer (floats, pointers, whole aggregates and vectors).
-      std::uint32_t widthOf(const LValue &lv) const {
+      // The declared type of the cell an lvalue names, or null when the path
+      // does not fit the root's shape.
+      TypePtr typeOf(const LValue &lv) const {
         auto it = types_.find(lv.base.name);
         if (it == types_.end())
-          return 0;
+          return nullptr;
         TypePtr t = it->second;
         for (const auto &acc: lv.accesses) {
           if (!t)
-            return 0;
+            return nullptr;
           if (auto af = std::get_if<AccessField>(&acc)) {
             t = fieldType(t, af->field);
             continue;
@@ -131,9 +131,15 @@ namespace refractir::reify {
           else if (const auto *vt = TypeUtils::asVec(t))
             t = vt->elem;
           else
-            return 0;
+            return nullptr;
         }
-        auto bits = TypeUtils::getIntBitWidth(t);
+        return t;
+      }
+
+      // Width of the value an lvalue names, or 0 when it is not a scalar
+      // integer (floats, pointers, whole aggregates and vectors).
+      std::uint32_t widthOf(const LValue &lv) const {
+        auto bits = TypeUtils::getIntBitWidth(typeOf(lv));
         return bits ? *bits : 0;
       }
 
@@ -322,24 +328,7 @@ namespace refractir::reify {
       }
 
       bool isPointer(const LValue &lv) const {
-        auto it = types_.find(lv.base.name);
-        if (it == types_.end())
-          return false;
-        TypePtr t = it->second;
-        for (const auto &acc: lv.accesses) {
-          if (!t)
-            return false;
-          if (auto af = std::get_if<AccessField>(&acc)) {
-            t = fieldType(t, af->field);
-            continue;
-          }
-          if (const auto *at = TypeUtils::asArray(t))
-            t = at->elem;
-          else if (const auto *vt = TypeUtils::asVec(t))
-            t = vt->elem;
-          else
-            return false;
-        }
+        TypePtr t = typeOf(lv);
         return t && std::holds_alternative<PtrType>(t->v);
       }
 
@@ -358,6 +347,165 @@ namespace refractir::reify {
           return std::nullopt;
         }
         return **target;
+      }
+
+      // --- floats ------------------------------------------------------------
+      //
+      // Exact values only, so evaluation is concrete arithmetic with the
+      // strict-UB rules applied: a result that is not finite is UB (spec
+      // §7.4), as is division by zero. Single precision rounds after each
+      // operation, which is correctly rounded because a double holds every
+      // intermediate of two floats exactly.
+
+      static bool finite(double d) { return std::isfinite(d); }
+
+      static double round(double d, std::uint32_t bits) {
+        return bits == 32 ? (double) (float) d : d;
+      }
+
+      // Is this lvalue a float, and how wide?
+      std::uint32_t floatWidthOf(const LValue &lv) const {
+        TypePtr t = typeOf(lv);
+        auto bits = TypeUtils::getFloatBitWidth(t);
+        return bits ? *bits : 0;
+      }
+
+      std::optional<double> readFloat(const LValue &lv) {
+        auto key = leafKey(lv);
+        if (!key)
+          return std::nullopt;
+        auto it = floats_.find(*key);
+        return it == floats_.end() ? std::nullopt : std::optional<double>(it->second);
+      }
+
+      // Evaluate a float expression exactly, or nullopt when a value is not
+      // tracked. `bad` is set when the trace could not be proven safe, which a
+      // caller must distinguish from a merely unknown value.
+      std::optional<double> evalFloatExpr(const Expr &e, std::uint32_t bits, bool &bad) {
+        auto acc = evalFloatAtom(e.first, bits, bad);
+        if (!acc)
+          return std::nullopt;
+        for (const auto &t: e.rest) {
+          auto rhs = evalFloatAtom(t.atom, bits, bad);
+          if (!rhs)
+            return std::nullopt;
+          const double v = round(t.op == AddOp::Plus ? *acc + *rhs : *acc - *rhs, bits);
+          if (!finite(v)) {
+            reject("a float sum leaves the finite range");
+            bad = true;
+            return std::nullopt;
+          }
+          acc = v;
+        }
+        return acc;
+      }
+
+      std::optional<double> evalFloatCoef(const Coef &c) {
+        if (auto fl = std::get_if<FloatLit>(&c))
+          return fl->value;
+        if (auto il = std::get_if<IntLit>(&c))
+          return (double) il->value;
+        if (auto id = std::get_if<LocalOrSymId>(&c))
+          if (auto loc = std::get_if<LocalId>(id)) {
+            LValue lv;
+            lv.base = *loc;
+            return readFloat(lv);
+          }
+        return std::nullopt;
+      }
+
+      std::optional<double> evalFloatAtom(const Atom &a, std::uint32_t bits, bool &bad) {
+        return std::visit(
+            [&](const auto &x) -> std::optional<double> {
+              using T = std::decay_t<decltype(x)>;
+              if constexpr (std::is_same_v<T, CoefAtom>)
+                return evalFloatCoef(x.coef);
+              else if constexpr (std::is_same_v<T, RValueAtom>) {
+                if (!indicesInBounds(x.rval))
+                  return bad = true, std::nullopt;
+                return readFloat(x.rval);
+              } else if constexpr (std::is_same_v<T, LoadAtom>) {
+                Expr p;
+                p.first = Atom{RValueAtom{x.rval, {}}, {}};
+                auto cell = deref(p, "load");
+                if (!cell)
+                  return bad = !reason_.empty(), std::nullopt;
+                return readFloat(*cell);
+              } else if constexpr (std::is_same_v<T, CastAtom>) {
+                // int -> float: exact for every value a double can hold.
+                if (auto il = std::get_if<IntLit>(&x.src))
+                  return round((double) il->value, bits);
+                if (auto lv = std::get_if<LValue>(&x.src)) {
+                  if (auto f = readFloat(*lv))
+                    return round(*f, bits);
+                  const Interval v = read(*lv);
+                  if (v.isConst())
+                    return round((double) v.lo, bits);
+                }
+                if (auto fl = std::get_if<FloatLit>(&x.src))
+                  return round(fl->value, bits);
+                return std::nullopt;
+              } else if constexpr (std::is_same_v<T, OpAtom>)
+                return evalFloatOp(x, bits, bad);
+              else if constexpr (std::is_same_v<T, SelectAtom>) {
+                auto t = evalFloatSelectVal(x.vtrue), f = evalFloatSelectVal(x.vfalse);
+                // Which arm runs is not decided here, so only agreement helps.
+                if (t && f && *t == *f)
+                  return *t;
+                return std::nullopt;
+              } else
+                return std::nullopt;
+            },
+            a.v
+        );
+      }
+
+      std::optional<double> evalFloatSelectVal(const SelectVal &sv) {
+        if (auto rv = std::get_if<RValue>(&sv))
+          return readFloat(*rv);
+        return evalFloatCoef(std::get<Coef>(sv));
+      }
+
+      std::optional<double> evalFloatOp(const OpAtom &o, std::uint32_t bits, bool &bad) {
+        auto l = evalFloatCoef(o.coef);
+        if (!l)
+          return std::nullopt;
+        if (!indicesInBounds(o.rval))
+          return bad = true, std::nullopt;
+        auto r = readFloat(o.rval);
+        if (!r)
+          return std::nullopt;
+        double v = 0.0;
+        switch (o.op) {
+          case AtomOpKind::Mul:
+            v = *l * *r;
+            break;
+          case AtomOpKind::Div:
+            if (*r == 0.0) {
+              reject("a float divisor is zero");
+              bad = true;
+              return std::nullopt;
+            }
+            v = *l / *r;
+            break;
+          case AtomOpKind::Mod:
+            if (*r == 0.0) {
+              reject("a float modulus is zero");
+              bad = true;
+              return std::nullopt;
+            }
+            v = std::fmod(*l, *r);
+            break;
+          default:
+            return std::nullopt; // bitwise operators are not float operations
+        }
+        v = round(v, bits);
+        if (!finite(v)) {
+          reject("a float result leaves the finite range");
+          bad = true;
+          return std::nullopt;
+        }
+        return v;
       }
 
       // --- expressions ------------------------------------------------------
@@ -473,6 +621,26 @@ namespace refractir::reify {
         auto bits = TypeUtils::getIntBitWidth(c.dstType);
         if (!bits)
           return unknownOf(); // to float
+        // From a float: the value truncates toward zero, and landing outside
+        // the destination's range is UB (spec §7.4).
+        if (auto lv = std::get_if<LValue>(&c.src))
+          if (floatWidthOf(*lv)) {
+            auto f = readFloat(*lv);
+            if (!f)
+              return unknownOf();
+            const double t = std::trunc(*f);
+            I64 lo = 0, hi = 0;
+            if (!rangeOf(*bits, lo, hi) || t < (double) lo || t > (double) hi)
+              return reject("a float-to-integer cast may leave the range"), std::nullopt;
+            return constant((I64) t);
+          }
+        if (auto fl = std::get_if<FloatLit>(&c.src)) {
+          const double t = std::trunc(fl->value);
+          I64 lo = 0, hi = 0;
+          if (!rangeOf(*bits, lo, hi) || t < (double) lo || t > (double) hi)
+            return reject("a float-to-integer cast may leave the range"), std::nullopt;
+          return constant((I64) t);
+        }
         std::optional<Interval> src;
         if (auto il = std::get_if<IntLit>(&c.src))
           src = constant(il->value);
@@ -614,8 +782,36 @@ namespace refractir::reify {
         return l && r;
       }
 
+      // A comparison of two known floats is decided exactly.
+      std::optional<bool> floatHolds(const Cond &c) {
+        bool bad = false;
+        auto l = evalFloatExpr(c.lhs, 64, bad);
+        if (bad)
+          return std::nullopt;
+        auto r = evalFloatExpr(c.rhs, 64, bad);
+        if (bad || !l || !r)
+          return std::nullopt;
+        switch (c.op) {
+          case RelOp::LT:
+            return *l < *r;
+          case RelOp::LE:
+            return *l <= *r;
+          case RelOp::GT:
+            return *l > *r;
+          case RelOp::GE:
+            return *l >= *r;
+          case RelOp::EQ:
+            return *l == *r;
+          case RelOp::NE:
+            return *l != *r;
+        }
+        return std::nullopt;
+      }
+
       // Is the condition decided the same way for every state in the box?
       bool decides(const PathCheck &chk) {
+        if (auto f = floatHolds(chk.cond))
+          return *f == chk.taken;
         auto l = eval(chk.cond.lhs, 0);
         auto r = eval(chk.cond.rhs, 0);
         if (!l || !r)
@@ -714,6 +910,23 @@ namespace refractir::reify {
         return true;
       }
 
+      // Assigning a float: an unproven *operation* stops the trace, while a
+      // merely unknown value just makes the destination unknown.
+      bool assignFloat(const LValue &lhs, const Expr &rhs, std::uint32_t fw) {
+        bool bad = false;
+        auto v = evalFloatExpr(rhs, fw, bad);
+        if (bad)
+          return false;
+        auto key = leafKey(lhs);
+        if (!key)
+          return true;
+        if (v)
+          floats_[*key] = *v;
+        else
+          floats_.erase(*key);
+        return true;
+      }
+
       bool step(const Instr &ins) {
         return std::visit(
             [&](const auto &x) -> bool {
@@ -725,6 +938,8 @@ namespace refractir::reify {
                   setPtr(x.lhs, evalPtr(x.rhs));
                   return true;
                 }
+                if (const std::uint32_t fw = floatWidthOf(x.lhs))
+                  return assignFloat(x.lhs, x.rhs, fw);
                 const std::uint32_t w = widthOf(x.lhs);
                 auto v = eval(x.rhs, w);
                 if (!v)
@@ -738,6 +953,10 @@ namespace refractir::reify {
                 auto cell = deref(x.ptr, "store");
                 if (!cell && !reason_.empty())
                   return false;
+                if (cell) {
+                  if (const std::uint32_t fw = floatWidthOf(*cell))
+                    return assignFloat(*cell, x.val, fw);
+                }
                 auto v = eval(x.val, cell ? widthOf(*cell) : 0);
                 if (!v)
                   return false;
@@ -749,6 +968,8 @@ namespace refractir::reify {
                   forgetAll();
                 return true;
               } else if constexpr (std::is_same_v<T, RequireInstr>) {
+                if (auto f = floatHolds(x.cond))
+                  return *f ? true : reject("a require is false over the entry range");
                 auto l = eval(x.cond.lhs, 0), r = eval(x.cond.rhs, 0);
                 if (!l || !r)
                   return false;
@@ -781,6 +1002,9 @@ namespace refractir::reify {
       }
 
       IntervalEnv env_;
+      // Float leaf -> its exact value. Absent means unknown; there is no
+      // "range of floats" here by design (see the header).
+      FloatEnv floats_;
       // Pointer leaf -> the cell it names (an empty optional is the null
       // pointer). A pointer absent from the map points somewhere unknown.
       PtrEnv ptrs_;
@@ -792,10 +1016,9 @@ namespace refractir::reify {
   } // namespace
 
   IntervalVerdict checkTrace(
-      const FunDecl &fn, const StructMap &structs, const TraceBody &body, const IntervalEnv &entry,
-      const PtrEnv &ptrs
+      const FunDecl &fn, const StructMap &structs, const TraceBody &body, const EntryState &entry
   ) {
-    return Checker(fn, structs, entry, ptrs).run(body);
+    return Checker(fn, structs, entry).run(body);
   }
 
 } // namespace refractir::reify
