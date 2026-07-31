@@ -807,6 +807,32 @@ namespace refractir::reify {
       return env;
     }
 
+    // Where every pointer leaf points at region entry, resolved from the
+    // provenance the profile recorded. A pointer whose target cannot be named
+    // is left out rather than guessed at.
+    PtrEnv pointPtrs(
+        const FunDecl &fn, const std::vector<std::pair<std::string, StateValue>> &vars,
+        const StructMap &structs, const TypeLayout &layout
+    ) {
+      PtrEnv out;
+      for (const auto &[name, val]: vars) {
+        auto decl = findRoot(fn, name);
+        if (!decl)
+          continue;
+        std::vector<StateLeaf> leaves;
+        bool hasPtr = false, hasUndef = false;
+        enumStateLeaves(val, leaves, hasPtr, hasUndef);
+        for (auto &lf: leaves) {
+          if (lf.val.kind != StateValue::Kind::Ptr)
+            continue;
+          LeafRef ref{name, lf.path, lf.val, {}, {}};
+          if (fillPtrLeaf(ref, fn, structs, layout, decl->type))
+            out[leafKey(name, lf.path)] = ref.ptrTarget;
+        }
+      }
+      return out;
+    }
+
     std::size_t blockIndex(const CFG &cfg, const std::string &lbl) {
       auto it = cfg.indexOf.find(lbl);
       return it == cfg.indexOf.end() ? DomTree::kNone : it->second;
@@ -879,7 +905,9 @@ namespace refractir::reify {
         auto body = flattenTrace(executed, plan.exitLabel, byLabel, &why);
         if (!body)
           return false;
-        const IntervalVerdict iv = checkTrace(fn, structs, *body, pointBox(pts[t]->vars));
+        const IntervalVerdict iv = checkTrace(
+            fn, structs, *body, pointBox(pts[t]->vars), pointPtrs(fn, pts[t]->vars, structs, layout)
+        );
         note = iv.ok ? "ok" : iv.reason;
         plan.twinInstrs = std::move(body->stmts);
         plan.checks = std::move(body->checks);

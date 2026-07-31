@@ -38,6 +38,7 @@
 // Solver-free by construction — this is arithmetic on bounds.
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <unordered_map>
 
@@ -63,6 +64,13 @@ namespace refractir::reify {
   // "nothing is pinned" extreme.
   using IntervalEnv = std::unordered_map<std::string, Interval>;
 
+  // Where each pointer leaf points at region entry, keyed the same way. An
+  // empty optional is the null pointer; a pointer the caller cannot resolve is
+  // left out, and everything reached through it stays unknown. Without this a
+  // pointer set up *before* the region — the usual case — would have no known
+  // target, and every load through it would be a dead end.
+  using PtrEnv = std::unordered_map<std::string, std::optional<LValue>>;
+
   struct IntervalVerdict {
     bool ok = false;
     // Why the trace could not be proven — the failing operation and what it
@@ -74,7 +82,8 @@ namespace refractir::reify {
   // of the locals the body touches (widths bound the arithmetic) and `structs`
   // resolves field types.
   IntervalVerdict checkTrace(
-      const FunDecl &fn, const StructMap &structs, const TraceBody &body, const IntervalEnv &entry
+      const FunDecl &fn, const StructMap &structs, const TraceBody &body, const IntervalEnv &entry,
+      const PtrEnv &ptrs
   );
 
 } // namespace refractir::reify

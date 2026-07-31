@@ -109,9 +109,10 @@ namespace refractir::reify {
   };
 
   // Enumerate the scalar leaves of `v` in tree order, appending to `out`.
-  // Sets `hasPtr` / `hasUndef` when a pointer / undef leaf is seen (those
-  // carry no value and are not appended). Struct fields follow the
-  // StateValue's own (name-sorted) order.
+  // Pointer leaves are appended too, carrying their provenance; `hasPtr` /
+  // `hasUndef` let a consumer that cannot handle them bail out early. Undef
+  // leaves have no value and are the one kind not appended. Struct fields
+  // follow the StateValue's own (name-sorted) order.
   void
   enumStateLeaves(const StateValue &v, std::vector<StateLeaf> &out, bool &hasPtr, bool &hasUndef);
 

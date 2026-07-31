@@ -672,6 +672,88 @@ fun @loaddiv(%p0: i32) : i32 {
 """
 
 
+# Walking an array through a pointer: each step lands on a cell whose name
+# is known, so nothing is lost by going through memory.
+PTR_WALK_FIXTURE = """// SOLVED: %p0=3
+fun @ptrwalk(%p0: i32) : i32 {
+  let mut %a: [3] i32 = {4, 5, 6};
+  let mut %p: ptr i32 = undef;
+  let mut %one: i32 = 1;
+  let mut %r: i32 = 0;
+^entry:
+  %p = addr %a[0];
+  br ^work;
+^work:
+  store %p, %p0;
+  %p = %p + %one;
+  %r = load %p;
+  %r = %r + %p0;
+  br ^done;
+^done:
+  ret %r;
+}
+"""
+
+# A pointer read back out of memory: its target is whatever was stored
+# there, which the domain does not follow.
+PTR_PTR_FIXTURE = """// SOLVED: %p0=3
+fun @ptrptr(%p0: i32) : i32 {
+  let mut %a: [2] i32 = {7, 9};
+  let mut %p: ptr i32 = undef;
+  let mut %q: ptr i32 = undef;
+  let mut %pp: ptr ptr i32 = undef;
+  let mut %d: i32 = 1;
+  let mut %r: i32 = 0;
+^entry:
+  %p = addr %a[1];
+  %pp = addr %p;
+  br ^work;
+^work:
+  %q = load %pp;
+  %d = load %q;
+  %r = %p0 / %d;
+  br ^done;
+^done:
+  ret %r;
+}
+"""
+
+
+# The pointer is set up before the region begins (^entry is ineligible — it
+# calls out), so the region's own statements never mention `addr`. Only the
+# provenance the profile recorded says what the load reads.
+SEED_PTR_FIXTURE = """// SOLVED: %p0=3
+fun @side() : i32 {
+^e:
+  ret 7;
+}
+
+fun @seedptr(%p0: i32) : i32 {
+  let mut %a: [2] i32 = {3, 4};
+  let mut %p: ptr i32 = undef;
+  let mut %d: i32 = 0;
+  let mut %r: i32 = 0;
+^entry:
+  %p = addr %a[1];
+  %d = call @side();
+  br ^work;
+^work:
+  %r = load %p;
+  %r = %r + %p0;
+  br ^done;
+^done:
+  ret %r;
+}
+
+fun @main() : i32 {
+  let mut %r: i32 = undef;
+^entry:
+  %r = call @seedptr(3);
+  ret %r;
+}
+"""
+
+
 def interval_note(line):
   m = re.search(r"interval (ok|[^)]+)", line)
   return m.group(1) if m else None
@@ -699,19 +781,66 @@ def test_interval_pass_proves_scalar_traces(rytwin):
       )
 
 
-def test_interval_pass_reports_what_it_cannot_prove(rytwin, symiri):
-  """A division by a value that only exists in memory is not provable, and
-  saying so is the point — the guard cannot widen past it. The graft itself
-  is unaffected."""
+def test_interval_pass_follows_memory(rytwin, symiri):
+  """A value that round-trips through memory is still a value: the pass
+  follows `addr` provenance, so a store and the load that reads it back
+  connect, and a division by the loaded value is provable."""
   with tempfile.TemporaryDirectory() as d:
     r, lines, p1, p2 = graft_log(rytwin, d, LOAD_DIV_FIXTURE, "loaddiv", ["--validate"])
     check("load/div fixture twinned", r.returncode == 0 and lines, r.stderr[:200])
     if not lines:
       return
-    note = interval_note(lines[0])
-    check("the pass declines, naming the divisor", note and "divisor" in note, lines[0])
+    check("the loaded divisor is proven", interval_note(lines[0]) == "ok", lines[0])
     r1 = symiri_result(symiri, p1, "@loaddiv", ["3"])
     r2 = symiri_result(symiri, p2, "@loaddiv", ["3"])
+    check("memory-bearing twin still equivalent", r1[1:] == r2[1:], f"{r1} vs {r2}")
+
+
+def test_interval_pass_seeds_pointers_from_the_profile(rytwin):
+  """A pointer set up before the region has no `addr` inside it to follow.
+  The profile recorded where it points, so the load through it is still
+  known."""
+  with tempfile.TemporaryDirectory() as d:
+    r, lines, _, _ = graft_log(rytwin, d, SEED_PTR_FIXTURE, "seedptr", ["--validate"])
+    check("seeded-pointer fixture twinned", r.returncode == 0 and lines, r.stderr[:200])
+    if not lines:
+      return
+    check(
+      "the region begins after the pointer setup",
+      any("^work" in ln for ln in lines),
+      str(lines),
+    )
+    hit = [ln for ln in lines if "^work" in ln]
+    if hit:
+      check(
+        "a pointer from the profile is followed", interval_note(hit[0]) == "ok", hit[0]
+      )
+
+
+def test_interval_pass_follows_pointer_arithmetic(rytwin):
+  """Pointer arithmetic by a known amount lands on a known cell, so the
+  region that walks an array is provable too."""
+  with tempfile.TemporaryDirectory() as d:
+    r, lines, _, _ = graft_log(rytwin, d, PTR_WALK_FIXTURE, "ptrwalk", ["--validate"])
+    check("pointer-walk fixture twinned", r.returncode == 0 and lines, r.stderr[:200])
+    if lines:
+      check("a walked pointer is proven", interval_note(lines[0]) == "ok", lines[0])
+
+
+def test_interval_pass_reports_what_it_cannot_prove(rytwin, symiri):
+  """A pointer that itself comes out of memory has no known target, so what
+  it addresses stays unknown — and saying so is the point, since the guard
+  cannot widen past it. The graft is unaffected either way."""
+  with tempfile.TemporaryDirectory() as d:
+    r, lines, p1, p2 = graft_log(rytwin, d, PTR_PTR_FIXTURE, "ptrptr", ["--validate"])
+    check(
+      "indirect-pointer fixture twinned", r.returncode == 0 and lines, r.stderr[:200]
+    )
+    if not lines:
+      return
+    check("the pass declines", interval_note(lines[0]) != "ok", lines[0])
+    r1 = symiri_result(symiri, p1, "@ptrptr", ["3"])
+    r2 = symiri_result(symiri, p2, "@ptrptr", ["3"])
     check(
       "declining changes nothing about the graft", r1[1:] == r2[1:], f"{r1} vs {r2}"
     )
@@ -1967,6 +2096,18 @@ def main():
     (
       "interval: the profiled state is provable",
       lambda: test_interval_pass_proves_scalar_traces(rytwin),
+    ),
+    (
+      "interval: values are followed through memory",
+      lambda: test_interval_pass_follows_memory(rytwin, symiri),
+    ),
+    (
+      "interval: pointers set up before the region are known",
+      lambda: test_interval_pass_seeds_pointers_from_the_profile(rytwin),
+    ),
+    (
+      "interval: pointer arithmetic lands on a known cell",
+      lambda: test_interval_pass_follows_pointer_arithmetic(rytwin),
     ),
     (
       "interval: an unprovable trace is reported, not hidden",
