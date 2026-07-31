@@ -561,9 +561,12 @@ namespace refractir::reify {
         return reject("no guardable live-in state");
 
       // Defs: the bit-exact diff s -> s' over every root, including roots
-      // that first become initialized inside the block. This subsumes
+      // that first become initialized inside the region. This subsumes
       // write-site analysis: store-through-pointer effects surface as
-      // diffs of the pointee root.
+      // diffs of the pointee root. The diff decides eligibility and scores
+      // the region; it no longer has to be *reproducible*, since the twin
+      // body replays the region's statements rather than rebuilding the
+      // leaves they wrote.
       std::map<std::string, LeafRef> defMap;
       for (const auto &[name, val]: sPrimeVars) {
         auto decl = findRoot(fn, name);
@@ -582,8 +585,6 @@ namespace refractir::reify {
           if (decl->isParam || !decl->isMutable)
             return reject("immutable root changed: " + name);
           LeafRef ref{name, std::move(lf.path), lf.val, {}, {}};
-          if (ref.isPtr() && !fillPtrLeaf(ref, fn, structs, layout, decl->type))
-            return reject("unreconstructable pointer: " + name);
           std::string key = leafKey(name, ref.path);
           defMap[key] = std::move(ref);
         }

@@ -1043,6 +1043,69 @@ def test_store_block_twinnable(rytwin, symiri):
     )
 
 
+# A pointer that ends the region one past the end of its object. Forming it is
+# legal (only dereferencing is not), but there is no `addr <lv>` that names it,
+# so the old constant reconstruction could not rebuild the leaf and the region
+# was rejected outright. Replaying the trace re-derives it by running the same
+# arithmetic, so the region is eligible like any other.
+END_PTR_FIXTURE = """// SOLVED: %pa0=9
+fun @endptr(%pa0: i32) : i32 {
+  let mut %a: [3] i32 = {1, 2, 3};
+  let mut %p: ptr i32 = undef;
+  let mut %one: i32 = 1;
+^entry:
+  %p = addr %a[2];
+  br ^work;
+^work:
+  store %p, 7 * %pa0;
+  %p = %p + %one;
+  br ^exit;
+^exit:
+  ret %a[2];
+}
+
+fun @main() : i32 {
+  let mut %r: i32 = undef;
+^entry:
+  %r = call @endptr(9);
+  ret %r;
+}
+"""
+
+
+def test_one_past_end_pointer_region(rytwin, symiri):
+  """A region whose net effect leaves a pointer one past the end of its
+  object is twinnable: the body replays the arithmetic instead of naming
+  the address, so nothing has to reconstruct it."""
+  with tempfile.TemporaryDirectory() as d:
+    p1 = os.path.join(d, "endptr.sir")
+    open(p1, "w").write(END_PTR_FIXTURE)
+    p2 = os.path.join(d, "p2.sir")
+    r = run(
+      [rytwin, p1, "--p-twin", "1.0", "--seed", "3", "-v", "--validate", "-o", p2]
+    )
+    check("one-past-end fixture twinned", r.returncode == 0, r.stderr[:200])
+    if r.returncode != 0:
+      return
+    log = r.stderr
+    check(
+      "no region rejected for an unreconstructable pointer",
+      "unreconstructable pointer" not in log,
+      [ln for ln in log.splitlines() if "unreconstruct" in ln][:1],
+    )
+    check(
+      "the region spans both blocks (no fallback to one)",
+      "2 blk" in log and "fell back" not in log,
+      [ln for ln in log.splitlines() if "grafted" in ln][:2],
+    )
+    body = "\n".join(twin_block_bodies(open(p2).read()))
+    check("the twin replays the store", "store %p," in body, body[:200])
+    check("the twin replays the pointer bump", "%p = %p + %one;" in body, body[:200])
+    r1 = symiri_result(symiri, p1, "@main", [])
+    r2 = symiri_result(symiri, p2, "@main", [])
+    check("one-past-end program equivalent", r1[1:] == r2[1:], f"{r1} vs {r2}")
+
+
 MEM_OP_RE = re.compile(r"\b(load|store|addr|ptrindex|ptrfield)\b")
 
 
@@ -1812,6 +1875,10 @@ def main():
     (
       "pointers: guard covers ptr leaves",
       lambda: test_guard_covers_ptr_leaves(rytwin, rysmith),
+    ),
+    (
+      "pointers: a one-past-the-end pointer leaf is twinnable",
+      lambda: test_one_past_end_pointer_region(rytwin, symiri),
     ),
     (
       "pointers: backends on pointered twins",
