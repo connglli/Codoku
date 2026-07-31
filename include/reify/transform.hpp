@@ -13,10 +13,11 @@
 // This is the tier the user calls "a kind of rewrite": rytwin's
 // equivalence-preserving block graft (TwinTransform) and rylink's
 // call-realization (CallRealizeTransform) are both `Transform`s, driven
-// through one `TransformPipeline`. The finer peephole engine that
-// call-realization uses internally lives in reify/call_realize.hpp
-// (RewriteRule / RewriteSite) and is an implementation detail of that one
-// transform — deliberately NOT part of this header.
+// through one `TransformPipeline`. Below it sits the peephole tier —
+// local, pattern-directed edits inside one function — which has its own
+// header, reify/rewrite.hpp, carrying the rule contract every peephole
+// engine must satisfy. A Transform may own and drive a set of such rules;
+// a rule never sees the Program, only the unit it edits.
 //
 // The context is "path-specific, profiling optional": a `FuncDescriptor`
 // always carries the concretized execution `path`, so path-aware transforms

@@ -7,10 +7,13 @@
 // caller->callee edge it finds semantically-safe rewrite sites in the caller
 // and substitutes them with a call whose solved arguments reproduce the
 // original value. The site-finding is a small peephole engine over pluggable
-// RewriteRules; v1 ships LiteralToCallRule, which rewrites scalar-literal
-// `let` initializers. RewriteRule / RewriteSite are the internal peephole
-// sub-tier of this one transform — future rules (unchanged-var-to-call,
-// binop-fold-to-call, etc.) plug in without touching the transform.
+// CallRewriteRules; v1 ships LiteralToCallRule, which rewrites scalar-literal
+// `let` initializers. Future rules (unchanged-var-to-call, binop-fold-to-call,
+// etc.) plug in without touching the transform.
+//
+// This is one instance of the peephole tier defined in reify/rewrite.hpp;
+// see that header for the R1-R3 rule contract, and in particular for why
+// composition safety is this engine's job rather than a rule's.
 
 #include <memory>
 #include <optional>
@@ -23,6 +26,7 @@
 
 #include "ast/ast.hpp"
 #include "reify/func_desc.hpp"
+#include "reify/rewrite.hpp"
 #include "reify/transform.hpp"
 
 namespace refractir::reify {
@@ -31,7 +35,7 @@ namespace refractir::reify {
   // Opaque to the engine — only the rule that produced it knows how to
   // apply it. Kind discriminates so a future engine can sort/filter by
   // category, but at v1 there's only one kind.
-  struct RewriteSite {
+  struct CallRewriteSite {
     enum class Kind { LetInitIntLit, LetInitFloatLit };
     Kind kind;
     // Index into FunDecl::lets. The rule that emitted this site is
@@ -46,18 +50,21 @@ namespace refractir::reify {
     std::string sirType;
   };
 
-  class RewriteRule {
+  // Peephole rule for call realization (reify/rewrite.hpp tier). `findSites`
+  // and `matchCallee` are the tier's R1 purity obligation: neither may mutate
+  // the caller.
+  class CallRewriteRule {
   public:
-    virtual ~RewriteRule() = default;
+    virtual ~CallRewriteRule() = default;
     virtual const char *name() const = 0;
-    virtual std::vector<RewriteSite> findSites(const FunDecl &caller) = 0;
+    virtual std::vector<CallRewriteSite> findSites(const FunDecl &caller) = 0;
     // Decide whether the site can be rewritten by calling into
     // `callee` using `fixedRealizationIdx` as the bundled realization
     // (the engine has already locked which realization runs at the
     // call site; rules cannot pick a different one). Returns true when
     // the rule can produce an `apply()` for this combination.
     virtual bool matchCallee(
-        const RewriteSite &site, const FuncDescriptor &callee, std::size_t fixedRealizationIdx
+        const CallRewriteSite &site, const FuncDescriptor &callee, std::size_t fixedRealizationIdx
     ) = 0;
     // Splice the call in. Returns true on success; false if some
     // late-stage check fails (e.g. a param type the rule can't handle).
@@ -65,18 +72,13 @@ namespace refractir::reify {
     // sub-decisions (e.g. per-arg choice of literal vs. var+bias) and
     // still play nicely with the engine's shuffled-candidates order.
     virtual bool apply(
-        FunDecl &caller, const FuncDescriptor &callerDesc, const RewriteSite &site,
+        FunDecl &caller, const FuncDescriptor &callerDesc, const CallRewriteSite &site,
         const FuncDescriptor &callee, std::size_t realizationIdx, std::mt19937 &rng
     ) = 0;
   };
 
   // v1 rule: literal `let` initializers (scalar Int/Float).
-  std::unique_ptr<RewriteRule> makeLiteralToCallRule();
-
-  struct RewriteResult {
-    int sitesFound = 0;
-    int sitesRewritten = 0;
-  };
+  std::unique_ptr<CallRewriteRule> makeLiteralToCallRule();
 
   // One planned call-graph edge: realize a call from `caller` into `callee`,
   // pinned to `calleeRealizationIdx`. Functions are named (canonical "@...")
@@ -97,15 +99,15 @@ namespace refractir::reify {
     std::vector<CallRealizeEdge> edges;
   };
 
-  // Whole-program call-realization transform. Owns the peephole RewriteRules
-  // and walks `plan.edges` in order, realizing each. Build one with
+  // Whole-program call-realization transform. Owns the peephole rules and
+  // walks `plan.edges` in order, realizing each. Build one with
   // makeCallRealizeTransform (pre-loaded with the v1 literal rule) and run it
   // through a TransformPipeline like any other Transform.
   class CallRealizeTransform : public Transform {
   public:
     explicit CallRealizeTransform(CallRealizePlan plan) : plan_(std::move(plan)) {}
 
-    void addRule(std::unique_ptr<RewriteRule> r) { rules_.push_back(std::move(r)); }
+    void addRule(std::unique_ptr<CallRewriteRule> r) { rules_.push_back(std::move(r)); }
 
     std::string_view name() const override { return "CallRealizeTransform"; }
 
@@ -131,25 +133,22 @@ namespace refractir::reify {
     // different solved value than the rewrite expression assumes and
     // --validate would fail.
     //
-    // Composition safety: each rule is individually UB-free (the call
-    // expression evaluates to the original literal under BV arithmetic),
-    // but *stacking* rewrites on the same site is not — consecutive
-    // sub-expressions evaluate left-to-right in RefractIR, so e.g. composing
-    // `c → f1() + (c - r1)` with a later rewrite of the literal `(c - r1)`
-    // into `f2() + ((c - r1) - r2)` produces `f1() + f2() + …` and that
-    // left-prefix sum can wrap in unintended ways. The transform therefore
-    // marks each (caller, site) it successfully rewrites as consumed and
-    // skips it on subsequent edges; one splice per site for the lifetime
-    // of the transform.
+    // Composition safety is this engine's discharge of the tier's R3
+    // obligation (reify/rewrite.hpp): each rule is individually UB-free (the
+    // call expression evaluates to the original literal under BV arithmetic),
+    // but *stacking* rewrites on the same site is not, so the transform marks
+    // each (caller, site) it successfully rewrites as consumed and skips it on
+    // subsequent edges — one splice per site for the lifetime of the
+    // transform.
     // `callerDesc` supplies the metadata of the caller function (including
     // the concretized execution path to target unexecuted blocks safely).
-    RewriteResult rewriteEdge(
+    RewriteReport rewriteEdge(
         FunDecl &caller, const FuncDescriptor &callerDesc, const FunDecl &calleeFn,
         const FuncDescriptor &callee, std::size_t fixedRealizationIdx, std::mt19937 &rng
     );
 
     CallRealizePlan plan_;
-    std::vector<std::unique_ptr<RewriteRule>> rules_;
+    std::vector<std::unique_ptr<CallRewriteRule>> rules_;
     // Identity = (caller FunDecl pointer, site letIdx). Caller pointers
     // are stable across one rylink program (the bundle's funs vector is
     // reserved upfront — see rylink.cpp generateOne). Stored as a

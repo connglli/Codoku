@@ -339,12 +339,12 @@ namespace refractir::reify {
 
   namespace {
 
-    class LiteralToCallRule : public RewriteRule {
+    class LiteralToCallRule : public CallRewriteRule {
     public:
       const char *name() const override { return "LiteralToCall"; }
 
-      std::vector<RewriteSite> findSites(const FunDecl &caller) override {
-        std::vector<RewriteSite> sites;
+      std::vector<CallRewriteSite> findSites(const FunDecl &caller) override {
+        std::vector<CallRewriteSite> sites;
         for (size_t i = 0; i < caller.lets.size(); ++i) {
           const auto &ld = caller.lets[i];
           if (!ld.init)
@@ -367,15 +367,15 @@ namespace refractir::reify {
           // skipped (they're already calls/loads/etc.) and aggregate
           // inits are out of scope for v1.
           if (ld.init->kind == InitVal::Kind::Int) {
-            RewriteSite s;
-            s.kind = RewriteSite::Kind::LetInitIntLit;
+            CallRewriteSite s;
+            s.kind = CallRewriteSite::Kind::LetInitIntLit;
             s.letIdx = static_cast<int>(i);
             s.intVal = std::get<IntLit>(ld.init->value).value;
             s.sirType = SIRPrinter::typeToString(ld.type);
             sites.push_back(s);
           } else if (ld.init->kind == InitVal::Kind::Float) {
-            RewriteSite s;
-            s.kind = RewriteSite::Kind::LetInitFloatLit;
+            CallRewriteSite s;
+            s.kind = CallRewriteSite::Kind::LetInitFloatLit;
             s.letIdx = static_cast<int>(i);
             s.floatVal = std::get<FloatLit>(ld.init->value).value;
             s.sirType = SIRPrinter::typeToString(ld.type);
@@ -386,7 +386,7 @@ namespace refractir::reify {
       }
 
       bool matchCallee(
-          const RewriteSite &site, const FuncDescriptor &callee, std::size_t fixedRealizationIdx
+          const CallRewriteSite &site, const FuncDescriptor &callee, std::size_t fixedRealizationIdx
       ) override {
         // Only the ret-type has to match: we splice in `call + (c - ret)`
         // so semantics are preserved regardless of whether the callee
@@ -396,7 +396,7 @@ namespace refractir::reify {
         // which would break --validate equivalence.
         if (callee.retType != site.sirType)
           return false;
-        if (site.kind == RewriteSite::Kind::LetInitFloatLit)
+        if (site.kind == CallRewriteSite::Kind::LetInitFloatLit)
           return false;
         if (fixedRealizationIdx >= callee.realizations.size())
           return false;
@@ -405,7 +405,7 @@ namespace refractir::reify {
       }
 
       bool apply(
-          FunDecl &caller, const FuncDescriptor &callerDesc, const RewriteSite &site,
+          FunDecl &caller, const FuncDescriptor &callerDesc, const CallRewriteSite &site,
           const FuncDescriptor &callee, std::size_t realizationIdx, std::mt19937 &rng
       ) override {
         if (site.letIdx < 0 || (size_t) site.letIdx >= caller.lets.size())
@@ -621,7 +621,7 @@ namespace refractir::reify {
 
   } // namespace
 
-  std::unique_ptr<RewriteRule> makeLiteralToCallRule() {
+  std::unique_ptr<CallRewriteRule> makeLiteralToCallRule() {
     return std::make_unique<LiteralToCallRule>();
   }
 
@@ -1009,16 +1009,16 @@ namespace refractir::reify {
     return false;
   }
 
-  RewriteResult CallRealizeTransform::rewriteEdge(
+  RewriteReport CallRealizeTransform::rewriteEdge(
       FunDecl &caller, const FuncDescriptor &callerDesc, const FunDecl &calleeFn,
       const FuncDescriptor &callee, std::size_t fixedRealizationIdx, std::mt19937 &rng
   ) {
-    RewriteResult res;
+    RewriteReport res;
 
     // Collect (rule, site) pairs.
     struct Candidate {
-      RewriteRule *rule;
-      RewriteSite site;
+      CallRewriteRule *rule;
+      CallRewriteSite site;
     };
 
     std::vector<Candidate> cands;
@@ -1050,23 +1050,21 @@ namespace refractir::reify {
         matched.push_back(c);
     }
 
-    res.sitesFound = static_cast<int>(matched.size());
+    res.found = static_cast<int>(matched.size());
 
     if (!matched.empty()) {
-      std::shuffle(matched.begin(), matched.end(), rng);
-      std::uniform_real_distribution<double> uni(0.0, 1.0);
-
       // Accept probability is keyed on the match count (pRewriteForMatches) so
       // the expected number of rewrites per edge stays bounded no matter how
       // many sites match, while a lone match is always taken. With the per-
       // edge break removed, several *distinct* sites may be spliced on one
       // edge — each on a different let-init, never stacking on the same one.
+      // Keyed on the pre-cap count, so the budget below cannot inflate it.
       const double pAccept = rylink::hp::pRewriteForMatches(matched.size());
 
-      int attempts = 0;
+      shuffleAndCap(matched, rng, static_cast<std::size_t>(rylink::hp::kMaxAttemptsPerEdge));
+      std::uniform_real_distribution<double> uni(0.0, 1.0);
+
       for (auto &c: matched) {
-        if (attempts++ >= rylink::hp::kMaxAttemptsPerEdge)
-          break;
         // A site consumed earlier — on a prior edge or earlier in this very
         // loop — must not be rewritten again: stacking calls on one let-init
         // builds an `f1()+f2()+…` left-prefix sum that can wrap. See the
@@ -1079,7 +1077,7 @@ namespace refractir::reify {
           continue;
         if (c.rule->apply(caller, callerDesc, c.site, callee, fixedRealizationIdx, rng)) {
           consumed_.insert({&caller, c.site.letIdx});
-          ++res.sitesRewritten;
+          ++res.applied;
         }
       }
     }
@@ -1102,7 +1100,7 @@ namespace refractir::reify {
     std::shuffle(unexecutedIndices.begin(), unexecutedIndices.end(), rng);
     for (std::size_t i: unexecutedIndices) {
       if (insertCallInUnexecBlock(caller, calleeFn, callee, rz, rng, i, true)) {
-        ++res.sitesRewritten;
+        ++res.applied;
         break;
       }
     }
@@ -1129,11 +1127,11 @@ namespace refractir::reify {
       if (callerDesc == ctx.descriptors.end() || calleeDesc == ctx.descriptors.end())
         continue;
 
-      RewriteResult r = rewriteEdge(
+      RewriteReport r = rewriteEdge(
           *callerIt->second, callerDesc->second, *calleeIt->second, calleeDesc->second,
           e.calleeRealizationIdx, ctx.rng
       );
-      rep.sites += static_cast<std::size_t>(r.sitesRewritten);
+      rep.sites += static_cast<std::size_t>(r.applied);
     }
 
     return rep;
