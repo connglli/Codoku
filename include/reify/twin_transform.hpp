@@ -46,6 +46,7 @@
 #include <memory>
 #include <vector>
 
+#include "reify/hyperparameters.hpp"
 #include "reify/transform.hpp"
 #include "reify/twin_gen.hpp"
 
@@ -92,16 +93,12 @@ namespace refractir::reify {
   // Uniform policy: every region gets probability `pTwin` (a plain coin).
   SelectionPolicy uniformPolicy(double pTwin);
 
-  // Default softmax temperature for interestingPolicy — a middling tilt that
-  // favours the harder regions without collapsing to argmax.
-  inline constexpr double kInterestingTemp = 0.5;
-
   // Interestingness policy: score = 1000·itersCollapsed + 10·blocks +
   // 5·changedLeaves + fanIn, normalized to [0,1] program-wide, then
   // `p = pTwin ^ exp((0.5 - norm) / temp)` — monotone in the score, `1` at
   // `pTwin=1`, `0` at `pTwin=0`, and → the uniform `pTwin` coin as
   // `temp → ∞`. `temp` must be > 0.
-  SelectionPolicy interestingPolicy(double pTwin, double temp = kInterestingTemp);
+  SelectionPolicy interestingPolicy(double pTwin, double temp = rytwin::hp::kInterestingTemp);
 
   // Build the twin transform. `select` scores candidate regions into twin
   // probabilities (see SelectionPolicy). `twinGen` generates the twin body;

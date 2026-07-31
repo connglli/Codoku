@@ -189,7 +189,8 @@ namespace refractir::reify {
     // false: either way the state is not usable.
     StateProfile pf;
     try {
-      pf = profileProgram(harness_, kProbeFun, {}, StateGranularity::Ppp, kProbeStepCap);
+      pf =
+          profileProgram(harness_, kProbeFun, {}, StateGranularity::Ppp, rytwin::hp::kProbeStepCap);
     } catch (const std::exception &) {
       return out;
     }

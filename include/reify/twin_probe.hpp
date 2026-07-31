@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "ast/ast.hpp"
+#include "reify/hyperparameters.hpp"
 #include "reify/state_profile.hpp"
 #include "reify/twin_mini.hpp"
 
@@ -48,11 +49,6 @@ namespace refractir::reify {
     // Every root's value at the exit, in the profile's (name-sorted) order.
     std::vector<std::pair<std::string, StateValue>> effect;
   };
-
-  // Block-step budget for one probe. A region's own blocks are few, but a
-  // probed state can drive a loop far longer than the profiled one did —
-  // or forever — so the run is always bounded.
-  inline constexpr std::uint64_t kProbeStepCap = 4096;
 
   class RegionProbe {
   public:

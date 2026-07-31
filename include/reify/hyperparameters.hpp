@@ -512,3 +512,39 @@ namespace refractir::reify::rylink::hp {
   inline constexpr const char *kEntrySirName = "program.sir";
 
 } // namespace refractir::reify::rylink::hp
+
+// Central place to manage rytwin's *code-level* tunable hyperparameters.
+//
+// Scope:
+//   - Budgets bounding how much work one twin site may cost.
+//   - Parameters of the region-selection policies.
+//
+// Not in scope (these live elsewhere as struct defaults or CLI-tunable flags):
+//   - p-twin, RNG seed, I-O paths, --validate / --verbose
+//
+// Editing a value here changes behaviour for all rytwin runs without
+// touching any CLI default.
+namespace refractir::reify::rytwin::hp {
+
+  // ===========================================================================
+  // Probing
+  //
+  // A probe runs one region on one state. The region's own blocks are few,
+  // but a probed state can drive its loop far longer than the profiled one
+  // did — or forever — so every run is bounded. This caps block entries, not
+  // wall time, so it is deterministic across machines.
+  // ===========================================================================
+  inline constexpr std::uint64_t kProbeStepCap = 4096;
+
+  // ===========================================================================
+  // Region selection
+  //
+  // interestingPolicy tilts the twin probability toward the regions that are
+  // harder to prove equivalent, via a softmax over the candidate scores. The
+  // temperature is a middling tilt: it favours the harder regions without
+  // collapsing to argmax, and as temp -> infinity the policy degenerates to
+  // the uniform p-twin coin.
+  // ===========================================================================
+  inline constexpr double kInterestingTemp = 0.5;
+
+} // namespace refractir::reify::rytwin::hp
