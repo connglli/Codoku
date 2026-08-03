@@ -217,9 +217,67 @@ namespace refractir::reify {
 
   namespace {
 
-    // Family A — identity insertion. `%d = e` becomes `%d = e; %d = %d ^ %k;
-    // %d = %d ^ %k`, which is the same value by x ^ k ^ k == x. Trap-free: the
-    // only operator introduced is `^`.
+    using IdentityRewriteRuleBase = AntiOptRule;
+
+    bool fitsI8(std::int64_t v) { return v >= -128 && v <= 127; }
+
+    // `%d = %x OP %y` with both operands plain locals — the shape every
+    // crossing below rewrites. `Add` stands for the `+` of a two-atom chain,
+    // which is how RefractIR spells addition.
+    // Addition is an expression-level `+` in RefractIR rather than an atom
+    // operator, so the shapes a crossing can start from need their own name.
+    enum class MbaFrom { Xor, Or, Add };
+
+    struct TwoOperand {
+      MbaFrom op;
+      std::string lhs, rhs;
+    };
+
+    std::optional<TwoOperand> operands(const Instr &ins) {
+      auto *ai = std::get_if<AssignInstr>(&ins);
+      if (!ai || !ai->lhs.accesses.empty())
+        return std::nullopt;
+      auto localOf = [](const Coef &c) -> const std::string * {
+        if (auto id = std::get_if<LocalOrSymId>(&c))
+          if (auto loc = std::get_if<LocalId>(id))
+            return &loc->name;
+        return nullptr;
+      };
+      // `%x & %y` / `%x | %y` / `%x ^ %y`: one atom, one operator.
+      if (ai->rhs.rest.empty()) {
+        auto *op = std::get_if<OpAtom>(&ai->rhs.first.v);
+        if (!op || !op->rval.accesses.empty())
+          return std::nullopt;
+        const std::string *l = localOf(op->coef);
+        if (!l)
+          return std::nullopt;
+        if (op->op == AtomOpKind::Or)
+          return TwoOperand{MbaFrom::Or, *l, op->rval.base.name};
+        if (op->op == AtomOpKind::Xor)
+          return TwoOperand{MbaFrom::Xor, *l, op->rval.base.name};
+        return std::nullopt;
+      }
+      // `%x + %y`: two coef atoms joined by `+`.
+      if (ai->rhs.rest.size() == 1 && ai->rhs.rest[0].op == AddOp::Plus) {
+        auto *a = std::get_if<CoefAtom>(&ai->rhs.first.v);
+        auto *b = std::get_if<CoefAtom>(&ai->rhs.rest[0].atom.v);
+        if (!a || !b)
+          return std::nullopt;
+        const std::string *l = localOf(a->coef);
+        const std::string *r = localOf(b->coef);
+        if (!l || !r)
+          return std::nullopt;
+        return TwoOperand{MbaFrom::Add, *l, *r};
+      }
+      return std::nullopt;
+    }
+
+    // Rule:  %d = e
+    //   ->   %d = e;  %d = %d ^ %k;  %d = %d ^ %k
+    //
+    // Family A — identity insertion. The same value by x ^ k ^ k == x, for any
+    // k. Trap-free: the only operator introduced is `^`, and the mask is drawn
+    // fresh each time so the pair is not a recognizable constant.
     class XorTwiceRule : public AntiOptRule {
     public:
       const char *name() const override { return "xor-twice"; }
@@ -267,9 +325,12 @@ namespace refractir::reify {
       }
     };
 
-    // Family C — order. Two adjacent statements that share no local and touch
-    // no memory compute the same thing in either order, and a reader can no
-    // longer assume the body follows the region's own sequence.
+    // Rule:  S1; S2
+    //   ->   S2; S1        (neither reads what the other writes)
+    //
+    // Family C — order. Two statements that share no local and touch no memory
+    // compute the same thing in either order, and a reader can no longer assume
+    // the body follows the region's own sequence.
     class SwapAdjacentRule : public AntiOptRule {
     public:
       const char *name() const override { return "swap-adjacent"; }
@@ -312,10 +373,12 @@ namespace refractir::reify {
       }
     };
 
-    // Family A — constant splitting. A literal in a flat chain becomes two
-    // that sum to it, which is the reverse of the folding every compiler does
-    // on the way in. Tier1: the chain is evaluated left to right, so a split
-    // moves the prefix sums and one of them could leave the type.
+    // Rule:  %d = ... + K ...
+    //   ->   %d = ... + K1 + K2 ...      (K1 + K2 == K)
+    //
+    // Family A — constant splitting, the reverse of the folding every compiler
+    // does on the way in. Tier1: a flat chain is evaluated left to right, so
+    // splitting moves the prefix sums and one of them could leave the type.
     class SplitConstantRule : public AntiOptRule {
     public:
       const char *name() const override { return "split-constant"; }
@@ -393,10 +456,12 @@ namespace refractir::reify {
       }
     };
 
-    // Family C — statement expansion. A chain of three or more atoms becomes
-    // two statements through a fresh temp, which is how a body stops matching
-    // the region statement for statement. Tier1: the part computed first has
-    // to fit the type on its own, which the whole chain did not require.
+    // Rule:  %d = a + b + c
+    //   ->   %t = a + b;  %d = %t + c
+    //
+    // Family C — statement expansion, which is how a body stops matching the
+    // region statement for statement. Tier1: the part computed first has to fit
+    // the type on its own, which the whole chain did not require.
     class SplitStatementRule : public AntiOptRule {
     public:
       const char *name() const override { return "split-statement"; }
@@ -437,6 +502,122 @@ namespace refractir::reify {
       }
     };
 
+    // Rule:  %d = %x ^ %y   ->   %d = %x | %y - %x & %y
+    // Rule:  %d = %x | %y   ->   %d = %x ^ %y + %x & %y
+    // Rule:  %d = %x + %y   ->   %t = %x & %y;  %d = %x ^ %y + 2 * %t
+    //
+    // Family B — arithmetic <-> bitwise crossings.
+    //
+    // These are the ones worth having. An optimizer simplifies within the
+    // arithmetic domain or within the bitwise domain; it rarely translates
+    // between them, so `x ^ y` written as `(x | y) - (x & y)` has to be
+    // *reasoned* back rather than pattern-matched. All are Tier1: they
+    // introduce `+ - *`, and whether the intermediates stay inside the type is
+    // for the acceptance check to decide, not the rule.
+    //
+    // The textbook form of the carry identity is `(x ^ y) + ((x & y) << 1)`.
+    // That one is wrong here: RefractIR's `<<` is signed arithmetic and traps
+    // on a negative left operand (spec §7.1), so it is UB for any two negative
+    // operands. `2 * (x & y)` says the same thing and survives.
+    class MbaRule : public IdentityRewriteRuleBase {
+    public:
+      MbaRule(MbaFrom from, const char *nm) : from_(from), name_(nm) {}
+
+      const char *name() const override { return name_; }
+
+      RuleFamily family() const override { return RuleFamily::Mba; }
+
+      TrapTier tier() const override { return TrapTier::Tier1; }
+
+      bool
+      matches(const std::vector<Instr> &stmts, RulePos pos, const AntiOptContext &) const override {
+        auto ops = operands(stmts[pos.stmt]);
+        return ops && ops->op == from_;
+      }
+
+      std::vector<Instr>
+      apply(const std::vector<Instr> &stmts, RulePos pos, AntiOptContext &ctx) const override {
+        auto ops = operands(stmts[pos.stmt]);
+        if (!ops)
+          return {};
+        const auto &ai = std::get<AssignInstr>(stmts[pos.stmt]);
+        std::vector<Instr> out;
+        switch (from_) {
+          case MbaFrom::Xor: {
+            // x ^ y == (x | y) - (x & y)
+            Expr e = opExpr(ops->lhs, AtomOpKind::Or, ops->rhs);
+            e.rest.push_back(
+                Expr::Tail{AddOp::Minus, opExpr(ops->lhs, AtomOpKind::And, ops->rhs).first, {}}
+            );
+            out.push_back(assignInstr(ai.lhs, std::move(e)));
+            return out;
+          }
+          case MbaFrom::Or: {
+            // x | y == (x ^ y) + (x & y)
+            Expr e = opExpr(ops->lhs, AtomOpKind::Xor, ops->rhs);
+            e.rest.push_back(
+                Expr::Tail{AddOp::Plus, opExpr(ops->lhs, AtomOpKind::And, ops->rhs).first, {}}
+            );
+            out.push_back(assignInstr(ai.lhs, std::move(e)));
+            return out;
+          }
+          default: {
+            // x + y == (x ^ y) + 2 * (x & y), the carry written out.
+            TypePtr ty = localType(ctx.fn, ctx.lets, ops->rhs);
+            if (!ty || !TypeUtils::getIntBitWidth(ty))
+              return {};
+            const std::string t = ctx.names.fresh(ty, ctx.lets);
+            out.push_back(assignInstr(localLV(t), opExpr(ops->lhs, AtomOpKind::And, ops->rhs)));
+            Expr e = opExpr(ops->lhs, AtomOpKind::Xor, ops->rhs);
+            OpAtom twice;
+            twice.op = AtomOpKind::Mul;
+            twice.coef = Coef{IntLit{2, {}}};
+            twice.rval = localLV(t);
+            e.rest.push_back(Expr::Tail{AddOp::Plus, Atom{std::move(twice), {}}, {}});
+            out.push_back(assignInstr(ai.lhs, std::move(e)));
+            return out;
+          }
+        }
+      }
+
+      std::optional<SelfTest> selfTest() const override {
+        const MbaFrom from = from_;
+        SelfTest t;
+        t.original = [from](std::int64_t a, std::int64_t b) -> std::optional<std::int64_t> {
+          switch (from) {
+            case MbaFrom::Xor:
+              return a ^ b;
+            case MbaFrom::Or:
+              return a | b;
+            default:
+              return fitsI8(a + b) ? std::optional<std::int64_t>(a + b) : std::nullopt;
+          }
+        };
+        t.rewritten = [from](std::int64_t a, std::int64_t b) -> std::optional<std::int64_t> {
+          switch (from) {
+            case MbaFrom::Xor:
+              return fitsI8((a | b) - (a & b)) ? std::optional<std::int64_t>((a | b) - (a & b))
+                                               : std::nullopt;
+            case MbaFrom::Or:
+              return fitsI8((a ^ b) + (a & b)) ? std::optional<std::int64_t>((a ^ b) + (a & b))
+                                               : std::nullopt;
+            default: {
+              const std::int64_t carry = 2 * (a & b);
+              const std::int64_t sum = (a ^ b) + carry;
+              if (!fitsI8(carry) || !fitsI8(sum))
+                return std::nullopt;
+              return sum;
+            }
+          }
+        };
+        return t;
+      }
+
+    private:
+      MbaFrom from_;
+      const char *name_;
+    };
+
     const std::vector<std::unique_ptr<AntiOptRule>> &catalog() {
       static const std::vector<std::unique_ptr<AntiOptRule>> rules = [] {
         std::vector<std::unique_ptr<AntiOptRule>> v;
@@ -444,6 +625,9 @@ namespace refractir::reify {
         v.push_back(std::make_unique<SplitConstantRule>());
         v.push_back(std::make_unique<SplitStatementRule>());
         v.push_back(std::make_unique<SwapAdjacentRule>());
+        v.push_back(std::make_unique<MbaRule>(MbaFrom::Xor, "mba-xor"));
+        v.push_back(std::make_unique<MbaRule>(MbaFrom::Or, "mba-or"));
+        v.push_back(std::make_unique<MbaRule>(MbaFrom::Add, "mba-add"));
         return v;
       }();
       return rules;

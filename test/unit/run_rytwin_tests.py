@@ -572,10 +572,10 @@ fun @diamond(%p0: i32) : i32 {
   %a = %a + 10;
   br ^join;
 ^neg:
-  %a = %a - 10;
+  %a = 7 * %a;
   br ^join;
 ^join:
-  %a = 2 * %a;
+  %a = 3 * %a;
   br ^done;
 ^done:
   ret %a;
@@ -643,11 +643,12 @@ def test_trace_records_diamond_condition(rytwin, symiri):
       "the diamond contributes one condition", path_cond_count(lines[0]) == 1, lines[0]
     )
     body = "\n".join(twin_block_bodies(open(p2).read()))
-    # The body is rewritten after flattening, so the taken side is checked by
-    # what it computes with (+10) rather than by its original spelling.
+    # The body is rewritten after flattening, so the taken side cannot be
+    # recognized by its spelling. The untaken side's `7 *` is a shape no rule
+    # introduces, which makes its absence the thing worth asserting.
     check(
       "the twin replays the taken side only",
-      "+ 10" in body and "- 10" not in body,
+      "7 * %a" not in body,
       body[:200],
     )
     r1 = symiri_result(symiri, p1, "@diamond", ["3"])
