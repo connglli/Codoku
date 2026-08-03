@@ -1306,6 +1306,46 @@ def test_values_round_trip_through_a_wider_type(rytwin):
   check("and the twins validate", ok)
 
 
+# Two constants the box has every reason to free: nothing about the trace
+# depends on their *entry* values being what the profile saw, and a leaf the
+# trace proves without is free by definition.
+FREED_CONST_FIXTURE = """// SOLVED: %p0=3
+fun @freedconst(%p0: i32) : i32 {
+  let %a: i32 = 12;
+  let %b: i32 = 10;
+  let mut %r: i32 = 0;
+^entry:
+  br %p0 > 0, ^work, ^done;
+^work:
+  %r = %a & %b;
+  %r = %r + %p0;
+  br ^done;
+^done:
+  ret %r;
+}
+"""
+
+
+def test_a_freed_leaf_stays_unknown(rytwin):
+  """Freeing a leaf is the box saying the guard will not check it, so the pass
+  may not go on knowing its value — not even when the declaration says it is
+  an immutable constant. Assuming it anyway freed leaves the body did depend
+  on, and the twin then disagreed with its region on a state its own guard
+  admitted."""
+  for seed in ("1", "2", "3"):
+    with tempfile.TemporaryDirectory() as d:
+      p1 = os.path.join(d, "freedconst.sir")
+      open(p1, "w").write(FREED_CONST_FIXTURE)
+      p2 = os.path.join(d, "freedconst.p2.sir")
+      r = run([rytwin, p1, "--p-twin", "1.0", "--seed", seed, "--validate", "-o", p2])
+      ok = r.returncode == 0 and "validated: OK" in r.stdout
+      check(
+        f"the twin holds on every admitted state at seed {seed}",
+        ok,
+        (r.stderr + r.stdout)[:200],
+      )
+
+
 def test_box_is_deterministic_for_a_seed(rytwin):
   """The search is seeded, so two runs agree — the trim that keeps guards
   from being identical is drawn from the same stream, not from chance."""
@@ -2724,6 +2764,10 @@ def main():
     (
       "rewrite: a value round-trips through a wider type",
       lambda: test_values_round_trip_through_a_wider_type(rytwin),
+    ),
+    (
+      "interval: a leaf the box freed stays unknown",
+      lambda: test_a_freed_leaf_stays_unknown(rytwin),
     ),
     (
       "box: the search is seeded, not chancy",

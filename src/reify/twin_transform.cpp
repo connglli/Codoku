@@ -1147,6 +1147,33 @@ namespace refractir::reify {
           default:
             break;
         }
+      // Cells the rewriting declares as it goes are constants the box never
+      // heard of: an operand on the right of `* / % & | ^ << >> >>>` must be an
+      // lvalue (spec §5.3), so `%x << 3` is spelled with a literal local, and
+      // the pass would otherwise have to call the shift amount unknown and
+      // refuse every shift. An immutable local can never be assigned (§6.6), so
+      // its initializer is its value for the whole function. Only names the box
+      // does *not* classify are added: a leaf the box freed is one the guard
+      // will not check, and the pass must not go on knowing what the guard has
+      // stopped enforcing.
+      std::unordered_set<std::string> boxed;
+      for (const auto &leaf: box.leaves)
+        boxed.insert(leaf.key);
+      auto withConstantCells = [&](EntryState st) {
+        for (const auto &l: fn.lets) {
+          if (l.isMutable || !l.init || l.init->kind != InitVal::Kind::Int)
+            continue;
+          if (boxed.count(l.name.name) || st.ints.count(l.name.name))
+            continue;
+          auto bits = TypeUtils::getIntBitWidth(l.type);
+          if (!bits)
+            continue;
+          const std::int64_t v = std::get<IntLit>(l.init->value).value;
+          st.ints[l.name.name] = Interval{v, v, false, *bits, 0};
+        }
+        return st;
+      };
+
       NameAllocator names(kAntiOptLocalPrefix);
       TraceBody &body = plan.body;
       AntiOptContext ctx{fn, structs, body.checks, names, fn.lets, rng};
@@ -1157,7 +1184,9 @@ namespace refractir::reify {
         // A check is move-only, so the body being judged gets its own copies.
         for (const auto &chk: body.checks)
           probe.checks.push_back(PathCheck{chk.afterStmt, cloneCond(chk.cond), chk.taken});
-        return checkTrace(fn, structs, probe, guarded).ok;
+        // Re-read the declarations every time: the engine adds cells as it
+        // rewrites, and the body being judged may already use them.
+        return checkTrace(fn, structs, probe, withConstantCells(guarded)).ok;
       });
     }
 

@@ -107,19 +107,6 @@ namespace refractir::reify {
           leafOfBit_.push_back(keys[i]);
           env_[keys[i]].deps = std::uint64_t(1) << i;
         }
-        // An immutable local is its initializer everywhere — nothing may
-        // assign to one (spec §6.6) — so it is known without being a leaf the
-        // profile recorded, and it carries no blame because it cannot vary.
-        // Constants spelled this way are not unusual: an operand on the right
-        // of `* / % & | ^ << >> >>>` must be an lvalue (§5.3), so `%x << 3` is
-        // written with a literal cell holding the 3.
-        for (const auto &l: fn.lets) {
-          if (l.isMutable || !l.init || l.init->kind != InitVal::Kind::Int)
-            continue;
-          if (!TypeUtils::getIntBitWidth(l.type) || env_.count(l.name.name))
-            continue;
-          env_[l.name.name] = constant(std::get<IntLit>(l.init->value).value);
-        }
       }
 
       std::vector<std::string> blamed() const {
