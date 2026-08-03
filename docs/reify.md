@@ -177,7 +177,7 @@ Each chosen leaf function brings its own solved realization (one of the `--n-ini
 
 A twin program of a given program is its equivalent variant. Twin-program generation is based on leaf functions, too.
 
-Given a leaf function `f1` together with the exact input `i` that concretizes it, the whole execution is deterministic and known. `rytwin` obtains, for each on-path program point, the concrete value of every initialized local/parameter — the state the program passes through — from the `.state.json` sidecar when `f1` was generated with `rysmith --emit-state`, and otherwise by interpreting `f1` on `i` in-process. The twin unit is a **region**: the maximal single-entry region rooted at an executed block, covering every later block the entry *dominates* on the executed path, up to the first block it does not (or the function's return). Let `s` be the state at the region's entry. Twin-program generation builds a **twin block** `R'` reproducing the region's net effect and grafts a guarded diamond:
+Given a leaf function `f1` together with the exact input `i` that concretizes it, the whole execution is deterministic and known. `rytwin` obtains, for each on-path program point, the concrete value of every initialized local/parameter — the state the program passes through — from the `.state.json` sidecar when `f1` was generated with `rysmith --emit-state`, and otherwise by interpreting `f1` on `i` in-process. The twin unit is a **region**: the maximal single-entry region rooted at an executed block, covering every later block the entry *dominates* on the executed path, up to the first block it does not (or the function's return). Let `s` be the state at the region's entry. Twin-program generation builds a **twin block** `R'` reproducing the region's effect and grafts a guarded diamond:
 
 ```
 ^X:           br call @__twg_<fn>_<X>(<state>) != 0  ->  ^X__twin  else  ^X__orig
@@ -187,7 +187,19 @@ Given a leaf function `f1` together with the exact input `i` that concretizes it
 
 `^X` is the region entry's own label, taken over by the guard so every predecessor still branches to `^X` and no edge needs rewriting; `__twin` / `__orig` are literal suffixes, which keeps the labels distinct when one function holds several twin sites. `^<exit>` is not generated — it is the block the region left to, already in the function under its own name. There is no merge block: the twin jumps straight to that exit, and the orig arm keeps the entry's own terminator, so the two arms rejoin at the exit itself.
 
-The guard fires only when the live-in state equals `s`, so on the profiled input the twin runs (producing exactly what the region would) and on every other state the original runs — hence full equivalence. The guard is a generated function `@__twg_<fn>_<label> : i1`, one per twin site. It consumes the **entire** definitely-initialized state at the region's entry — not only its read set — as a conjunction of per-leaf equalities. The conjunction is total (no UB) and collision-free, so it preserves the equivalence on all inputs, not just the profiled one, and it cannot fire on any state other than `s`. Scalar roots cross into the guard by value, vector roots per-lane, and aggregate roots by address (`ptr [N] T` / `ptr @S` parameters, navigated inside the guard with in-bounds `ptrindex`/`ptrfield` + `load`). Each candidate region is twinned with probability `--p-twin`.
+The guard fires only on states the twin is right for, so wherever it fires the twin produces exactly what the region would and everywhere else the original runs — hence full equivalence on every input. The guard is a generated function `@__twg_<fn>_<label> : i1`, one per twin site. Scalar roots cross into the guard by value, vector roots per-lane, and aggregate roots by address (`ptr [N] T` / `ptr @S` parameters, navigated inside the guard with in-bounds `ptrindex`/`ptrfield` + `load`). Every form it can take — equality, a pair of bounds, a pointer comparison — is total, so the guard never traps on any input. Each candidate region is twinned with probability `--p-twin`.
+
+**What the guard says about each leaf.** A trace body is right for every state that follows the same path UB-free, which is far more than the one state it was profiled on — so the guard is not a conjunction of equalities over the whole state. An interval pass over the flattened body (`reify/twin_interval.hpp`) decides, per integer leaf:
+
+| class | guard says | established by |
+|---|---|---|
+| **free** | nothing — the leaf is not compared, not navigated to, and not even a parameter | the trace is provable with the leaf *unknown*, which covers every value it could hold |
+| **ranged** | `lo <= x <= hi` | the widest run the pass can prove, found by doubling each open leaf's radius in lockstep and settling the last step by bisection |
+| **pinned** | `x == v` | nothing wider was provable |
+
+A refused round freezes only the leaves whose failing check depended on them, so no leaf's width depends on the order the search happened to visit it; ranges are clipped to the leaf's own width (a leaf holds no value its type cannot represent) and trimmed by a seeded amount so a region does not always produce the identical guard. Floats and pointers stay pinned: bounding a float needs rounding-aware arithmetic, and a pointer has no range to speak of. On a counting loop this comes out as *shape pinned, data free* — the trip count and induction variable pin themselves, because moving either takes a different path, while the accumulator opens over millions of values.
+
+Because the guard now admits far more than one state, `--validate` no longer covers it by running the profiled input alone: it also samples states inside each box — corners first — and runs the region against the twin body on each, reporting how many agreed.
 
 **The twin body is the region's own executed trace.** `R'` is not searched for: the statements the profiled run performed, concatenated in execution order with the branches dropped and each loop iteration laid out in turn, already compute what the region computes — locals are function-scope and non-SSA, so the concatenation is valid RefractIR as it stands. Nothing needs to prove the two agree, and **rytwin uses no SMT solver at all**; it links neither the symbolic executor nor an SMT backend. What the flattening removes is the control flow, and that is what keeps the result a transformation rather than a copy: recognizing a seven-times-unrolled loop as the loop means re-deriving a closed form, not matching a pattern. Every region qualifies — there is no floor on how much a trace must cover and no ceiling on how far a loop may unroll, since the profiled run already bounds it.
 
@@ -478,7 +490,7 @@ The descriptor (`func_<id>_<i>.json`) and, when present, the state profile (`<st
 | `--twin-select random\|interesting` | `random` | Region-selection policy (see *Region selection* below) |
 | `--seed N` | random | RNG seed |
 | `--target sir\|c\|wasm` | `sir` | Optionally compile `f2` via the in-process backend |
-| `--validate` | off | Run `symiri` on `f1` and `f2` with the profiled input, assert they agree, and assert at least one twin block actually executed |
+| `--validate` | off | Run `symiri` on `f1` and `f2` with the profiled input, assert they agree and that at least one twin executed, then spot-check states sampled inside each guard's box (region vs twin body, bit-exact) |
 | `-v, --verbose` | off | Log each twin decision (grafted / skipped / rejected, with reason) to stderr |
 | `--keep-require` | off | Keep `require` checks in compiled output |
 | `--keep-ub-guards` | off | Keep the dynamic UB guards in the compiled twin (default: dropped — the twin is assumed UB-free; see *Dropping UB guards* above) |

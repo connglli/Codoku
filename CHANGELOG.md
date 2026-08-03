@@ -74,7 +74,12 @@ considered and dropped (spec §13).
   entire loops into one guarded block that jumps straight to the region
   exit — and its body is the region's own executed trace, flattened
   (branches dropped, loop iterations laid end to end), so rytwin needs
-  no SMT solver at all. `--twin-select interesting`
+  no SMT solver at all. Because such a body is right for every state
+  taking the same path UB-free, the guard is not a state equality: an
+  interval pass classifies each leaf **free** (dropped from the guard
+  entirely), **ranged** (`lo <= x <= hi`, widened by lockstep bisection)
+  or **pinned**, and `--validate` spot-checks states sampled inside the
+  resulting box. `--twin-select interesting`
   swaps the uniform `--p-twin` coin for a selection policy that softmax-tilts
   each region's twin probability by how hard its twin is to prove equivalent
   (loop-collapse dominating), concentrating twins on the hardest regions.
