@@ -39,6 +39,20 @@ namespace refractir::reify {
       return v;
     }
 
+    // The range of an operation that is monotone in each operand separately:
+    // whatever it does in between, its extremes are at the corners of the two
+    // ranges, so evaluating it four times bounds it.
+    template<typename Op>
+    Interval corners(const Interval &a, const Interval &b, Op op) {
+      const I64 vs[4] = {op(a.lo, b.lo), op(a.lo, b.hi), op(a.hi, b.lo), op(a.hi, b.hi)};
+      I64 lo = vs[0], hi = vs[0];
+      for (const I64 v: vs) {
+        lo = std::min(lo, v);
+        hi = std::max(hi, v);
+      }
+      return Interval{lo, hi, false, 0, 0};
+    }
+
     // The representable range of a signed N-bit value. Widths above 64 are not
     // representable in the domain, so they are reported as unknown.
     bool rangeOf(std::uint32_t bits, I64 &lo, I64 &hi) {
@@ -843,21 +857,60 @@ namespace refractir::reify {
           case AtomOpKind::Shr:
             if (!inShiftRange(*r, w))
               return std::nullopt;
-            if (l->isConst() && r->isConst())
-              return withDeps(constant(l->lo >> r->lo), deps);
-            return unknownOf(deps);
-          case AtomOpKind::LShr:
+            // Arithmetic shift right is division by a power of two rounding
+            // toward -inf, and it is monotone in each operand separately — so
+            // the result's extremes are among the four corners of the two
+            // ranges. Bounding it matters more than the precision: an unknown
+            // poisons every addition downstream of it, and with it the leaf
+            // that fed the shift.
+            if (l->unknown || r->unknown)
+              return unknownOf(deps);
+            return withDeps(corners(*l, *r, [](I64 a, I64 b) { return a >> b; }), deps);
+          case AtomOpKind::LShr: {
             if (!inShiftRange(*r, w))
               return std::nullopt;
+            if (l->unknown || r->unknown)
+              return unknownOf(deps);
             if (l->isConst() && r->isConst())
               return withDeps(constant(signExtend(toUnsigned(l->lo, w) >> r->lo, w)), deps);
-            return unknownOf(deps);
+            // On a non-negative range the logical shift is the arithmetic one.
+            if (l->lo >= 0)
+              return withDeps(corners(*l, *r, [](I64 a, I64 b) { return a >> b; }), deps);
+            // Across zero it is not monotone at all — `-1 >>> 1` is the largest
+            // value there is — so what remains is that a shift of at least one
+            // clears the sign bit, which still bounds the result away from the
+            // ends of the type. A shift of none is the value itself.
+            if (!w || w > 64)
+              return unknownOf(deps);
+            const std::uint64_t umax = w >= 64 ? ~std::uint64_t(0) : (std::uint64_t(1) << w) - 1;
+            if (r->lo >= 1)
+              return withDeps(Interval{0, (I64) (umax >> r->lo), false, 0, deps}, deps);
+            if (r->hi == 0)
+              return withDeps(Interval{l->lo, l->hi, false, 0, deps}, deps);
+            return withDeps(
+                Interval{
+                    std::min<I64>(l->lo, 0), std::max<I64>(l->hi, (I64) (umax >> 1)), false, 0, deps
+                },
+                deps
+            );
+          }
           default: {
             // & | ^ : a sound range needs bit-level reasoning, so only known
             // operands fold. Everything else widens, which is where a
             // bit-level domain would pay off first.
-            if (!l->isConst() || !r->isConst())
+            if (!l->isConst() || !r->isConst()) {
+              // One exception, because it is how every mask is written: the
+              // bits of `x & m` are a subset of m's, so for a non-negative m
+              // the result is in [0, m] whatever x holds.
+              const Interval *m = nullptr;
+              if (!l->unknown && l->lo >= 0)
+                m = &*l;
+              if (!r->unknown && r->lo >= 0 && (!m || r->hi < m->hi))
+                m = &*r;
+              if (o.op == AtomOpKind::And && m)
+                return withDeps(Interval{0, m->hi, false, 0, deps}, deps);
               return unknownOf(deps);
+            }
             const I64 a = l->lo, b = r->lo;
             switch (o.op) {
               case AtomOpKind::And:

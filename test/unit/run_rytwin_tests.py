@@ -1346,6 +1346,129 @@ def test_a_freed_leaf_stays_unknown(rytwin):
       )
 
 
+# A shifted or masked value feeding arithmetic: the sum is what forces the
+# pass to say something about it, since an unknown operand cannot be proven
+# not to overflow and the leaf that fed it then has to stay pinned. The
+# shift amount and the mask are set *inside* the region so they are constants
+# of the trace rather than leaves the box would widen alongside %p0.
+SHIFT_WIDEN_FIXTURE = """// SOLVED: %p0=-8
+fun @shiftbox(%p0: i32) : i32 {
+  let mut %k: i32 = 0;
+  let mut %r: i32 = 0;
+^entry:
+  %k = 2;
+  br ^work;
+^work:
+  %r = %p0 >> %k;
+  %r = %r + %p0;
+  br ^done;
+^done:
+  ret %r;
+}
+"""
+
+# The negative side is where a logical shift and a mask stop agreeing with
+# the arithmetic ones. %p0 is profiled negative and nothing holds it there,
+# so the box widens it across zero and the bound has to come from the
+# operator itself.
+LSHIFT_WIDEN_FIXTURE = SHIFT_WIDEN_FIXTURE.replace("@shiftbox", "@lshiftbox").replace(
+  ">> %k", ">>> %k"
+)
+
+MASK_WIDEN_FIXTURE = """// SOLVED: %p0=-8
+fun @maskbox(%p0: i32) : i32 {
+  let mut %m: i32 = 0;
+  let mut %r: i32 = 0;
+^entry:
+  %m = 255;
+  br ^work;
+^work:
+  %r = %p0 & %m;
+  %r = %r + %p0;
+  br ^done;
+^done:
+  ret %r;
+}
+"""
+
+# The same shape with a mask that keeps the sign bit: `x & -8` says nothing
+# about how large x is, and the pass must not pretend otherwise.
+NEG_MASK_FIXTURE = MASK_WIDEN_FIXTURE.replace("@maskbox", "@negmaskbox").replace(
+  "= 255", "= -8"
+)
+
+
+def widened_leaf(rytwin, fixture, name):
+  """Twin `fixture` and return ((free, ranged, pinned), widest radius) off the
+  graft log, or (None, None)."""
+  with tempfile.TemporaryDirectory() as d:
+    r, lines, _, _ = graft_log(rytwin, d, fixture, name, ["--validate"])
+    if not lines:
+      check(f"{name} twinned", False, r.stderr[:200])
+      return None, None
+    widest = box_widest(lines[0])
+    return box_counts(lines[0]), (widest[1] if widest else 0)
+
+
+def test_interval_pass_bounds_a_shift(rytwin):
+  """`%x >> 2` is `%x` divided by four rounding down — monotone, so the range
+  shifts with it. Calling it unknown poisoned the addition that read it, and
+  the leaf behind it had to stay pinned."""
+  counts, radius = widened_leaf(rytwin, SHIFT_WIDEN_FIXTURE, "shiftbox")
+  if counts is None:
+    return
+  check("the shifted trace opens a range", counts[1] >= 1, str(counts))
+  check("and it is a real one", radius > 1000000, str(radius))
+
+
+def test_interval_pass_bounds_a_logical_shift(rytwin):
+  """`%x >>> 2` is not monotone across zero — `-1 >>> 1` is the largest value
+  there is — but the shifted-out bits are gone either way, so even a value the
+  guard admits negative lands well inside the type."""
+  counts, radius = widened_leaf(rytwin, LSHIFT_WIDEN_FIXTURE, "lshiftbox")
+  if counts is None:
+    return
+  check("the logically shifted trace opens a range", counts[1] >= 1, str(counts))
+  check("and it is a real one", radius > 1000000, str(radius))
+
+
+def test_interval_pass_bounds_a_mask(rytwin):
+  """The bits of `%x & 255` are a subset of 255's, so the result is in
+  [0, 255] whatever %x holds — including the negatives this guard admits."""
+  counts, radius = widened_leaf(rytwin, MASK_WIDEN_FIXTURE, "maskbox")
+  if counts is None:
+    return
+  check("the masked trace opens a range", counts[1] >= 1, str(counts))
+  check("and it is a real one", radius > 1000000, str(radius))
+
+
+def test_interval_pass_declines_a_signed_mask(rytwin):
+  """`%x & -8` keeps the sign bit, and with %x negative too there is nothing
+  to bound the result by. The pass must decline rather than invent a bound,
+  so the leaf behind it stays pinned."""
+  counts, _ = widened_leaf(rytwin, NEG_MASK_FIXTURE, "negmaskbox")
+  if counts is None:
+    return
+  check("nothing is claimed about a signed mask", counts[1] == 0, str(counts))
+
+
+def test_shifted_program_still_agrees(rytwin, symiri):
+  """The widened guard admits far more states than the profiled one, so the
+  twin has to agree with the region on an input the profile never saw."""
+  with tempfile.TemporaryDirectory() as d:
+    r, lines, p1, p2 = graft_log(
+      rytwin, d, SHIFT_WIDEN_FIXTURE, "shiftbox", ["--validate"]
+    )
+    check("shift fixture twinned", r.returncode == 0 and lines, r.stderr[:200])
+    if not lines:
+      return
+    check("--validate agrees", "validated: OK" in r.stdout, r.stdout[:200])
+    for arg in ("8", "-37", "1000003"):
+      r1 = symiri_result(symiri, p1, "@shiftbox", [arg])
+      r2 = symiri_result(symiri, p2, "@shiftbox", [arg])
+      check(f"same answer for {arg}", r1[1:] == r2[1:], f"{r1} vs {r2}")
+
+
 def test_box_is_deterministic_for_a_seed(rytwin):
   """The search is seeded, so two runs agree — the trim that keeps guards
   from being identical is drawn from the same stream, not from chance."""
@@ -2768,6 +2891,26 @@ def main():
     (
       "interval: a leaf the box freed stays unknown",
       lambda: test_a_freed_leaf_stays_unknown(rytwin),
+    ),
+    (
+      "interval: a shift by a known amount is bounded",
+      lambda: test_interval_pass_bounds_a_shift(rytwin),
+    ),
+    (
+      "interval: a logical shift is bounded across zero",
+      lambda: test_interval_pass_bounds_a_logical_shift(rytwin),
+    ),
+    (
+      "interval: a mask by a non-negative constant is bounded",
+      lambda: test_interval_pass_bounds_a_mask(rytwin),
+    ),
+    (
+      "interval: a signed mask claims nothing",
+      lambda: test_interval_pass_declines_a_signed_mask(rytwin),
+    ),
+    (
+      "interval: a widened shift guard still agrees",
+      lambda: test_shifted_program_still_agrees(rytwin, symiri),
     ),
     (
       "box: the search is seeded, not chancy",
