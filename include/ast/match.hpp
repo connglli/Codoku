@@ -132,6 +132,41 @@ namespace refractir::pat {
     return OpPattern<L, R>{AtomOpKind::Mul, true, &kindOut, lhs, rhs};
   }
 
+  // `~<rval>` — the only unary operator RefractIR has.
+  template<typename P>
+  struct NotPattern {
+    P inner;
+
+    bool match(const Atom &a) const {
+      auto u = std::get_if<UnaryAtom>(&a.v);
+      return u && u->op == UnaryOpKind::Not && inner.match(u->rval);
+    }
+  };
+
+  template<typename P>
+  NotPattern<P> m_Not(P inner) {
+    return NotPattern<P>{inner};
+  }
+
+  // A reified comparison. Its operands are read out of the atom rather than
+  // matched, since a rule over comparisons cares about the relation.
+  struct CmpPattern {
+    RelOp *out = nullptr;
+
+    bool match(const Atom &a) const {
+      auto c = std::get_if<CmpAtom>(&a.v);
+      if (!c)
+        return false;
+      if (out)
+        *out = c->op;
+      return true;
+    }
+  };
+
+  inline CmpPattern m_Cmp(RelOp &out) { return CmpPattern{&out}; }
+
+  inline CmpPattern m_AnyCmp() { return CmpPattern{nullptr}; }
+
   // A bare coefficient atom — a literal or a variable standing alone.
   template<typename P>
   struct CoefPattern {

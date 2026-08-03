@@ -1058,7 +1058,7 @@ def test_disguise_rolls_back_what_it_cannot_prove(rytwin):
     if not lines:
       check("loop fixture twinned", False, r.stderr[:160])
       return
-    m = re.search(r"(\d+) rewrites \((\d+) undone\)", lines[0])
+    m = re.search(r"(\d+) rewrites \((\d+) undone", lines[0])
     check("the report distinguishes kept from undone", m is not None, lines[0])
     if m:
       check("some were undone", int(m.group(2)) > 0, m.group(0))
@@ -1096,6 +1096,69 @@ def test_rewrite_rules_selftest(rytwin):
   check("and said so on all i8 pairs", "all i8 pairs" in r.stdout, r.stdout[:200])
 
 
+# Each family-A fixture puts one shape in front of the rules and bounds the
+# leaf that shape needs bounded: a rewrite the interval pass cannot re-prove
+# over the whole box is rolled back, so an unbounded leaf would leave the
+# rule sound, applicable, and never kept.
+
+MUL_FIXTURE = """// SOLVED: %p0=3
+fun @mulshift(%p0: i32) : i32 {
+  let mut %a: i32 = 0;
+  let mut %r: i32 = 0;
+^entry:
+  %a = %p0;
+  br ^head;
+^head:
+  br %a > 0, ^work, ^done;
+^work:
+  %r = 8 * %a;
+  br ^done;
+^done:
+  ret %r;
+}
+"""
+
+NOT_FIXTURE = """// SOLVED: %p0=3
+fun @comp(%p0: i32) : i32 {
+  let mut %r: i32 = 0;
+^entry:
+  br %p0 > 0, ^work, ^done;
+^work:
+  %r = ~%p0;
+  %r = %r + %p0;
+  br ^done;
+^done:
+  ret %r;
+}
+"""
+
+SUB_FIXTURE = """// SOLVED: %p0=3
+fun @subadd(%p0: i32) : i32 {
+  let mut %b: i32 = 5;
+  let mut %r: i32 = 0;
+^entry:
+  br %p0 > 0, ^work, ^done;
+^work:
+  %r = %p0 - %b;
+  br ^done;
+^done:
+  ret %r;
+}
+"""
+
+DOUBLE_FIXTURE = """// SOLVED: %p0=3
+fun @dbl(%p0: i32) : i32 {
+  let mut %r: i32 = 0;
+^entry:
+  br %p0 > 0, ^work, ^done;
+^work:
+  %r = %p0 + %p0;
+  br ^done;
+^done:
+  ret %r;
+}
+"""
+
 CMP_FIXTURE = """// SOLVED: %p0=3
 fun @cmpswap(%p0: i32) : i32 {
   let mut %b: i32 = 5;
@@ -1111,6 +1174,29 @@ fun @cmpswap(%p0: i32) : i32 {
   ret %r;
 }
 """
+
+
+def rules_kept(rytwin, fixture, name, seeds=("1", "2", "3", "4", "5", "6")):
+  """Twin `fixture` once per seed and return (rule names the log reports as
+  kept over all of them, every run validated). Which rules a body draws is
+  seeded, so a rule is looked for across several seeds rather than one."""
+  names, ok = set(), True
+  for seed in seeds:
+    with tempfile.TemporaryDirectory() as d:
+      p1 = os.path.join(d, name + ".sir")
+      open(p1, "w").write(fixture)
+      p2 = os.path.join(d, name + ".p2.sir")
+      r = run(
+        [rytwin, p1, "--p-twin", "1.0", "--seed", seed, "-v", "--validate", "-o", p2]
+      )
+      if r.returncode != 0 or "validated: OK" not in r.stdout:
+        ok = False
+        continue
+      for ln in r.stderr.splitlines():
+        m = re.search(r"rewrites \(\d+ undone; ([^)]*)\)", ln)
+        if m:
+          names.update(re.findall(r"([a-z0-9-]+) x\d+", m.group(1)))
+  return names, ok
 
 
 def test_mask_stays_inside_its_own_type(rytwin):
@@ -1129,6 +1215,95 @@ def test_mask_stays_inside_its_own_type(rytwin):
         ok,
         (r.stderr + r.stdout)[:200],
       )
+
+
+def test_negation_is_unfolded(rytwin):
+  """`%a - 3` and `%a + -3` are the same value; a compiler prefers the first,
+  so the rules prefer the second."""
+  kept, ok = rules_kept(rytwin, CHAIN_FIXTURE, "chain")
+  check(
+    "fold-negation fires on a literal subtraction", "fold-negation" in kept, str(kept)
+  )
+  check("and the twins validate", ok)
+
+
+def test_multiplication_becomes_a_shift(rytwin):
+  """`8 * %a` is `%a << 3` only where the guard proves %a >= 0 — RefractIR's
+  shift is arithmetic and traps on a negative operand."""
+  kept, ok = rules_kept(rytwin, MUL_FIXTURE, "mulshift")
+  check(
+    "mul-to-shift fires where the box proves the sign",
+    "mul-to-shift" in kept,
+    str(kept),
+  )
+  check("and the twins validate", ok)
+
+
+UNBOUNDED_MUL_FIXTURE = """// SOLVED: %p0=3
+fun @mulfree(%p0: i32) : i32 {
+  let mut %a: i32 = 0;
+  let mut %r: i32 = 0;
+^entry:
+  %a = %p0;
+  br ^work;
+^work:
+  %r = 8 * %a;
+  br ^done;
+^done:
+  ret %r;
+}
+"""
+
+
+def test_shift_refuses_what_the_box_does_not_prove(rytwin):
+  """The same multiplication, with nothing holding %a above zero: the box
+  admits negative states, `<<` traps on those, and the rewrite is undone.
+  A rule is offered everywhere and kept only where it is proven."""
+  kept, ok = rules_kept(rytwin, UNBOUNDED_MUL_FIXTURE, "mulfree")
+  check(
+    "mul-to-shift is not kept without the sign", "mul-to-shift" not in kept, str(kept)
+  )
+  check("and the twins still validate", ok)
+
+
+def test_complement_becomes_arithmetic(rytwin):
+  """`~%x` is `0 - %x - 1`, which crosses out of the bitwise domain and costs
+  a reader the identity to get back."""
+  kept, ok = rules_kept(rytwin, NOT_FIXTURE, "comp")
+  check("not-complement fires on a complement", "not-complement" in kept, str(kept))
+  check("and the twins validate", ok)
+
+
+def test_subtraction_becomes_addition(rytwin):
+  """`%x - %y` is `%x + ~%y + 1`, the two's-complement definition written
+  out."""
+  kept, ok = rules_kept(rytwin, SUB_FIXTURE, "subadd")
+  check("sub-as-add fires on a subtraction", "sub-as-add" in kept, str(kept))
+  check("and the twins validate", ok)
+
+
+def test_doubling_becomes_multiplication(rytwin):
+  """`%x + %x` is `2 * %x` — strength reduction run backwards, so the
+  optimizer has to redo work it already did on the way in."""
+  kept, ok = rules_kept(rytwin, DOUBLE_FIXTURE, "dbl")
+  check("double-as-mul fires on a self-addition", "double-as-mul" in kept, str(kept))
+  check("and the twins validate", ok)
+
+
+def test_comparison_operands_swap(rytwin):
+  """`cmp < %x, %y` is `cmp > %y, %x`. Trap-free, so it fires wherever a
+  comparison appears."""
+  kept, ok = rules_kept(rytwin, CMP_FIXTURE, "cmpswap")
+  check("swap-compare fires on a comparison", "swap-compare" in kept, str(kept))
+  check("and the twins validate", ok)
+
+
+def test_values_round_trip_through_a_wider_type(rytwin):
+  """Widening then narrowing back is the identity, and it puts a cast pair in
+  front of anything reading the body."""
+  kept, ok = rules_kept(rytwin, CHAIN_FIXTURE, "chain")
+  check("cast-roundtrip fires", "cast-roundtrip" in kept, str(kept))
+  check("and the twins validate", ok)
 
 
 def test_box_is_deterministic_for_a_seed(rytwin):
@@ -2517,6 +2692,38 @@ def main():
     (
       "rewrite: an inserted mask stays inside its own type",
       lambda: test_mask_stays_inside_its_own_type(rytwin),
+    ),
+    (
+      "rewrite: a literal subtraction becomes a negative addition",
+      lambda: test_negation_is_unfolded(rytwin),
+    ),
+    (
+      "rewrite: a multiplication becomes a shift where the sign is proven",
+      lambda: test_multiplication_becomes_a_shift(rytwin),
+    ),
+    (
+      "rewrite: a shift is refused where the sign is not proven",
+      lambda: test_shift_refuses_what_the_box_does_not_prove(rytwin),
+    ),
+    (
+      "rewrite: a complement becomes arithmetic",
+      lambda: test_complement_becomes_arithmetic(rytwin),
+    ),
+    (
+      "rewrite: a subtraction becomes an addition",
+      lambda: test_subtraction_becomes_addition(rytwin),
+    ),
+    (
+      "rewrite: a self-addition becomes a multiplication",
+      lambda: test_doubling_becomes_multiplication(rytwin),
+    ),
+    (
+      "rewrite: a comparison swaps its operands",
+      lambda: test_comparison_operands_swap(rytwin),
+    ),
+    (
+      "rewrite: a value round-trips through a wider type",
+      lambda: test_values_round_trip_through_a_wider_type(rytwin),
     ),
     (
       "box: the search is seeded, not chancy",

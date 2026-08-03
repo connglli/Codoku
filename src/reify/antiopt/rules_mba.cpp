@@ -13,8 +13,6 @@ namespace refractir::reify::antiopt {
 
     using namespace refractir::pat;
 
-    bool fitsI8(std::int64_t v) { return v >= -128 && v <= 127; }
-
     // Addition is an expression-level `+` in RefractIR rather than an atom
     // operator, so the shapes a crossing can start from need their own name.
     enum class MbaFrom { Xor, Or, Add };

@@ -137,11 +137,18 @@ namespace refractir::reify {
   };
 
   // How a body changed, so a sweep can be tuned by what actually survives the
-  // acceptance check rather than by what was attempted.
+  // acceptance check rather than by what was attempted. The per-rule tally is
+  // the granularity that matters: a family whose rules all roll back is a
+  // family whose weight is wasted, and only the names say which.
   struct AntiOptReport {
     std::size_t applied = 0;
     std::size_t rolledBack = 0;
+    std::vector<std::pair<std::string, std::size_t>> byRule; // kept, first use first
   };
+
+  // The per-rule tally as "xor-twice x3, sub-as-add x1", or empty when nothing
+  // was kept.
+  std::string describeRules(const AntiOptReport &rep);
 
   // Is a rewritten body still acceptable? Consulted after every application;
   // `false` undoes it. A caller with a correctness obligation puts it here —

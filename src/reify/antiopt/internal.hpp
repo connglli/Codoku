@@ -24,10 +24,17 @@ namespace refractir::reify::antiopt {
   Expr simpleExpr(Atom a);
   Instr assignInstr(const LValue &lhs, Expr rhs);
 
+  Atom localAtom(const std::string &n);
+  Atom intAtom(std::int64_t v);
+
   // `<left> OP %right`. RefractIR takes an id or a literal on the left of a
   // binary atom and *requires* an lvalue on the right (spec §5.3), so a
   // constant that belongs on the right has to be a local first.
+  Atom opAtom(Coef left, AtomOpKind op, const std::string &right);
   Expr opExpr(const std::string &left, AtomOpKind op, const std::string &right);
+
+  // `<e> +/- <atom>`, appended to the flat chain a statement already is.
+  void addTail(Expr &e, AddOp op, Atom a);
 
   // The declared type of a local, looked up in the function and in whatever
   // declarations the rewriting has added so far.
@@ -35,6 +42,10 @@ namespace refractir::reify::antiopt {
 
   // The signed range of a type, or nullopt when it is not a scalar integer.
   std::optional<std::pair<std::int64_t, std::int64_t>> intRange(const TypePtr &t);
+
+  // The width the self-test works at, so a rule states its overflow condition
+  // once rather than in each of its two arms.
+  inline bool fitsI8(std::int64_t v) { return v >= -128 && v <= 127; }
 
   // --- dependence -----------------------------------------------------------
 

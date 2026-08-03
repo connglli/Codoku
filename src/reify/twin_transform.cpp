@@ -1282,7 +1282,8 @@ namespace refractir::reify {
                 " stmts, " + std::to_string(c.plan.body.checks.size()) + " path cond, interval " +
                 c.interval + ", " + describeBox(c.box) + ", " +
                 std::to_string(c.disguised.applied) + " rewrites (" +
-                std::to_string(c.disguised.rolledBack) + " undone)" +
+                std::to_string(c.disguised.rolledBack) + " undone" +
+                (c.disguised.byRule.empty() ? "" : "; " + describeRules(c.disguised)) + ")" +
                 (c.fellBack ? " [window fell back to one block]" : "")
             );
             decided.emplace(c.label, std::move(c.plan));

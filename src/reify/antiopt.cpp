@@ -153,6 +153,13 @@ namespace refractir::reify {
         // two of them together. `accept` has the last word.
         if (accept(stmts)) {
           ++rep.applied;
+          auto it = std::find_if(rep.byRule.begin(), rep.byRule.end(), [&](const auto &e) {
+            return e.first == c.rule->name();
+          });
+          if (it == rep.byRule.end())
+            rep.byRule.emplace_back(c.rule->name(), 1);
+          else
+            ++it->second;
         } else {
           stmts = std::move(before);
           for (std::size_t i = 0; i < checks.size(); ++i)
@@ -162,6 +169,16 @@ namespace refractir::reify {
       }
     }
     return rep;
+  }
+
+  std::string describeRules(const AntiOptReport &rep) {
+    std::string out;
+    for (const auto &[nm, n]: rep.byRule) {
+      if (!out.empty())
+        out += ", ";
+      out += nm + " x" + std::to_string(n);
+    }
+    return out;
   }
 
   std::optional<std::size_t> selfTestRules(std::string &failure) {
