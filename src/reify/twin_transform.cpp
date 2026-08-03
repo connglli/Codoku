@@ -12,12 +12,17 @@
 #include <unordered_set>
 #include <vector>
 
+#include <cstdio>
+#include <cstring>
 #include "analysis/cfg.hpp"
 #include "analysis/dominators.hpp"
 #include "analysis/type_utils.hpp"
+
 #include "ast/ast.hpp"
+#include "ast/clone.hpp"
 #include "frontend/diagnostics.hpp"
 #include "interp/type_layout.hpp"
+#include "reify/antiopt.hpp"
 #include "reify/state_profile.hpp"
 #include "reify/twin_interval.hpp"
 #include "reify/twin_mini.hpp"
@@ -874,6 +879,8 @@ namespace refractir::reify {
       std::string interval;
       // How far the guard may open: one class per integer leaf.
       Box box;
+      // How much the body was rewritten before grafting.
+      AntiOptReport disguised;
     };
 
     // The profiled state, leaf by leaf: every integer pinned to the one value
@@ -1120,6 +1127,40 @@ namespace refractir::reify {
     // How many leaves of each class the box ended up with, which is what a
     // reader of the log wants: a guard that frees leaves says more than one
     // that merely widens them.
+    // Rewrite a twin body so it stops reading as the region it came from. The
+    // obligation handed to the engine is the one the guard makes: the body has
+    // to stay right for every state the box admits, not merely for the
+    // profiled one — an identity whose intermediate overflows somewhere in the
+    // box is fine at the profile and wrong in the guard.
+    AntiOptReport antiOptimizeBody(
+        FunDecl &fn, const StructMap &structs, TwinPlan &plan, const Box &box, std::mt19937 &rng
+    ) {
+      EntryState guarded = plan.entry;
+      for (const auto &leaf: box.leaves)
+        switch (leaf.cls) {
+          case LeafClass::Free:
+            guarded.ints.erase(leaf.key);
+            break;
+          case LeafClass::Ranged:
+            guarded.ints[leaf.key] = leaf.range;
+            break;
+          default:
+            break;
+        }
+      NameAllocator names(kAntiOptLocalPrefix);
+      TraceBody &body = plan.body;
+      AntiOptContext ctx{fn, structs, body.checks, names, fn.lets, rng};
+      return antiOptimize(body.stmts, body.checks, ctx, [&](const std::vector<Instr> &s) {
+        TraceBody probe;
+        probe.stmts = cloneInstrs(s);
+        probe.exitLabel = body.exitLabel;
+        // A check is move-only, so the body being judged gets its own copies.
+        for (const auto &chk: body.checks)
+          probe.checks.push_back(PathCheck{chk.afterStmt, cloneCond(chk.cond), chk.taken});
+        return checkTrace(fn, structs, probe, guarded).ok;
+      });
+    }
+
     std::string describeBox(const Box &b) {
       std::size_t nFree = 0, nRanged = 0, nPinned = 0;
       std::string widest;
@@ -1227,15 +1268,21 @@ namespace refractir::reify {
           // plan (it is the trace itself), so there is nothing to synthesize.
           auto commit = [&](const std::string &fnName, Cand &c,
                             std::unordered_map<std::string, TwinPlan> &decided) {
-            // Only regions actually being twinned pay for a box.
-            if (const FunDecl *fnp = findFn(fnName))
+            // Only regions actually being twinned pay for a box, or for the
+            // rewriting that follows it: the box says which states the body
+            // must stay right for, so it has to come first.
+            if (FunDecl *fnp = findFn(fnName)) {
               c.box = computeBox(*fnp, structs, c.plan.body, c.plan.entry, ctx.rng);
+              c.disguised = antiOptimizeBody(*fnp, structs, c.plan, c.box, ctx.rng);
+            }
             c.plan.box = c.box;
             vlog(
                 fnName + " " + c.label + ": grafted region -> " + c.plan.exitLabel + " (" +
                 std::to_string(c.nBlocks) + " blk, " + std::to_string(c.plan.body.stmts.size()) +
                 " stmts, " + std::to_string(c.plan.body.checks.size()) + " path cond, interval " +
-                c.interval + ", " + describeBox(c.box) + ")" +
+                c.interval + ", " + describeBox(c.box) + ", " +
+                std::to_string(c.disguised.applied) + " rewrites (" +
+                std::to_string(c.disguised.rolledBack) + " undone)" +
                 (c.fellBack ? " [window fell back to one block]" : "")
             );
             decided.emplace(c.label, std::move(c.plan));
@@ -1450,10 +1497,35 @@ namespace refractir::reify {
             return std::nullopt;
           if (a.effect.size() != b.effect.size())
             return std::nullopt;
-          for (std::size_t i = 0; i < a.effect.size(); ++i)
-            if (a.effect[i].first != b.effect[i].first ||
-                !bitExactEq(a.effect[i].second, b.effect[i].second))
+          for (std::size_t i = 0; i < a.effect.size(); ++i) {
+            // Locals the rewriting introduced are the twin's own scratch: the
+            // twin arm writes them, the orig arm leaves them at their
+            // declaration, and nothing outside the block reads them. Comparing
+            // them would report the arms as differing on something no caller
+            // can observe.
+            const std::string &nm = a.effect[i].first;
+            if (nm.compare(0, std::strlen(kAntiOptLocalPrefix), kAntiOptLocalPrefix) == 0)
+              continue;
+            if (nm != b.effect[i].first || !bitExactEq(a.effect[i].second, b.effect[i].second)) {
+              std::fprintf(
+                  stderr, "[spot] %s orig=%lld twin=%lld | state:", nm.c_str(),
+                  (long long) a.effect[i].second.intVal, (long long) b.effect[i].second.intVal
+              );
+              for (const auto &r: st) {
+                std::vector<StateLeaf> lv;
+                bool hp = false, hu = false;
+                enumStateLeaves(r.init, lv, hp, hu);
+                for (const auto &l: lv)
+                  if (l.val.kind == StateValue::Kind::Int)
+                    std::fprintf(
+                        stderr, " %s=%lld", leafKey(r.name, l.path).c_str(),
+                        (long long) l.val.intVal
+                    );
+              }
+              std::fprintf(stderr, "\n");
               return std::nullopt;
+            }
+          }
           ++agreed;
         }
         return agreed;

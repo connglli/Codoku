@@ -34,6 +34,7 @@
 #include "error.hpp"
 #include "frontend/lexer.hpp"
 #include "frontend/parser.hpp"
+#include "reify/antiopt.hpp"
 #include "reify/common.hpp"
 #include "reify/func_desc.hpp"
 #include "reify/state_profile.hpp"
@@ -169,6 +170,7 @@ int main(int argc, char **argv) {
                 cxxopts::value<std::string>()->default_value("vecext"))
     ("emit-main", "Keep @main un-mangled in compiled output (so p2 is runnable)")
     ("validate", "Run symiri on p1 and p2 with the profiled input and assert they agree")
+    ("selftest-rewrites", "Check every disguise rule's identity exhaustively at i8 and exit")
     ("v,verbose", "Log each twin decision (grafted / skipped / rejected, with reason)")
     ("o,output","Output .sir (p2)", cxxopts::value<std::string>())
     ("h,help",  "Print usage");
@@ -183,6 +185,17 @@ int main(int argc, char **argv) {
     std::cerr << "rytwin: " << e.what() << "\n";
     return 2;
   }
+  if (result.count("selftest-rewrites")) {
+    std::string failure;
+    auto checked = selfTestRules(failure);
+    if (!checked) {
+      std::cerr << "rytwin: rewrite selftest FAILED: " << failure << "\n";
+      return 1;
+    }
+    std::cout << "rytwin: rewrite selftest OK (" << *checked << " value rule(s), all i8 pairs)\n";
+    return 0;
+  }
+
   if (result.count("help") || !result.count("input") || !result.count("output")) {
     std::cout << opts.help() << "\n";
     return result.count("help") ? 0 : 2;
@@ -332,7 +345,7 @@ int main(int argc, char **argv) {
     ctx.descriptors[entry] = *desc;
   ctx.profiles[profile->func] = *profile;
   TransformPipeline pipe;
-  pipe.add(makeTwinTransform(std::move(selectPolicy), result.count("validate") > 0));
+  pipe.add(makeTwinTransform(std::move(selectPolicy), doValidate));
   TransformReport rep = pipe.run(prog, ctx);
   if (!rep.ok) {
     std::cerr << "rytwin: pass failed: " << rep.message << "\n";

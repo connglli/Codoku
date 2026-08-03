@@ -79,7 +79,11 @@ considered and dropped (spec §13).
   interval pass classifies each leaf **free** (dropped from the guard
   entirely), **ranged** (`lo <= x <= hi`, widened by lockstep bisection)
   or **pinned**, and `--validate` spot-checks states sampled inside the
-  resulting box. `--twin-select interesting`
+  resulting box. Twin bodies are then rewritten by an **anti-optimization
+  engine** (`reify/antiopt.hpp`) — identities applied in the opposite
+  direction to a compiler's, each re-checked over the states the guard
+  admits and rolled back otherwise — which is reify-general rather than
+  rytwin-specific. `--twin-select interesting`
   swaps the uniform `--p-twin` coin for a selection policy that softmax-tilts
   each region's twin probability by how hard its twin is to prove equivalent
   (loop-collapse dominating), concentrating twins on the hardest regions.

@@ -643,9 +643,11 @@ def test_trace_records_diamond_condition(rytwin, symiri):
       "the diamond contributes one condition", path_cond_count(lines[0]) == 1, lines[0]
     )
     body = "\n".join(twin_block_bodies(open(p2).read()))
+    # The body is rewritten after flattening, so the taken side is checked by
+    # what it computes with (+10) rather than by its original spelling.
     check(
       "the twin replays the taken side only",
-      "%a = %a + 10;" in body and "%a = %a - 10;" not in body,
+      "+ 10" in body and "- 10" not in body,
       body[:200],
     )
     r1 = symiri_result(symiri, p1, "@diamond", ["3"])
@@ -1014,6 +1016,76 @@ def test_box_computes_ceilings_before_searching(rytwin):
       widest and widest[1] > 10000000,
       str(widest),
     )
+
+
+def test_disguised_body_is_not_a_copy(rytwin, symiri):
+  """A flattened trace is the region's statements back in order, which is a
+  copy however wide the guard is. After rewriting it should no longer be one,
+  and it must still agree with the region."""
+  with tempfile.TemporaryDirectory() as d:
+    r, lines, p1, p2 = graft_log(rytwin, d, LOOP_FIXTURE, "loopreg", ["--validate"])
+    check("loop fixture twinned", r.returncode == 0 and lines, r.stderr[:200])
+    if not lines:
+      return
+    body = "".join(twin_block_bodies(open(p2).read()))
+    check("the body was rewritten", re.search(r"(\d+) rewrites", lines[0]), lines[0])
+    check(
+      "and no longer reads as the region",
+      body.count("%i = %i + 1;") == 0,
+      body[:300],
+    )
+    check("--validate still agrees", "validated: OK" in r.stdout, r.stdout[:200])
+    r1 = symiri_result(symiri, p1, "@loopreg", ["3"])
+    r2 = symiri_result(symiri, p2, "@loopreg", ["3"])
+    check("disguised program equivalent", r1[1:] == r2[1:], f"{r1} vs {r2}")
+
+
+def test_disguise_rolls_back_what_it_cannot_prove(rytwin):
+  """A rule is sound on its own; two of them together need not be. The
+  interval pass re-checks after every application and the body is restored
+  when it no longer proves — so rewrites being undone is the mechanism
+  working, not a fault."""
+  with tempfile.TemporaryDirectory() as d:
+    r, lines, _, _ = graft_log(rytwin, d, LOOP_FIXTURE, "loopreg", ["--validate"])
+    if not lines:
+      check("loop fixture twinned", False, r.stderr[:160])
+      return
+    m = re.search(r"(\d+) rewrites \((\d+) undone\)", lines[0])
+    check("the report distinguishes kept from undone", m is not None, lines[0])
+    if m:
+      check("some were undone", int(m.group(2)) > 0, m.group(0))
+      check("and some were kept", int(m.group(1)) > 0, m.group(0))
+    check("the result still validates", "validated: OK" in r.stdout, r.stdout[:200])
+
+
+def test_disguise_varies_with_the_seed(rytwin):
+  """The rewriting is seeded, so two seeds give two different bodies for the
+  same region — otherwise every twin of a given region would look alike."""
+  bodies = []
+  for seed in ("3", "9"):
+    with tempfile.TemporaryDirectory() as d:
+      p1 = os.path.join(d, "loopreg.sir")
+      open(p1, "w").write(LOOP_FIXTURE)
+      p2 = os.path.join(d, "p2.sir")
+      rr = run([rytwin, p1, "--p-twin", "1.0", "--seed", seed, "-o", p2])
+      if rr.returncode == 0:
+        bodies.append("".join(twin_block_bodies(open(p2).read())))
+  check("both seeds twinned", len(bodies) == 2, str(len(bodies)))
+  if len(bodies) == 2:
+    check("different seeds, different bodies", bodies[0] != bodies[1], bodies[0][:150])
+
+
+def test_rewrite_rules_selftest(rytwin):
+  """Every disguise rule claims an identity. The claim is checked over all
+  i8 operand pairs, so a wrong rule is caught at the rule rather than showing
+  up later as a body that mysteriously fails to re-check."""
+  r = run([rytwin, "--selftest-rewrites"])
+  check("rewrite selftest passes", r.returncode == 0, (r.stderr + r.stdout)[:300])
+  m = re.search(r"(\d+) value rule", r.stdout)
+  check(
+    "it checked at least one value rule", m and int(m.group(1)) >= 1, r.stdout[:200]
+  )
+  check("and said so on all i8 pairs", "all i8 pairs" in r.stdout, r.stdout[:200])
 
 
 def test_box_is_deterministic_for_a_seed(rytwin):
@@ -2382,6 +2454,22 @@ def main():
     (
       "box: ceilings bound the search before it starts",
       lambda: test_box_computes_ceilings_before_searching(rytwin),
+    ),
+    (
+      "rewrite: a disguised body is no longer a copy",
+      lambda: test_disguised_body_is_not_a_copy(rytwin, symiri),
+    ),
+    (
+      "rewrite: what cannot be re-proved is rolled back",
+      lambda: test_disguise_rolls_back_what_it_cannot_prove(rytwin),
+    ),
+    (
+      "rewrite: bodies vary with the seed",
+      lambda: test_disguise_varies_with_the_seed(rytwin),
+    ),
+    (
+      "rewrite: every rule's identity holds on all i8 pairs",
+      lambda: test_rewrite_rules_selftest(rytwin),
     ),
     (
       "box: the search is seeded, not chancy",

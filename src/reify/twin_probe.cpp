@@ -119,20 +119,26 @@ namespace refractir::reify {
       std::unordered_set<std::string> declared;
       for (const auto &r: roots)
         declared.insert(r.name);
-      auto addUndef = [&](const std::string &nm, const TypePtr &ty, bool mut) {
+      // Locals the state does not carry still have to exist for the region's
+      // statements to name them. A let keeps its own initializer rather than
+      // becoming undef: the region may read it before writing it — a constant
+      // a rewrite introduced is exactly that — and an undef read is a
+      // definite-initialization error that would sink the whole harness.
+      auto addLocal = [&](const std::string &nm, const TypePtr &ty, bool mut,
+                          std::optional<InitVal> init) {
         if (declared.count(nm))
           return;
         LetDecl d;
         d.isMutable = mut;
         d.name = LocalId{nm, {}};
         d.type = ty;
-        d.init = InitVal{InitVal::Kind::Undef, IntLit{}, {}};
+        d.init = init ? std::move(*init) : InitVal{InitVal::Kind::Undef, IntLit{}, {}};
         f.lets.push_back(std::move(d));
       };
       for (const auto &p: src->params)
-        addUndef(p.name.name, p.type, /*mut=*/false);
+        addLocal(p.name.name, p.type, /*mut=*/false, std::nullopt);
       for (const auto &l: src->lets)
-        addUndef(l.name.name, l.type, l.isMutable);
+        addLocal(l.name.name, l.type, l.isMutable, l.init);
     }
 
     Block entry;

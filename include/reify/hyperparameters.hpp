@@ -562,4 +562,14 @@ namespace refractir::reify::rytwin::hp {
   // (a bound is where a box is most likely to be wrong), then interior points.
   inline constexpr std::size_t kTwinSpotChecks = 32;
 
+  // ===========================================================================
+  // Body disguise
+  //
+  // How hard a twin body is rewritten before it is grafted. Each application
+  // costs one interval pass over the body (to re-check it) and is rolled back
+  // if that fails, so these bound work, not risk.
+  // ===========================================================================
+  inline constexpr std::size_t kTwinRewriteRounds = 3;
+  inline constexpr std::size_t kTwinRewritesPerRound = 8;
+
 } // namespace refractir::reify::rytwin::hp
