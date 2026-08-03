@@ -31,7 +31,11 @@ namespace refractir::reify::antiopt {
   // binary atom and *requires* an lvalue on the right (spec §5.3), so a
   // constant that belongs on the right has to be a local first.
   Atom opAtom(Coef left, AtomOpKind op, const std::string &right);
+  Atom binAtom(const std::string &left, AtomOpKind op, const std::string &right);
   Expr opExpr(const std::string &left, AtomOpKind op, const std::string &right);
+
+  // `~%x`, the only unary operator there is.
+  Atom notAtom(const std::string &x);
 
   // `<e> +/- <atom>`, appended to the flat chain a statement already is.
   void addTail(Expr &e, AddOp op, Atom a);

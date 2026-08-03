@@ -28,8 +28,16 @@ namespace refractir::reify::antiopt {
     return Atom{std::move(o), {}};
   }
 
+  Atom binAtom(const std::string &left, AtomOpKind op, const std::string &right) {
+    return opAtom(Coef{LocalOrSymId{LocalId{left, {}}}}, op, right);
+  }
+
   Expr opExpr(const std::string &left, AtomOpKind op, const std::string &right) {
-    return simpleExpr(opAtom(Coef{LocalOrSymId{LocalId{left, {}}}}, op, right));
+    return simpleExpr(binAtom(left, op, right));
+  }
+
+  Atom notAtom(const std::string &x) {
+    return Atom{UnaryAtom{UnaryOpKind::Not, localLV(x), {}}, {}};
   }
 
   void addTail(Expr &e, AddOp op, Atom a) { e.rest.push_back(Expr::Tail{op, std::move(a), {}}); }

@@ -1469,6 +1469,131 @@ def test_shifted_program_still_agrees(rytwin, symiri):
       check(f"same answer for {arg}", r1[1:] == r2[1:], f"{r1} vs {r2}")
 
 
+# The crossings that leave the bitwise domain need their operands *known*,
+# not merely bounded: the interval domain widens `& | ^` of two ranges to
+# unknown, and arithmetic over an unknown cannot be proven not to overflow.
+# Assigning the operands inside the region makes them constants of the trace
+# rather than leaves the box would widen. One operator per fixture, so a rule
+# that fails to fire is a rule that could not rather than one that lost a
+# draw.
+def bitwise_fixture(name, op):
+  """One operator, three times over: several rules match the same shape and
+  only one of them can have a given site, so a single site would test the
+  draw rather than the rule."""
+  return f"""// SOLVED: %p0=3
+fun @{name}(%p0: i32) : i32 {{
+  let mut %a: i32 = 0;
+  let mut %b: i32 = 0;
+  let mut %r: i32 = 0;
+  let mut %s: i32 = 0;
+  let mut %t: i32 = 0;
+^entry:
+  %a = 12;
+  %b = 10;
+  br ^work;
+^work:
+  %r = %a {op} %b;
+  %s = %a {op} %b;
+  %t = %a {op} %b;
+  %r = %r + %s + %t + %p0;
+  br ^done;
+^done:
+  ret %r;
+}}
+"""
+
+
+AND_FIXTURE = bitwise_fixture("bitand", "&")
+OR_FIXTURE = bitwise_fixture("bitor", "|")
+SUB_CONST_FIXTURE = bitwise_fixture("constsub", "-")
+
+# The same three operators with nothing pinning the operands: the trap-free
+# crossings still apply here, because they never leave the bitwise domain.
+OPEN_BITWISE_FIXTURE = """// SOLVED: %p0=3
+fun @openbits(%p0: i32) : i32 {
+  let mut %m: i32 = 6;
+  let mut %r: i32 = 0;
+^entry:
+  br %p0 > 0, ^work, ^done;
+^work:
+  %r = %p0 ^ %m;
+  %m = %p0 & %m;
+  br ^done;
+^done:
+  ret %r;
+}
+"""
+
+SPLIT_FIXTURE = """// SOLVED: %p0=3
+fun @bitsplit(%p0: i32) : i32 {
+  let mut %r: i32 = 0;
+^entry:
+  br %p0 > 0, ^work, ^done;
+^work:
+  %r = %p0;
+  %r = %r + %p0;
+  br ^done;
+^done:
+  ret %r;
+}
+"""
+
+
+def test_and_crosses_into_arithmetic(rytwin):
+  """`%x & %y` is `%x - (%x & ~%y)` and `(%x | %y) - (%x ^ %y)`. Both leave
+  the bitwise domain, which is what an optimizer will not follow back."""
+  kept, ok = rules_kept(rytwin, AND_FIXTURE, "bitand")
+  check("mba-and-sub fires on a conjunction", "mba-and-sub" in kept, str(kept))
+  check("mba-and-diff fires on a conjunction", "mba-and-diff" in kept, str(kept))
+  check("and the twins validate", ok)
+
+
+def test_or_crosses_into_arithmetic(rytwin):
+  """`%x | %y` is `%x + %y - (%x & %y)` — inclusion-exclusion, spelled out."""
+  kept, ok = rules_kept(rytwin, OR_FIXTURE, "bitor")
+  check("mba-or-add fires on a disjunction", "mba-or-add" in kept, str(kept))
+  check("and so does the older crossing", "mba-or" in kept, str(kept))
+  check("and the twins validate", ok)
+
+
+def test_subtraction_crosses_into_bitwise(rytwin):
+  """`%x - %y` is `(%x ^ %y) - 2 * (~%x & %y)`, the dual of the carry
+  identity family B already carries for `+`."""
+  kept, ok = rules_kept(rytwin, SUB_CONST_FIXTURE, "constsub")
+  check("mba-sub fires on a subtraction", "mba-sub" in kept, str(kept))
+  check("and the twins validate", ok)
+
+
+def test_xor_stays_inside_the_bitwise_domain(rytwin):
+  """`%x ^ %y` is `(%x | %y) & ~(%x & %y)` — the one crossing with no
+  arithmetic in it, so unlike the rest it needs nothing proven and fires
+  where the operands are merely values."""
+  kept, ok = rules_kept(rytwin, OPEN_BITWISE_FIXTURE, "openbits")
+  check("mba-xor-nand fires without a license", "mba-xor-nand" in kept, str(kept))
+  check("and the twins validate", ok)
+
+
+def test_de_morgan_doubles_the_complements(rytwin):
+  """`%x & %y` is `~(~%x | ~%y)` and `%x | %y` is `~(~%x & ~%y)`. Trap-free
+  both ways round."""
+  kept, ok = rules_kept(rytwin, OPEN_BITWISE_FIXTURE, "openbits")
+  check("mba-demorgan fires on a conjunction", "mba-demorgan-and" in kept, str(kept))
+  kept2, ok2 = rules_kept(rytwin, OR_FIXTURE, "bitor")
+  check("and on a disjunction", "mba-demorgan-or" in kept2, str(kept2))
+  check("and the twins validate", ok and ok2)
+
+
+def test_value_splits_at_a_bit(rytwin):
+  """A non-negative value is its high part plus its low part:
+  `%x == (%x >>> k << k) + (%x & (2^k - 1))`. Licensed by the sign, since
+  `<<` traps on a negative operand."""
+  kept, ok = rules_kept(rytwin, SPLIT_FIXTURE, "bitsplit")
+  check(
+    "mba-bit-split fires where the sign is proven", "mba-bit-split" in kept, str(kept)
+  )
+  check("and the twins validate", ok)
+
+
 def test_box_is_deterministic_for_a_seed(rytwin):
   """The search is seeded, so two runs agree — the trim that keeps guards
   from being identical is drawn from the same stream, not from chance."""
@@ -2911,6 +3036,30 @@ def main():
     (
       "interval: a widened shift guard still agrees",
       lambda: test_shifted_program_still_agrees(rytwin, symiri),
+    ),
+    (
+      "rewrite: a conjunction crosses into arithmetic",
+      lambda: test_and_crosses_into_arithmetic(rytwin),
+    ),
+    (
+      "rewrite: a disjunction crosses into arithmetic",
+      lambda: test_or_crosses_into_arithmetic(rytwin),
+    ),
+    (
+      "rewrite: a subtraction crosses into the bitwise domain",
+      lambda: test_subtraction_crosses_into_bitwise(rytwin),
+    ),
+    (
+      "rewrite: an exclusive or stays bitwise, unlicensed",
+      lambda: test_xor_stays_inside_the_bitwise_domain(rytwin),
+    ),
+    (
+      "rewrite: De Morgan doubles the complements",
+      lambda: test_de_morgan_doubles_the_complements(rytwin),
+    ),
+    (
+      "rewrite: a non-negative value splits at a bit",
+      lambda: test_value_splits_at_a_bit(rytwin),
     ),
     (
       "box: the search is seeded, not chancy",
