@@ -45,10 +45,15 @@ namespace refractir::reify::antiopt {
         auto range = intRange(ty);
         if (!range)
           return {};
-        std::uniform_int_distribution<std::int64_t> pick(
-            1, std::max<std::int64_t>(1, range->second)
-        );
-        const std::string k = ctx.names.literal(pick(ctx.rng), ty, ctx.lets);
+        // The mask is a literal of the statement's own type, and a narrow type
+        // holds very little: i1 is {-1, 0}, so drawing from a positive range
+        // wrote `let %k: i1 = 1;` — a program the checker rejects, which took
+        // down every region holding an i1 local. Drawing over the whole range
+        // keeps it representable; a zero mask hides nothing, so it becomes the
+        // low end instead, which is non-zero at every width.
+        std::uniform_int_distribution<std::int64_t> pick(range->first, range->second);
+        const std::int64_t drawn = pick(ctx.rng);
+        const std::string k = ctx.names.literal(drawn ? drawn : range->first, ty, ctx.lets);
 
         std::vector<Instr> out;
         out.push_back(cloneInstr(stmts[pos.stmt]));

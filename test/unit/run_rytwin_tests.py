@@ -1096,6 +1096,41 @@ def test_rewrite_rules_selftest(rytwin):
   check("and said so on all i8 pairs", "all i8 pairs" in r.stdout, r.stdout[:200])
 
 
+CMP_FIXTURE = """// SOLVED: %p0=3
+fun @cmpswap(%p0: i32) : i32 {
+  let mut %b: i32 = 5;
+  let mut %c: i1 = 0;
+  let mut %r: i32 = 0;
+^entry:
+  br %p0 > 0, ^work, ^done;
+^work:
+  %c = cmp < %p0, %b;
+  %r = %c as i32;
+  br ^done;
+^done:
+  ret %r;
+}
+"""
+
+
+def test_mask_stays_inside_its_own_type(rytwin):
+  """An inserted mask is a literal of the statement's type, and i1 holds only
+  0 and -1. Drawing it from a positive range emitted `let %k: i1 = 1;` — a
+  program the checker rejects, so any region holding an i1 local aborted."""
+  for seed in ("1", "2", "3"):
+    with tempfile.TemporaryDirectory() as d:
+      p1 = os.path.join(d, "cmpswap.sir")
+      open(p1, "w").write(CMP_FIXTURE)
+      p2 = os.path.join(d, "cmpswap.p2.sir")
+      r = run([rytwin, p1, "--p-twin", "1.0", "--seed", seed, "--validate", "-o", p2])
+      ok = r.returncode == 0 and "validated: OK" in r.stdout
+      check(
+        f"a region with an i1 local twins at seed {seed}",
+        ok,
+        (r.stderr + r.stdout)[:200],
+      )
+
+
 def test_box_is_deterministic_for_a_seed(rytwin):
   """The search is seeded, so two runs agree — the trim that keeps guards
   from being identical is drawn from the same stream, not from chance."""
@@ -2478,6 +2513,10 @@ def main():
     (
       "rewrite: every rule's identity holds on all i8 pairs",
       lambda: test_rewrite_rules_selftest(rytwin),
+    ),
+    (
+      "rewrite: an inserted mask stays inside its own type",
+      lambda: test_mask_stays_inside_its_own_type(rytwin),
     ),
     (
       "box: the search is seeded, not chancy",
