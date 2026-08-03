@@ -29,7 +29,7 @@ namespace refractir::reify {
       return v;
     }
 
-    Interval constant(I64 c) { return Interval{c, c, false, 0}; }
+    Interval constant(I64 c) { return Interval{c, c, false, 0, 0}; }
 
     // Every value carries the entry leaves it came from, so a check that
     // fails can name them.
@@ -605,13 +605,13 @@ namespace refractir::reify {
                 if (v->unknown)
                   return unknownOf(v->deps);
                 // ~ is monotone decreasing
-                return Interval{~v->hi, ~v->lo, false, v->deps};
+                return Interval{~v->hi, ~v->lo, false, 0, v->deps};
               } else if constexpr (std::is_same_v<T, CmpAtom>) {
                 // i1 true is -1 (spec §6.4), so a comparison is one of {0, -1}.
                 auto l = evalSelectVal(x.lhs, 0), r = evalSelectVal(x.rhs, 0);
                 if (!l || !r)
                   return std::nullopt;
-                return Interval{-1, 0, false, l->deps | r->deps};
+                return Interval{-1, 0, false, 0, l->deps | r->deps};
               } else if constexpr (std::is_same_v<T, SelectAtom>)
                 return evalSelect(x, bits);
               else if constexpr (std::is_same_v<T, CastAtom>)
@@ -647,7 +647,7 @@ namespace refractir::reify {
         const std::uint64_t deps = t->deps | f->deps;
         if (t->unknown || f->unknown)
           return unknownOf(deps);
-        return Interval{std::min(t->lo, f->lo), std::max(t->hi, f->hi), false, deps};
+        return Interval{std::min(t->lo, f->lo), std::max(t->hi, f->hi), false, 0, deps};
       }
 
       std::optional<Interval> evalCast(const CastAtom &c) {
@@ -786,7 +786,7 @@ namespace refractir::reify {
         I64 lo = 0, hi = 0;
         if (op(loL, loR, lo) || op(hiL, hiR, hi))
           return reject(why, deps), std::nullopt;
-        Interval out{lo, hi, false, deps};
+        Interval out{lo, hi, false, 0, deps};
         if (bits && !fits(out, bits))
           return reject(why, deps), std::nullopt;
         return out;
@@ -806,7 +806,7 @@ namespace refractir::reify {
           lo = std::min(lo, p);
           hi = std::max(hi, p);
         }
-        Interval out{lo, hi, false, deps};
+        Interval out{lo, hi, false, 0, deps};
         if (bits && !fits(out, bits))
           return reject("multiplication may overflow", deps), std::nullopt;
         return out;
@@ -1121,12 +1121,25 @@ namespace refractir::reify {
     if (open.empty())
       return box;
 
+    // A leaf cannot hold what its type cannot represent, so every proposed
+    // range is clipped to its own width — otherwise the search would "prove" a
+    // range the guard could not even state as a literal.
+    auto clip = [](const Interval &leaf, std::int64_t lo, std::int64_t hi) {
+      I64 tlo = kI64Min, thi = kI64Max;
+      if (leaf.bits && leaf.bits < 64) {
+        tlo = -(I64(1) << (leaf.bits - 1));
+        thi = (I64(1) << (leaf.bits - 1)) - 1;
+      }
+      return std::pair<I64, I64>{std::max(lo, tlo), std::min(hi, thi)};
+    };
+
     auto widen = [&](const std::vector<std::int64_t> &radii) {
       EntryState trial = st;
       for (std::size_t i = 0; i < open.size(); ++i) {
         Interval iv = open[i].leaf->range;
-        iv.lo = open[i].centre - radii[i];
-        iv.hi = open[i].centre + radii[i];
+        const auto [lo, hi] = clip(iv, open[i].centre - radii[i], open[i].centre + radii[i]);
+        iv.lo = lo;
+        iv.hi = hi;
         iv.unknown = false;
         trial.ints[open[i].leaf->key] = iv;
       }
@@ -1195,10 +1208,14 @@ namespace refractir::reify {
       o.good -= cut;
       if (o.good <= 0)
         continue;
-      o.leaf->cls = LeafClass::Ranged;
-      o.leaf->range.lo = o.centre - o.good;
-      o.leaf->range.hi = o.centre + o.good;
+      const auto [lo, hi] = clip(o.leaf->range, o.centre - o.good, o.centre + o.good);
+      o.leaf->range.lo = lo;
+      o.leaf->range.hi = hi;
       o.leaf->range.unknown = false;
+      // A run covering the leaf's whole type admits every value it can hold,
+      // which is what free means — and says it without two dead comparisons.
+      const auto [tlo, thi] = clip(o.leaf->range, kI64Min, kI64Max);
+      o.leaf->cls = (lo <= tlo && hi >= thi) ? LeafClass::Free : LeafClass::Ranged;
     }
     return box;
   }

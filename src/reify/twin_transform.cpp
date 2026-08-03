@@ -52,6 +52,15 @@ namespace refractir::reify {
 
     // `%dst = cmp == %a, %b` — both operands are same-typed locals, so the
     // equality is exact without any width coercion.
+    Instr
+    cmpRelInstr(const std::string &dst, const std::string &a, RelOp op, const std::string &b) {
+      CmpAtom c;
+      c.op = op;
+      c.lhs = SelectVal{RValue{localLV(a)}};
+      c.rhs = SelectVal{RValue{localLV(b)}};
+      return assignInstr(dst, simpleExpr(Atom{std::move(c), {}}));
+    }
+
     Instr cmpEqInstr(const std::string &dst, const std::string &a, const std::string &b) {
       CmpAtom c;
       c.op = RelOp::EQ;
@@ -363,6 +372,7 @@ namespace refractir::reify {
       std::vector<LeafRef> defs;         // per-leaf constant reconstruction of s'
       TraceBody body;                    // the region's flattened executed trace
       EntryState entry;                  // the profiled state, as the box's floor
+      Box box;                           // how far the guard may open, per leaf
       std::string exitLabel;             // block the twin jumps to (region exit)
     };
 
@@ -603,6 +613,43 @@ namespace refractir::reify {
     // arrive by value, vectors per-lane, aggregates by address (navigated
     // with in-bounds ptrindex/ptrfield chains + load, so the body is UB-free
     // on EVERY input, matched or not).
+    // A guard takes no parameter it never looks at. A free leaf is dropped
+    // wherever the operand it needs is dropped with it: a scalar root becomes
+    // its own operand, a vector lane has its own parameter, and an aggregate
+    // is passed by address for all of its leaves at once — so an aggregate
+    // only leaves the signature when every one of its leaves is free.
+    bool leafIsFree(const Box &b, const struct GuardRoot &root, const struct LeafRef &leaf);
+    bool rootIsFullyFree(const Box &b, const struct GuardRoot &root);
+
+    LeafClass classOf(const Box &b, const std::string &key) {
+      for (const auto &l: b.leaves)
+        if (l.key == key)
+          return l.cls;
+      return LeafClass::Pinned;
+    }
+
+    Interval rangeOf(const Box &b, const std::string &key) {
+      for (const auto &l: b.leaves)
+        if (l.key == key)
+          return l.range;
+      return Interval{};
+    }
+
+    bool leafIsFree(const Box &b, const GuardRoot &root, const LeafRef &leaf) {
+      // A pointer leaf is compared against a reconstructed expected pointer
+      // and is never classified, so it is never free.
+      return !leaf.isPtr() && classOf(b, leafKey(root.name, leaf.path)) == LeafClass::Free;
+    }
+
+    bool rootIsFullyFree(const Box &b, const GuardRoot &root) {
+      if (root.leaves.empty() || root.kind == GuardRoot::Kind::Ptr)
+        return false;
+      for (const auto &leaf: root.leaves)
+        if (!leafIsFree(b, root, leaf))
+          return false;
+      return true;
+    }
+
     FunDecl buildGuardFun(const std::string &name, const TwinPlan &plan, const StructMap &structs) {
       FunDecl g;
       g.name = GlobalId{name, {}};
@@ -637,6 +684,8 @@ namespace refractir::reify {
       // `==`, which is defined even across objects.
       int eIdx = 0;
       for (const auto &root: plan.guardRoots) {
+        if (rootIsFullyFree(plan.box, root))
+          continue;
         switch (root.kind) {
           case GuardRoot::Kind::Scalar:
           case GuardRoot::Kind::Ptr:
@@ -645,7 +694,10 @@ namespace refractir::reify {
           case GuardRoot::Kind::Vec: {
             const auto &vt = std::get<VecType>(root.type->v);
             for (const auto &leaf: root.leaves)
-              g.params.push_back({LocalId{vecLaneParam(root.name, laneOf(leaf)), {}}, vt.elem, {}});
+              if (!leafIsFree(plan.box, root, leaf))
+                g.params.push_back(
+                    {LocalId{vecLaneParam(root.name, laneOf(leaf)), {}}, vt.elem, {}}
+                );
             break;
           }
           case GuardRoot::Kind::Agg:
@@ -685,7 +737,13 @@ namespace refractir::reify {
       int kIdx = 0;
       eIdx = 0;
       for (const auto &root: plan.guardRoots) {
+        if (rootIsFullyFree(plan.box, root))
+          continue;
         for (const auto &leaf: root.leaves) {
+          // Decided before the operand is built: a free leaf needs no lane, no
+          // navigation and no load, so none are emitted for it.
+          if (leafIsFree(plan.box, root, leaf))
+            continue;
           std::string operand;
           TypePtr leafT;
           switch (root.kind) {
@@ -734,11 +792,27 @@ namespace refractir::reify {
             // Pointer equality against the caller-reconstructed expected
             // pointer (defined across objects, so total on every input).
             e.instrs.push_back(cmpEqInstr("%__c", operand, "%__e" + std::to_string(eIdx++)));
-          } else {
-            std::string k = "%__k" + std::to_string(kIdx++);
-            addLet(k, leafT, litInit(leaf.val), /*mut=*/false);
-            e.instrs.push_back(cmpEqInstr("%__c", operand, k));
+            e.instrs.push_back(andInstr("%__acc", "%__c"));
+            continue;
           }
+          // What the box proved about this leaf decides what the guard says
+          // about it. Comparisons never trap, so every form stays total.
+          const LeafClass cls = classOf(plan.box, leafKey(root.name, leaf.path));
+          if (cls == LeafClass::Ranged) {
+            const Interval r = rangeOf(plan.box, leafKey(root.name, leaf.path));
+            std::string klo = "%__k" + std::to_string(kIdx++);
+            std::string khi = "%__k" + std::to_string(kIdx++);
+            addLet(klo, leafT, intInit(r.lo), /*mut=*/false);
+            addLet(khi, leafT, intInit(r.hi), /*mut=*/false);
+            e.instrs.push_back(cmpRelInstr("%__c", operand, RelOp::GE, klo));
+            e.instrs.push_back(andInstr("%__acc", "%__c"));
+            e.instrs.push_back(cmpRelInstr("%__c", operand, RelOp::LE, khi));
+            e.instrs.push_back(andInstr("%__acc", "%__c"));
+            continue;
+          }
+          std::string k = "%__k" + std::to_string(kIdx++);
+          addLet(k, leafT, litInit(leaf.val), /*mut=*/false);
+          e.instrs.push_back(cmpEqInstr("%__c", operand, k));
           e.instrs.push_back(andInstr("%__acc", "%__c"));
         }
       }
@@ -751,6 +825,10 @@ namespace refractir::reify {
     std::vector<std::shared_ptr<Expr>> buildGuardArgs(const TwinPlan &plan) {
       std::vector<std::shared_ptr<Expr>> args;
       for (const auto &root: plan.guardRoots) {
+        // Must skip exactly what buildGuardFun skipped, or the call would not
+        // match the signature.
+        if (rootIsFullyFree(plan.box, root))
+          continue;
         switch (root.kind) {
           case GuardRoot::Kind::Scalar:
           case GuardRoot::Kind::Ptr:
@@ -758,6 +836,8 @@ namespace refractir::reify {
             break;
           case GuardRoot::Kind::Vec:
             for (const auto &leaf: root.leaves) {
+              if (leafIsFree(plan.box, root, leaf))
+                continue;
               LValue lane = localLV(root.name);
               lane.accesses.push_back(leaf.path.front());
               args.push_back(std::make_shared<Expr>(simpleExpr(rvalAtom(std::move(lane)))));
@@ -811,7 +891,7 @@ namespace refractir::reify {
           const std::string key = leafKey(name, lf.path);
           switch (lf.val.kind) {
             case StateValue::Kind::Int:
-              out.ints[key] = Interval{lf.val.intVal, lf.val.intVal, false};
+              out.ints[key] = Interval{lf.val.intVal, lf.val.intVal, false, lf.val.bits, 0};
               break;
             case StateValue::Kind::Float:
               out.floats[key] = lf.val.floatVal;
@@ -1043,6 +1123,7 @@ namespace refractir::reify {
             // Only regions actually being twinned pay for a box.
             if (const FunDecl *fnp = findFn(fnName))
               c.box = computeBox(*fnp, structs, c.plan.body, c.plan.entry, ctx.rng);
+            c.plan.box = c.box;
             vlog(
                 fnName + " " + c.label + ": grafted region -> " + c.plan.exitLabel + " (" +
                 std::to_string(c.nBlocks) + " blk, " + std::to_string(c.plan.body.stmts.size()) +

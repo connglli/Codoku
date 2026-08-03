@@ -56,6 +56,11 @@ namespace refractir::reify {
     std::int64_t lo = 0;
     std::int64_t hi = 0;
     bool unknown = false;
+    // The declared width of the leaf this interval describes, when it is one
+    // (0 otherwise). A leaf can never hold a value its own type cannot
+    // represent, so a search widening it must stop there however much the
+    // arithmetic downstream would tolerate.
+    std::uint32_t bits = 0;
     // Which entry leaves this value was computed from, one bit each. A check
     // that fails names them, so a search widening the box knows which leaves
     // to freeze rather than freezing all of them. Only integer leaves get a

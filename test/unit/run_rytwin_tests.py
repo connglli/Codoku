@@ -247,10 +247,12 @@ def test_guard_is_function(rytwin, rysmith):
     )
 
 
-def test_guard_covers_full_state(rytwin):
-  """[Stage 2] The guard consumes the ENTIRE live-in state, not just the
-  block's read set: %b is never read by the twinned block, yet its value
-  (1234567) must appear in the guard function."""
+def test_guard_omits_state_the_twin_ignores(rytwin):
+  """The guard covers the live-in state the twin actually depends on. %b is
+  never read by the region, so the pass proves it free and the guard does not
+  mention it — the earlier design pinned it anyway, to "maximize
+  discrimination", which is exactly the over-fitting that made a twin
+  recognizable."""
   fixture = """// SOLVED: %pa0=7
 fun @guardfix(%pa0: i32) : i32 {
   let mut %a: i32 = 3;
@@ -274,10 +276,11 @@ fun @guardfix(%pa0: i32) : i32 {
       return
     bodies = guard_fun_bodies(open(p2).read())
     check(
-      "guard consumes the unread variable %b",
-      any("1234567" in b for b in bodies.values()),
+      "the guard drops the unread variable %b",
+      bodies and not any("1234567" in b for b in bodies.values()),
       f"guards={list(bodies)}",
     )
+    check("and --validate still agrees", "validated: OK" in r.stdout, r.stdout[:160])
 
 
 def test_guard_unique_names(rytwin, rysmith):
@@ -782,6 +785,29 @@ fun @floats(%p0: i32) : i32 {
 """
 
 
+# Only lane 0 is ever read, so lane 1 is free and has no business being a
+# parameter of the guard.
+VEC_LANE_FIXTURE = """// SOLVED: %p0=3
+fun @veclanes(%p0: i32) : i32 {
+  let mut %v: <2> i32 = {5, 6};
+  let mut %r: i32 = 0;
+^entry:
+  %r = %v[0] + %p0;
+  br ^work;
+^work:
+  %r = 2 * %r;
+  br ^done;
+^done:
+  ret %r;
+}
+"""
+
+
+def guard_signature(src):
+  m = re.search(r"fun @__twg_\S+\(([^)]*)\)", src)
+  return m.group(1) if m else ""
+
+
 def box_counts(line):
   """(free, ranged, pinned) from a graft log line, or None."""
   m = re.search(r"box: (\d+) free, (\d+) ranged, (\d+) pinned", line)
@@ -869,6 +895,87 @@ def test_box_frees_a_leaf_no_sampling_could(rytwin):
       return
     counts = box_counts(lines[0])
     check("leaves come back free", counts and counts[0] > 0, str(counts))
+
+
+def test_guard_states_ranges_and_drops_free_leaves(rytwin):
+  """The guard says what the box found: a ranged leaf becomes a pair of
+  bounds, a free leaf is not mentioned at all, and only pinned leaves are
+  compared for equality."""
+  with tempfile.TemporaryDirectory() as d:
+    r, lines, _, p2 = graft_log(rytwin, d, LOOP_FIXTURE, "loopreg", ["--validate"])
+    check("loop fixture twinned", r.returncode == 0 and lines, r.stderr[:200])
+    if not lines:
+      return
+    guard = "".join(guard_fun_bodies(open(p2).read()).values())
+    check(
+      "the ranged leaf is bounded, not pinned",
+      "cmp >=" in guard and "cmp <=" in guard,
+      guard[:300],
+    )
+    check("pinned leaves keep their equality", "cmp ==" in guard, guard[:300])
+  with tempfile.TemporaryDirectory() as d:
+    r, lines, _, p2 = graft_log(rytwin, d, FLOAT_FIXTURE, "floats", ["--validate"])
+    if not lines:
+      check("float fixture twinned", False, r.stderr[:160])
+      return
+    counts = box_counts(lines[0])
+    src = open(p2).read()
+    guard = "".join(guard_fun_bodies(src).values())
+    sig = re.search(r"fun (@__twg_\S+)\(([^)]*)\)", src)
+    check(
+      "free leaves are not compared",
+      counts
+      and counts[0] > 0
+      and "cmp == %i," not in guard
+      and "cmp == %p0," not in guard,
+      f"{counts} guard={guard[:200]}",
+    )
+    check(
+      "and not even passed in",
+      sig and "%i:" not in sig.group(2) and "%p0:" not in sig.group(2),
+      sig.group(2) if sig else "",
+    )
+    check(
+      "leaves the box does not classify stay pinned",
+      "cmp == %f," in guard,
+      guard[:200],
+    )
+
+
+def test_guard_drops_free_vector_lanes(rytwin, symiri):
+  """A guard should not take a parameter it never looks at. A vector lane the
+  region never reads is free, so its lane parameter goes with it."""
+  with tempfile.TemporaryDirectory() as d:
+    r, lines, p1, p2 = graft_log(
+      rytwin, d, VEC_LANE_FIXTURE, "veclanes", ["--validate"]
+    )
+    check("vector fixture twinned", r.returncode == 0 and lines, r.stderr[:200])
+    if not lines:
+      return
+    sig = guard_signature(open(p2).read())
+    check("the unread lane is not a parameter", "%v__l1" not in sig, sig)
+    check("the read lane still is", "%v__l0" in sig, sig)
+    r1 = symiri_result(symiri, p1, "@veclanes", ["3"])
+    r2 = symiri_result(symiri, p2, "@veclanes", ["3"])
+    check("vector program equivalent", r1[1:] == r2[1:], f"{r1} vs {r2}")
+
+
+def test_widened_guard_fires_on_another_input(rytwin, symiri):
+  """The point of widening: an input the twin was never profiled on still
+  lands inside the guard, so the twin arm runs and the program agrees."""
+  with tempfile.TemporaryDirectory() as d:
+    r, lines, p1, p2 = graft_log(rytwin, d, CHAIN_FIXTURE, "chain", ["--validate"])
+    check("chain fixture twinned", r.returncode == 0 and lines, r.stderr[:200])
+    if not lines:
+      return
+    counts = box_counts(lines[0])
+    check("something opened", counts and (counts[0] or counts[1]), str(counts))
+    # profiled on %p0 = 3; try a neighbour it never saw
+    trace = dump_trace(symiri, p2, "@chain", ["9"])
+    check("the twin runs on an unprofiled input", "__twin" in trace, trace[-200:])
+    r1 = symiri_result(symiri, p1, "@chain", ["9"])
+    r2 = symiri_result(symiri, p2, "@chain", ["9"])
+    check("and agrees with the original there", r1[1:] == r2[1:], f"{r1} vs {r2}")
 
 
 def test_box_is_deterministic_for_a_seed(rytwin):
@@ -1880,10 +1987,11 @@ fun @main() : i32 {
 """
 
 
-def test_first_visit_across_activations(rytwin, symiri):
-  """[whole-program] A callee invoked twice with different args: the twin is
-  planned from the first activation's state, fires there and only there, and
-  the program stays equivalent."""
+def test_widened_guard_serves_both_activations(rytwin, symiri):
+  """[whole-program] A callee invoked twice with different args. The twin is
+  planned from the first activation, but the box proves the region behaves the
+  same across a range, so the guard admits the second call too — one twin
+  serving both is the point of widening."""
   with tempfile.TemporaryDirectory() as d:
     p1 = os.path.join(d, "prog.sir")
     open(p1, "w").write(TWICE_CALLED_FIXTURE)
@@ -1894,8 +2002,8 @@ def test_first_visit_across_activations(rytwin, symiri):
       return
     trace = dump_trace(symiri, p2)
     check(
-      "twin fires exactly once",
-      trace.count("__twin:") == 1,
+      "the twin serves both activations",
+      trace.count("__twin:") == 2,
       f"count={trace.count('__twin:')}",
     )
     r1 = symiri_result(symiri, p1, "@main", [])
@@ -2179,7 +2287,7 @@ def main():
     ),
     (
       "TwinTransform: guard covers the full state",
-      lambda: test_guard_covers_full_state(rytwin),
+      lambda: test_guard_omits_state_the_twin_ignores(rytwin),
     ),
     (
       "TwinTransform: guard function names unique per site",
@@ -2216,6 +2324,18 @@ def main():
     (
       "box: a leaf the trace ignores is freed",
       lambda: test_box_frees_a_leaf_no_sampling_could(rytwin),
+    ),
+    (
+      "guard: ranges are stated and free leaves dropped",
+      lambda: test_guard_states_ranges_and_drops_free_leaves(rytwin),
+    ),
+    (
+      "guard: free vector lanes leave the signature",
+      lambda: test_guard_drops_free_vector_lanes(rytwin, symiri),
+    ),
+    (
+      "guard: a widened guard fires on an unprofiled input",
+      lambda: test_widened_guard_fires_on_another_input(rytwin, symiri),
     ),
     (
       "box: the search is seeded, not chancy",
@@ -2315,7 +2435,7 @@ def main():
     ),
     (
       "whole-program: first visit across activations",
-      lambda: test_first_visit_across_activations(rytwin, symiri),
+      lambda: test_widened_guard_serves_both_activations(rytwin, symiri),
     ),
     (
       "whole-program: real rylink regression",
