@@ -1279,6 +1279,14 @@ namespace refractir::reify {
     return Checker(fn, structs, entry).run(body);
   }
 
+  std::vector<IntervalEnv> traceSnapshots(
+      const FunDecl &fn, const StructMap &structs, const TraceBody &body, const EntryState &entry
+  ) {
+    Checker chk(fn, structs, entry, /*record=*/true);
+    chk.run(body); // a trace that fails still recorded what it got that far
+    return chk.snapshots();
+  }
+
   // --- backward narrowing ---------------------------------------------------
 
   namespace {

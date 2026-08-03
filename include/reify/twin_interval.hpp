@@ -116,6 +116,16 @@ namespace refractir::reify {
       const FunDecl &fn, const StructMap &structs, const TraceBody &body, const EntryState &entry
   );
 
+  // What every local held *before* each statement of `body`, over every state
+  // in `entry` — one environment per statement, in body order. This is the
+  // same forward pass that certifies a box, read for its annotations rather
+  // than its verdict: a rewrite licensed by a value's range needs to know the
+  // range at the point it fires. A trace the pass cannot finish returns the
+  // prefix it managed, so a caller reading past the end simply knows nothing.
+  std::vector<IntervalEnv> traceSnapshots(
+      const FunDecl &fn, const StructMap &structs, const TraceBody &body, const EntryState &entry
+  );
+
   // What a guard may say about one leaf.
   //
   //   Free   — the trace is provable with this leaf unknown, so the guard does

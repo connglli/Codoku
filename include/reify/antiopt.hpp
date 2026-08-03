@@ -95,6 +95,40 @@ namespace refractir::reify {
     std::vector<std::tuple<std::int64_t, std::string, std::string>> pool_; // value, type key, name
   };
 
+  // What is known about the values a body carries. Most rules are identities
+  // and need none of this; the ones that are identities *only under a
+  // condition* — a mask that is a no-op because the value is small enough, a
+  // literal spelled as a read of something pinned to it — need someone to
+  // stand behind the condition. That someone is the caller: rytwin answers
+  // from the same interval pass that certifies its guard, and a caller with
+  // nothing to say passes nothing, which simply stops those rules firing.
+  //
+  // A licence granted on stale facts is not a licence, so the engine refreshes
+  // before every attempt rather than once per round.
+  struct ValueRange {
+    std::int64_t lo = 0;
+    std::int64_t hi = 0;
+  };
+
+  class AntiOptFacts {
+  public:
+    virtual ~AntiOptFacts() = default;
+
+    // Recompute against the body as it now stands.
+    virtual void refresh(const std::vector<Instr> &stmts) = 0;
+
+    // What `local` may hold just before statement `at`, or nullopt when
+    // nothing is known — which is also the answer past the end of what the
+    // caller could follow.
+    virtual std::optional<ValueRange>
+    rangeBefore(std::size_t at, const std::string &local) const = 0;
+
+    // Is this local one the caller's obligation says nothing about at all? A
+    // body that reads one of those reads as a check on state the guard never
+    // constrains, which is exactly what makes the dependency convincing.
+    virtual bool isFree(const std::string &local) const = 0;
+  };
+
   // What a rule may read while deciding and while rewriting.
   struct AntiOptContext {
     const FunDecl &fn;                    // the function the body belongs to
@@ -103,6 +137,7 @@ namespace refractir::reify {
     NameAllocator &names;                 //
     std::vector<LetDecl> &lets;           // where fresh locals are declared
     std::mt19937 &rng;                    //
+    AntiOptFacts *facts = nullptr;        // what is known, if anyone can say
   };
 
   class AntiOptRule {

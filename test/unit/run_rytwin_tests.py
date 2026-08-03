@@ -1690,6 +1690,110 @@ def test_scratch_declarations_are_shuffled(rytwin):
   )
 
 
+# Family D reads the same interval table that certified the guard, so these
+# fixtures are about what the box *knows*: a local pinned to a value, a value
+# the box bounds, and a leaf the guard never mentions at all.
+LICENSED_FIXTURE = """// SOLVED: %p0=3
+fun @licensed(%p0: i32) : i32 {
+  let mut %k: i32 = 0;
+  let mut %m: i32 = 0;
+  let mut %r: i32 = 0;
+  let mut %s: i32 = 0;
+^entry:
+  %k = 7;
+  %m = 255;
+  br ^work;
+^work:
+  %r = %p0 & %m;
+  %s = %r + 7;
+  %s = 7 * %s;
+  %s = %s + 7;
+  %s = %s + %k;
+  br ^done;
+^done:
+  ret %s;
+}
+"""
+
+# A literal no local is pinned to, so the only way to spell it is out of a
+# bound: %m is 255 on the box, and 255 >>> 5 is 7 for every state in it.
+BOUND_FIXTURE = """// SOLVED: %p0=3
+fun @bounded(%p0: i32) : i32 {
+  let mut %m: i32 = 0;
+  let mut %s: i32 = 0;
+^entry:
+  %m = 255;
+  br ^work;
+^work:
+  %s = %p0 + 7;
+  %s = %s + 7;
+  %s = %s + %m;
+  br ^done;
+^done:
+  ret %s;
+}
+"""
+
+# %q is read by nothing the trace does, so the box frees it and the guard
+# never mentions it — which is what makes a dependency on it convincing.
+FREE_LEAF_FIXTURE = """// SOLVED: %p0=3,%q=5
+fun @freeleaf(%p0: i32, %q: i32) : i32 {
+  let mut %r: i32 = 0;
+^entry:
+  br %p0 > 0, ^work, ^done;
+^work:
+  %r = %p0 + 1;
+  br ^done;
+^done:
+  ret %r;
+}
+"""
+
+
+def test_a_pinned_value_stands_in_for_a_literal(rytwin):
+  """A value the table pins to one number is that number on every state the
+  guard admits, so a literal can be spelled as a read of it — and the body
+  starts looking state-dependent where it is not."""
+  kept, ok = rules_kept(rytwin, LICENSED_FIXTURE, "licensed")
+  check("known-constant fires", "known-constant" in kept, str(kept))
+  check("and the twins validate", ok)
+
+
+def test_a_bounded_value_licenses_a_mask(rytwin):
+  """`%x & 255` is the identity exactly where the table says %x is in
+  [0, 255]. Nothing but the guard makes that true."""
+  kept, ok = rules_kept(rytwin, LICENSED_FIXTURE, "licensed")
+  check("range-mask fires", "range-mask" in kept, str(kept))
+  check("and the twins validate", ok)
+
+
+def test_a_true_condition_hides_an_arm(rytwin):
+  """A comparison the table settles over the whole box wraps a value in a
+  select whose other arm never runs — so the arm can hold anything, and a
+  reader has to prove the condition to know that."""
+  kept, ok = rules_kept(rytwin, LICENSED_FIXTURE, "licensed")
+  check("true-select fires", "true-select" in kept, str(kept))
+  check("and the twins validate", ok)
+
+
+def test_a_free_leaf_is_faked_into_the_body(rytwin):
+  """The guard does not mention a free leaf at all, so a body that reads one
+  reads as an under-fitted defensive check rather than a memo — while the
+  value it computes cannot depend on it."""
+  kept, ok = rules_kept(rytwin, FREE_LEAF_FIXTURE, "freeleaf")
+  check("free-leaf-mix fires", "free-leaf-mix" in kept, str(kept))
+  check("and the twins validate", ok)
+
+
+def test_a_bound_makes_a_constant_out_of_a_range(rytwin):
+  """A value the box bounds tightly enough is constant under a shift: every
+  state the guard admits sends %x >>> k to the same number, so a literal can
+  be spelled that way and is constant only *because* of the guard."""
+  kept, ok = rules_kept(rytwin, BOUND_FIXTURE, "bounded")
+  check("bound-derived fires", "bound-derived" in kept, str(kept))
+  check("and the twins validate", ok)
+
+
 def test_box_is_deterministic_for_a_seed(rytwin):
   """The search is seeded, so two runs agree — the trim that keeps guards
   from being identical is drawn from the same stream, not from chance."""
@@ -3124,6 +3228,26 @@ def main():
     (
       "rewrite: scratch declarations are shuffled",
       lambda: test_scratch_declarations_are_shuffled(rytwin),
+    ),
+    (
+      "rewrite: a pinned value stands in for a literal",
+      lambda: test_a_pinned_value_stands_in_for_a_literal(rytwin),
+    ),
+    (
+      "rewrite: a bounded value licenses a mask",
+      lambda: test_a_bounded_value_licenses_a_mask(rytwin),
+    ),
+    (
+      "rewrite: a true condition hides an arm",
+      lambda: test_a_true_condition_hides_an_arm(rytwin),
+    ),
+    (
+      "rewrite: a free leaf is faked into the body",
+      lambda: test_a_free_leaf_is_faked_into_the_body(rytwin),
+    ),
+    (
+      "rewrite: a bound makes a constant out of a range",
+      lambda: test_a_bound_makes_a_constant_out_of_a_range(rytwin),
     ),
     (
       "interval: a leaf the box freed stays unknown",

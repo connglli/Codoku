@@ -1176,17 +1176,63 @@ namespace refractir::reify {
 
       NameAllocator names(kAntiOptLocalPrefix);
       TraceBody &body = plan.body;
-      AntiOptContext ctx{fn, structs, body.checks, names, fn.lets, rng};
-      return antiOptimize(body.stmts, body.checks, ctx, [&](const std::vector<Instr> &s) {
+      auto probeOf = [&](const std::vector<Instr> &s) {
         TraceBody probe;
         probe.stmts = cloneInstrs(s);
         probe.exitLabel = body.exitLabel;
         // A check is move-only, so the body being judged gets its own copies.
         for (const auto &chk: body.checks)
           probe.checks.push_back(PathCheck{chk.afterStmt, cloneCond(chk.cond), chk.taken});
+        return probe;
+      };
+
+      // What the rules that need a licence are told. It is the same forward
+      // pass that certifies the guard, read for its annotations: a rule asking
+      // "what can %x hold here" is asking about every state the guard admits,
+      // which is exactly the question the box answers.
+      class BoxFacts : public AntiOptFacts {
+      public:
+        BoxFacts(
+            const FunDecl &fn, const StructMap &structs, const Box &box,
+            std::function<TraceBody(const std::vector<Instr> &)> probe,
+            std::function<EntryState()> state
+        ) : fn_(fn), structs_(structs), probe_(std::move(probe)), state_(std::move(state)) {
+          for (const auto &leaf: box.leaves)
+            if (leaf.cls == LeafClass::Free)
+              free_.insert(leaf.key);
+        }
+
+        void refresh(const std::vector<Instr> &stmts) override {
+          snaps_ = traceSnapshots(fn_, structs_, probe_(stmts), state_());
+        }
+
+        std::optional<ValueRange>
+        rangeBefore(std::size_t at, const std::string &local) const override {
+          if (at >= snaps_.size())
+            return std::nullopt;
+          auto it = snaps_[at].find(local);
+          if (it == snaps_[at].end() || it->second.unknown)
+            return std::nullopt;
+          return ValueRange{it->second.lo, it->second.hi};
+        }
+
+        bool isFree(const std::string &local) const override { return free_.count(local) > 0; }
+
+      private:
+        const FunDecl &fn_;
+        const StructMap &structs_;
+        std::function<TraceBody(const std::vector<Instr> &)> probe_;
+        std::function<EntryState()> state_;
+        std::unordered_set<std::string> free_;
+        std::vector<IntervalEnv> snaps_;
+      };
+
+      BoxFacts facts(fn, structs, box, probeOf, [&] { return withConstantCells(guarded); });
+      AntiOptContext ctx{fn, structs, body.checks, names, fn.lets, rng, &facts};
+      return antiOptimize(body.stmts, body.checks, ctx, [&](const std::vector<Instr> &s) {
         // Re-read the declarations every time: the engine adds cells as it
         // rewrites, and the body being judged may already use them.
-        return checkTrace(fn, structs, probe, withConstantCells(guarded)).ok;
+        return checkTrace(fn, structs, probeOf(s), withConstantCells(guarded)).ok;
       });
     }
 

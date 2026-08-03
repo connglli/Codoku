@@ -90,6 +90,7 @@ namespace refractir::reify {
         antiopt::registerPeepholeRules(v);
         antiopt::registerMbaRules(v);
         antiopt::registerStructureRules(v);
+        antiopt::registerLicensedRules(v);
         return v;
       }();
       return rules;
@@ -117,6 +118,11 @@ namespace refractir::reify {
       };
 
       std::vector<Cand> cands;
+      // Facts are about the body as it stands, and every application changes
+      // it — so they are refreshed here and again before each attempt, never
+      // carried across one.
+      if (ctx.facts)
+        ctx.facts->refresh(stmts);
       for (const auto &rule: catalog())
         for (std::size_t i = 0; i < stmts.size(); ++i)
           if (rule->matches(stmts, RulePos{i}, ctx))
@@ -129,6 +135,8 @@ namespace refractir::reify {
         const std::size_t width = c.rule->width();
         if (c.pos.stmt + width > stmts.size())
           continue; // an earlier application moved this position
+        if (ctx.facts)
+          ctx.facts->refresh(stmts);
         if (!c.rule->matches(stmts, c.pos, ctx))
           continue;
         auto replacement = c.rule->apply(stmts, c.pos, ctx);
