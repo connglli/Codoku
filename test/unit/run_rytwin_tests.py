@@ -1029,10 +1029,17 @@ def test_disguised_body_is_not_a_copy(rytwin, symiri):
     if not lines:
       return
     body = "".join(twin_block_bodies(open(p2).read()))
-    check("the body was rewritten", re.search(r"(\d+) rewrites", lines[0]), lines[0])
+    m = re.search(r"(\d+) rewrites", lines[0])
+    check("the body was rewritten", m and int(m.group(1)) > 0, lines[0])
+    # Which statements get rewritten depends on the draw, so the claim worth
+    # asserting is that the body is no longer the trace as flattened — it has
+    # more statements than the region has, or names locals only the rewriting
+    # introduces.
+    region_stmts = LOOP_FIXTURE.count(";") - LOOP_FIXTURE.count("ret")
     check(
       "and no longer reads as the region",
-      body.count("%i = %i + 1;") == 0,
+      "%__ao" in body
+      or len([ln for ln in body.splitlines() if ln.strip()]) > region_stmts,
       body[:300],
     )
     check("--validate still agrees", "validated: OK" in r.stdout, r.stdout[:200])
