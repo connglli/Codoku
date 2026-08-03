@@ -94,7 +94,11 @@ namespace refractir::reify {
   SelectionPolicy interestingPolicy(double pTwin, double temp = rytwin::hp::kInterestingTemp);
 
   // Build the twin transform. `select` scores candidate regions into twin
-  // probabilities (see SelectionPolicy).
-  std::unique_ptr<Transform> makeTwinTransform(SelectionPolicy select);
+  // probabilities (see SelectionPolicy). With `spotCheck`, every grafted twin
+  // is additionally run against its region from states sampled inside the
+  // guard's box — insurance against a mistake in the reasoning that produced
+  // the box, which one profiled input can no longer detect now that a guard
+  // admits many states.
+  std::unique_ptr<Transform> makeTwinTransform(SelectionPolicy select, bool spotCheck = false);
 
 } // namespace refractir::reify

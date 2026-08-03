@@ -558,4 +558,8 @@ namespace refractir::reify::rytwin::hp {
   inline constexpr std::size_t kTwinBisectMaxRounds = 24;
   inline constexpr int kTwinBoxTrimPct = 25;
 
+  // States sampled inside a guard's box by --validate. Corners come first
+  // (a bound is where a box is most likely to be wrong), then interior points.
+  inline constexpr std::size_t kTwinSpotChecks = 32;
+
 } // namespace refractir::reify::rytwin::hp

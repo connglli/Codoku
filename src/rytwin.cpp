@@ -332,7 +332,7 @@ int main(int argc, char **argv) {
     ctx.descriptors[entry] = *desc;
   ctx.profiles[profile->func] = *profile;
   TransformPipeline pipe;
-  pipe.add(makeTwinTransform(std::move(selectPolicy)));
+  pipe.add(makeTwinTransform(std::move(selectPolicy), result.count("validate") > 0));
   TransformReport rep = pipe.run(prog, ctx);
   if (!rep.ok) {
     std::cerr << "rytwin: pass failed: " << rep.message << "\n";
@@ -386,6 +386,8 @@ int main(int argc, char **argv) {
         ++fired;
     ok = ok && fired > 0;
     std::cout << "rytwin: validated: " << (ok ? "OK" : "FAIL") << " (" << fired << " twin exec(s))";
+    if (!rep.message.empty())
+      std::cout << "; " << rep.message;
     if (!ok)
       std::cout << " (p1=" << (r1 ? *r1 : "<trap>") << " p2=" << (r2 ? *r2 : "<trap>") << ")";
     std::cout << "\n";

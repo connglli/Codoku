@@ -21,6 +21,7 @@
 #include "reify/state_profile.hpp"
 #include "reify/twin_interval.hpp"
 #include "reify/twin_mini.hpp"
+#include "reify/twin_probe.hpp"
 #include "reify/twin_trace.hpp"
 #include "reify/type_gen.hpp"
 
@@ -367,13 +368,15 @@ namespace refractir::reify {
     };
 
     struct TwinPlan {
-      std::vector<GuardRoot> guardRoots; // the entire guardable state, in
-                                         // profile (name-sorted) order
-      std::vector<LeafRef> defs;         // per-leaf constant reconstruction of s'
-      TraceBody body;                    // the region's flattened executed trace
-      EntryState entry;                  // the profiled state, as the box's floor
-      Box box;                           // how far the guard may open, per leaf
-      std::string exitLabel;             // block the twin jumps to (region exit)
+      std::vector<GuardRoot> guardRoots;     // the entire guardable state, in
+                                             // profile (name-sorted) order
+      std::vector<LeafRef> defs;             // per-leaf constant reconstruction of s'
+      TraceBody body;                        // the region's flattened executed trace
+      EntryState entry;                      // the profiled state, as the box's floor
+      Box box;                               // how far the guard may open, per leaf
+      std::vector<std::string> regionLabels; // the region's blocks, entry first
+      std::vector<MiniRoot> roots;           // the profiled state, ready to re-run
+      std::string exitLabel;                 // block the twin jumps to (region exit)
     };
 
     // Locate a root's declaration in the entry function.
@@ -912,6 +915,103 @@ namespace refractir::reify {
       return out;
     }
 
+    // The guard's own roots carrying the profiled state — what it takes to
+    // re-run the region, or the twin body, from a state near it.
+    std::optional<std::vector<MiniRoot>> probeRoots(const TwinPlan &plan, const StateMap &s) {
+      std::vector<MiniRoot> roots;
+      roots.reserve(plan.guardRoots.size());
+      for (const auto &r: plan.guardRoots) {
+        auto si = s.find(r.name);
+        if (si == s.end())
+          return std::nullopt;
+        MiniRoot g{r.name, r.type, r.isParam, *si->second, *si->second, {}};
+        for (const auto &leaf: r.leaves)
+          if (leaf.isPtr())
+            g.ptrFixes.push_back(
+                MiniPtrFix{leaf.path, leaf.ptrType, leaf.ptrTarget, leaf.ptrTarget}
+            );
+        roots.push_back(std::move(g));
+      }
+      return roots;
+    }
+
+    template<typename V>
+    V *leafAtImpl(V &v, const std::vector<Access> &path, std::size_t i) {
+      if (i == path.size())
+        return &v;
+      if (auto ai = std::get_if<AccessIndex>(&path[i])) {
+        auto idx = std::get<IntLit>(ai->index).value;
+        if (idx < 0 || (std::size_t) idx >= v.elems.size())
+          return nullptr;
+        return leafAtImpl(v.elems[(std::size_t) idx], path, i + 1);
+      }
+      const std::string &want = std::get<AccessField>(path[i]).field;
+      for (auto &[nm, sub]: v.fields)
+        if (nm == want)
+          return leafAtImpl(sub, path, i + 1);
+      return nullptr;
+    }
+
+    // Sample states the guard admits: every corner of every ranged leaf, then
+    // interior points. Corners first, because a bound is where a box is most
+    // likely to be wrong.
+    std::vector<std::vector<MiniRoot>>
+    sampleBox(const TwinPlan &plan, std::mt19937 &rng, std::size_t want) {
+      std::vector<std::vector<MiniRoot>> out;
+
+      struct Slot {
+        std::size_t root;
+        std::vector<Access> path;
+        std::int64_t lo, hi;
+      };
+
+      std::vector<Slot> slots;
+      for (std::size_t ri = 0; ri < plan.roots.size(); ++ri) {
+        std::vector<StateLeaf> leaves;
+        bool hasPtr = false, hasUndef = false;
+        enumStateLeaves(plan.roots[ri].init, leaves, hasPtr, hasUndef);
+        for (auto &lf: leaves) {
+          if (lf.val.kind != StateValue::Kind::Int)
+            continue;
+          const std::string key = leafKey(plan.roots[ri].name, lf.path);
+          for (const auto &bl: plan.box.leaves) {
+            if (bl.key != key || bl.cls == LeafClass::Pinned)
+              continue;
+            const bool free = bl.cls == LeafClass::Free;
+            std::int64_t lo = free ? lf.val.intVal : bl.range.lo;
+            std::int64_t hi = free ? lf.val.intVal : bl.range.hi;
+            if (free && lf.val.bits && lf.val.bits <= 64) {
+              lo = lf.val.bits == 64 ? INT64_MIN : -(std::int64_t{1} << (lf.val.bits - 1));
+              hi = lf.val.bits == 64 ? INT64_MAX : (std::int64_t{1} << (lf.val.bits - 1)) - 1;
+            }
+            slots.push_back({ri, lf.path, lo, hi});
+          }
+        }
+      }
+      if (slots.empty())
+        return out;
+      auto make = [&](const std::vector<std::int64_t> &vals) {
+        std::vector<MiniRoot> st = plan.roots;
+        for (std::size_t i = 0; i < slots.size(); ++i)
+          if (StateValue *cell = leafAtImpl(st[slots[i].root].init, slots[i].path, 0))
+            cell->intVal = vals[i];
+        out.push_back(std::move(st));
+      };
+      std::vector<std::int64_t> vals;
+      for (const auto &sl: slots)
+        vals.push_back(sl.lo);
+      make(vals);
+      for (std::size_t i = 0; i < slots.size(); ++i)
+        vals[i] = slots[i].hi;
+      make(vals);
+      while (out.size() < want) {
+        for (std::size_t i = 0; i < slots.size(); ++i)
+          vals[i] = std::uniform_int_distribution<std::int64_t>(slots[i].lo, slots[i].hi)(rng);
+        make(vals);
+      }
+      return out;
+    }
+
     std::size_t blockIndex(const CFG &cfg, const std::string &lbl) {
       auto it = cfg.indexOf.find(lbl);
       return it == cfg.indexOf.end() ? DomTree::kNone : it->second;
@@ -968,6 +1068,9 @@ namespace refractir::reify {
           why = "empty window";
           return false;
         }
+        plan.regionLabels.clear();
+        for (const Block *bp: blocks)
+          plan.regionLabels.push_back(bp->label.name);
         plan.exitLabel = pts[end]->block;
         if (!planRegion(
                 fn, blocks, /*scanTerms=*/true, pts[t]->vars, pts[end]->vars,
@@ -989,6 +1092,8 @@ namespace refractir::reify {
         note = iv.ok ? "ok" : iv.reason;
         plan.entry = std::move(es);
         plan.body = std::move(*body);
+        if (auto rs = probeRoots(plan, toStateMap(pts[t]->vars)))
+          plan.roots = std::move(*rs);
         return true;
       };
 
@@ -1059,7 +1164,8 @@ namespace refractir::reify {
 
     class TwinTransform : public Transform {
     public:
-      explicit TwinTransform(SelectionPolicy select) : select_(std::move(select)) {}
+      TwinTransform(SelectionPolicy select, bool spotCheck) :
+          select_(std::move(select)), spotCheck_(spotCheck) {}
 
       std::string_view name() const override { return "TwinTransform"; }
 
@@ -1067,6 +1173,7 @@ namespace refractir::reify {
 
       TransformReport apply(Program &prog, TransformContext &ctx) override {
         TransformReport rep;
+        std::size_t spotChecked = 0;
         std::uniform_real_distribution<double> coin(0.0, 1.0);
         auto vlog = [&](const std::string &m) {
           if (ctx.verbose)
@@ -1237,9 +1344,28 @@ namespace refractir::reify {
             FunDecl *fn = findFn(fnName);
             if (!fn)
               continue;
-            if (auto it = decidedByFn.find(fnName); it != decidedByFn.end())
-              graftFunction(fn, fnName, it->second);
+            auto it = decidedByFn.find(fnName);
+            if (it == decidedByFn.end())
+              continue;
+            graftFunction(fn, fnName, it->second);
+            if (!spotCheck_)
+              continue;
+            // The arms exist only now, so the check runs after the graft.
+            for (const auto &[label, plan]: it->second) {
+              auto agreed = spotCheck(prog, fnName, label, plan, ctx.rng);
+              if (!agreed) {
+                rep.ok = false;
+                rep.message = "twin disagreed with its region on a state its guard admits (" +
+                              fnName + " " + label + ")";
+                return rep;
+              }
+              spotChecked += *agreed;
+            }
           }
+
+          if (spotCheck_ && rep.sites)
+            rep.message =
+                "spot-checked " + std::to_string(spotChecked) + " state(s) inside the guard boxes";
 
           for (auto &[fnName, guards]: pendingGuards) {
             for (std::size_t i = 0; i < prog.funs.size(); ++i)
@@ -1295,7 +1421,46 @@ namespace refractir::reify {
         out.push_back(std::move(orig));
       }
 
+      // Run the region and the twin body from states the guard admits, and
+      // compare. The box is a proof, so this proves nothing further — it is
+      // there to catch a mistake in the proof, which is exactly the kind of
+      // bug a single profiled input cannot see once a guard admits many
+      // states. Returns how many states agreed, or nullopt on a disagreement.
+      std::optional<std::size_t> spotCheck(
+          const Program &prog, const std::string &fnName, const std::string &label,
+          const TwinPlan &plan, std::mt19937 &rng
+      ) {
+        auto states = sampleBox(plan, rng, rytwin::hp::kTwinSpotChecks);
+        if (states.empty())
+          return std::size_t{0};
+        // Post-graft the region begins at the orig arm; the twin body is one
+        // block of its own.
+        std::vector<std::string> origLabels{label + "__orig"};
+        for (const auto &l: plan.regionLabels)
+          if (l != label)
+            origLabels.push_back(l);
+        RegionProbe orig(prog, fnName, origLabels, plan.roots);
+        RegionProbe twin(prog, fnName, {label + "__twin"}, plan.roots);
+        if (!orig.valid() || !twin.valid())
+          return std::size_t{0};
+        std::size_t agreed = 0;
+        for (const auto &st: states) {
+          ProbeResult a = orig.run(st), b = twin.run(st);
+          if (!a.ok || !b.ok || a.exitLabel != b.exitLabel)
+            return std::nullopt;
+          if (a.effect.size() != b.effect.size())
+            return std::nullopt;
+          for (std::size_t i = 0; i < a.effect.size(); ++i)
+            if (a.effect[i].first != b.effect[i].first ||
+                !bitExactEq(a.effect[i].second, b.effect[i].second))
+              return std::nullopt;
+          ++agreed;
+        }
+        return agreed;
+      }
+
       SelectionPolicy select_;
+      bool spotCheck_ = false;
     };
 
   } // namespace
@@ -1332,8 +1497,8 @@ namespace refractir::reify {
     };
   }
 
-  std::unique_ptr<Transform> makeTwinTransform(SelectionPolicy select) {
-    return std::make_unique<TwinTransform>(std::move(select));
+  std::unique_ptr<Transform> makeTwinTransform(SelectionPolicy select, bool spotCheck) {
+    return std::make_unique<TwinTransform>(std::move(select), spotCheck);
   }
 
 } // namespace refractir::reify

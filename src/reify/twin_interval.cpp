@@ -272,11 +272,21 @@ namespace refractir::reify {
         LValue cur = **base;
         for (const auto &t: e.rest) {
           auto off = evalAtom(t.atom, 0);
-          if (!off || !off->isConst())
+          if (!off)
             return std::nullopt;
+          // Pointer arithmetic that leaves the object is UB (§7.5), so an
+          // offset the domain cannot bound is a refusal, not an unknown
+          // pointer: the value may be fine and the *arithmetic* still not be.
+          if (!off->isConst()) {
+            reject("pointer arithmetic by an unknown amount", off->deps);
+            return std::nullopt;
+          }
           auto moved = shift(cur, t.op == AddOp::Plus ? off->lo : -off->lo);
-          if (!moved)
+          if (!moved || !indicesInBounds(*moved)) {
+            if (reason_.empty())
+              reject("pointer arithmetic may leave its object", off->deps);
             return std::nullopt;
+          }
           cur = *moved;
         }
         return std::optional<LValue>(cur);
@@ -544,7 +554,49 @@ namespace refractir::reify {
       // Evaluate `e` in the current environment, checking the UB conditions of
       // every operation it performs. Returns nullopt when an operation could
       // not be proven safe (`reason_` says which).
+      // The width an expression computes in, when the caller does not already
+      // know it. A condition or a require has no destination to take it from,
+      // and without a width the overflow check below is skipped — which is how
+      // `%a + %b > 0` came to be treated as safe for any %a and %b.
+      std::uint32_t inferWidth(const Expr &e) const {
+        auto ofAtom = [&](const Atom &a) -> std::uint32_t {
+          return std::visit(
+              [&](const auto &x) -> std::uint32_t {
+                using T = std::decay_t<decltype(x)>;
+                if constexpr (std::is_same_v<T, RValueAtom>)
+                  return widthOf(x.rval);
+                else if constexpr (std::is_same_v<T, UnaryAtom>)
+                  return widthOf(x.rval);
+                else if constexpr (std::is_same_v<T, OpAtom>)
+                  return widthOf(x.rval);
+                else if constexpr (std::is_same_v<T, CoefAtom>) {
+                  if (auto id = std::get_if<LocalOrSymId>(&x.coef))
+                    if (auto loc = std::get_if<LocalId>(id)) {
+                      LValue lv;
+                      lv.base = *loc;
+                      return widthOf(lv);
+                    }
+                  return 0;
+                } else if constexpr (std::is_same_v<T, CastAtom>) {
+                  auto b = TypeUtils::getIntBitWidth(x.dstType);
+                  return b ? *b : 0;
+                } else
+                  return 0;
+              },
+              a.v
+          );
+        };
+        if (std::uint32_t w = ofAtom(e.first))
+          return w;
+        for (const auto &t: e.rest)
+          if (std::uint32_t w = ofAtom(t.atom))
+            return w;
+        return 0;
+      }
+
       std::optional<Interval> eval(const Expr &e, std::uint32_t bits) {
+        if (bits == 0)
+          bits = inferWidth(e);
         auto acc = evalAtom(e.first, bits);
         if (!acc)
           return std::nullopt;
@@ -625,8 +677,35 @@ namespace refractir::reify {
                 if (!cell)
                   return reason_.empty() ? std::optional<Interval>(unknownOf()) : std::nullopt;
                 return read(*cell);
+              } else if constexpr (std::is_same_v<T, AddrAtom>) {
+                // The value is a pointer, but the indices on the way to it are
+                // evaluated all the same, and still have to be in bounds.
+                if (!indicesInBounds(x.lv))
+                  return std::nullopt;
+                return unknownOf();
+              } else if constexpr (std::is_same_v<T, PtrIndexAtom>) {
+                if (!readChecked(x.rval))
+                  return std::nullopt;
+                if (auto id = std::get_if<LocalOrSymId>(&x.index))
+                  if (auto loc = std::get_if<LocalId>(id)) {
+                    LValue lv;
+                    lv.base = *loc;
+                    if (!readChecked(lv))
+                      return std::nullopt;
+                  }
+                return unknownOf();
+              } else if constexpr (std::is_same_v<T, PtrFieldAtom>) {
+                if (!readChecked(x.rval))
+                  return std::nullopt;
+                return unknownOf();
+              } else if constexpr (std::is_same_v<T, CallAtom>) {
+                // An intrinsic's result is not tracked, but its arguments are
+                // ordinary expressions and can trap on the way in.
+                for (const auto &arg: x.args)
+                  if (arg && !eval(*arg, 0))
+                    return std::nullopt;
+                return unknownOf();
               } else
-                // addr / ptrindex / ptrfield / call: not a number.
                 return unknownOf();
             },
             a.v
@@ -660,7 +739,9 @@ namespace refractir::reify {
           if (floatWidthOf(*lv)) {
             auto f = readFloat(*lv);
             if (!f)
-              return unknownOf();
+              // An untracked float could truncate to anything, including
+              // outside the destination — which is UB, not an unknown value.
+              return reject("a float-to-integer cast of an untracked value"), std::nullopt;
             const double t = std::trunc(*f);
             I64 lo = 0, hi = 0;
             if (!rangeOf(*bits, lo, hi) || t < (double) lo || t > (double) hi)
@@ -974,7 +1055,13 @@ namespace refractir::reify {
                 if (!indicesInBounds(x.lhs))
                   return false;
                 if (isPointer(x.lhs)) {
-                  setPtr(x.lhs, evalPtr(x.rhs));
+                  const std::string before = reason_;
+                  auto target = evalPtr(x.rhs);
+                  // An unknown target is fine — everything through it widens.
+                  // A refusal is not: the arithmetic itself may be undefined.
+                  if (!target && reason_ != before)
+                    return false;
+                  setPtr(x.lhs, target);
                   return true;
                 }
                 if (const std::uint32_t fw = floatWidthOf(x.lhs))

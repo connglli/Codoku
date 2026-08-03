@@ -12,6 +12,13 @@ namespace refractir::reify {
         total.message = std::string(t->name()) + ": " + r.message;
         return total;
       }
+      // A transform may summarize what it did, not only why it failed, so a
+      // successful note is carried out rather than dropped.
+      if (!r.message.empty()) {
+        if (!total.message.empty())
+          total.message += "; ";
+        total.message += r.message;
+      }
     }
     return total;
   }

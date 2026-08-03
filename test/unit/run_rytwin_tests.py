@@ -978,6 +978,22 @@ def test_widened_guard_fires_on_another_input(rytwin, symiri):
     check("and agrees with the original there", r1[1:] == r2[1:], f"{r1} vs {r2}")
 
 
+def test_validate_spot_checks_the_box(rytwin):
+  """--validate no longer covers a guard: it runs the profiled input, and the
+  guard now admits many states. So it also samples states inside the box and
+  runs the region against the twin body on each, reporting how many."""
+  with tempfile.TemporaryDirectory() as d:
+    r, lines, _, _ = graft_log(rytwin, d, LOOP_FIXTURE, "loopreg", ["--validate"])
+    check("loop fixture twinned", r.returncode == 0 and lines, r.stderr[:200])
+    if not lines:
+      return
+    out = r.stdout + r.stderr
+    m = re.search(r"spot-checked (\d+) state", out)
+    check("--validate reports spot checks", m is not None, out[:300])
+    if m:
+      check("it checked more than the profiled state", int(m.group(1)) > 1, m.group(0))
+
+
 def test_box_is_deterministic_for_a_seed(rytwin):
   """The search is seeded, so two runs agree — the trim that keeps guards
   from being identical is drawn from the same stream, not from chance."""
@@ -2336,6 +2352,10 @@ def main():
     (
       "guard: a widened guard fires on an unprofiled input",
       lambda: test_widened_guard_fires_on_another_input(rytwin, symiri),
+    ),
+    (
+      "validate: states inside the box are spot-checked",
+      lambda: test_validate_spot_checks_the_box(rytwin),
     ),
     (
       "box: the search is seeded, not chancy",
