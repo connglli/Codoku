@@ -52,6 +52,10 @@ namespace refractir::reify {
     std::size_t afterStmt = 0;
     Cond cond;
     bool taken = false; // true = the `then` label ran
+
+    // The condition is read in the state reached after `afterStmt`
+    // statements, which is the snapshot taken before that statement runs.
+    std::size_t checkEnvIndex() const { return afterStmt; }
   };
 
   struct TraceBody {

@@ -994,6 +994,28 @@ def test_validate_spot_checks_the_box(rytwin):
       check("it checked more than the profiled state", int(m.group(1)) > 1, m.group(0))
 
 
+def test_box_computes_ceilings_before_searching(rytwin):
+  """Pushing each check's requirement backward settles the leaves a branch
+  holds still — a loop's trip count and induction variable — before any trial
+  runs. They then take no part in the lockstep rounds, so a refusal that is
+  really about them no longer costs the data leaf its width."""
+  with tempfile.TemporaryDirectory() as d:
+    r, lines, _, _ = graft_log(rytwin, d, LOOP_FIXTURE, "loopreg", [])
+    check("loop fixture twinned", r.returncode == 0 and lines, r.stderr[:200])
+    if not lines:
+      return
+    counts = box_counts(lines[0])
+    check("the loop's shape is still pinned", counts == (0, 1, 2), str(counts))
+    widest = box_widest(lines[0])
+    # Without ceilings the control leaves joined every round and their refusals
+    # froze the accumulator at half this width.
+    check(
+      "the accumulator is no longer dragged down with them",
+      widest and widest[1] > 10000000,
+      str(widest),
+    )
+
+
 def test_box_is_deterministic_for_a_seed(rytwin):
   """The search is seeded, so two runs agree — the trim that keeps guards
   from being identical is drawn from the same stream, not from chance."""
@@ -2356,6 +2378,10 @@ def main():
     (
       "validate: states inside the box are spot-checked",
       lambda: test_validate_spot_checks_the_box(rytwin),
+    ),
+    (
+      "box: ceilings bound the search before it starts",
+      lambda: test_box_computes_ceilings_before_searching(rytwin),
     ),
     (
       "box: the search is seeded, not chancy",

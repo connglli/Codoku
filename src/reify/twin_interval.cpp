@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "analysis/type_utils.hpp"
+#include "ast/clone.hpp"
 #include "reify/hyperparameters.hpp"
 #include "reify/twin_mini.hpp"
 
@@ -84,8 +85,11 @@ namespace refractir::reify {
 
     class Checker {
     public:
-      Checker(const FunDecl &fn, const StructMap &structs, const EntryState &entry) :
-          env_(entry.ints), floats_(entry.floats), ptrs_(entry.ptrs), structs_(structs) {
+      Checker(
+          const FunDecl &fn, const StructMap &structs, const EntryState &entry, bool record = false
+      ) :
+          env_(entry.ints), record_(record), floats_(entry.floats), ptrs_(entry.ptrs),
+          structs_(structs) {
         for (const auto &p: fn.params)
           types_[p.name.name] = p.type;
         for (const auto &l: fn.lets)
@@ -113,9 +117,16 @@ namespace refractir::reify {
         return out;
       }
 
+      // What every leaf held before each statement. Only recorded on request:
+      // the check itself runs hundreds of times while a box is searched, and
+      // only the ceiling pass reads this back.
+      const std::vector<IntervalEnv> &snapshots() const { return snaps_; }
+
       IntervalVerdict run(const TraceBody &body) {
         std::size_t next = 0; // next path check to consult
         for (std::size_t i = 0; i < body.stmts.size(); ++i) {
+          if (record_)
+            snaps_.push_back(env_);
           // Conditions recorded *before* this statement see the state the
           // original saw when it branched.
           while (next < body.checks.size() && body.checks[next].afterStmt <= i) {
@@ -176,8 +187,16 @@ namespace refractir::reify {
 
       // --- environment ------------------------------------------------------
 
-      Interval read(const LValue &lv) const {
-        auto key = leafKey(lv);
+      // Indices are resolved through the environment first, so `%a[%i]` with
+      // `%i` known names the same cell as `%a[2]` does. Without that, every
+      // array access through a variable index was a dead end — and since one
+      // unknown poisons the arithmetic that reads it, a single such access
+      // made a whole region unprovable.
+      Interval read(const LValue &lv) {
+        auto r = resolve(lv);
+        if (!r)
+          return unknownOf();
+        auto key = leafKey(*r);
         if (!key)
           return unknownOf();
         auto it = env_.find(*key);
@@ -185,7 +204,10 @@ namespace refractir::reify {
       }
 
       void write(const LValue &lv, const Interval &v) {
-        if (auto key = leafKey(lv))
+        auto r = resolve(lv);
+        if (!r)
+          return forget(lv.base.name); // the destination could be any cell
+        if (auto key = leafKey(*r))
           env_[*key] = v;
       }
 
@@ -412,7 +434,10 @@ namespace refractir::reify {
       }
 
       std::optional<double> readFloat(const LValue &lv) {
-        auto key = leafKey(lv);
+        auto r = resolve(lv);
+        if (!r)
+          return std::nullopt;
+        auto key = leafKey(*r);
         if (!key)
           return std::nullopt;
         auto it = floats_.find(*key);
@@ -800,11 +825,20 @@ namespace refractir::reify {
               return reject("left shift of a possibly negative value", deps), std::nullopt;
             if (!inShiftRange(*r, w))
               return std::nullopt;
-            // x << n is x * 2^n; the largest operands decide overflow.
-            I64 factor = 0;
-            if (r->hi >= 63 || mulOv(I64(1) << r->hi, 1, factor))
+            if (r->hi >= 63)
               return reject("shift amount too large to bound", deps), std::nullopt;
-            return mulI(*l, constant(I64(1) << r->hi), w);
+            // x << n is x * 2^n, and the shift amount may itself be a range:
+            // the *smallest* shift of the smallest operand is the low end and
+            // the largest of the largest is the high end. Using one shift for
+            // both would claim a narrower result than the trace can produce,
+            // which is how a branch on a shifted value came to look settled.
+            I64 lo = 0, hi = 0;
+            if (mulOv(l->lo, I64(1) << r->lo, lo) || mulOv(l->hi, I64(1) << r->hi, hi))
+              return reject("left shift may overflow", deps), std::nullopt;
+            Interval out{lo, hi, false, 0, deps};
+            if (w && !fits(out, w))
+              return reject("left shift may overflow", deps), std::nullopt;
+            return out;
           }
           case AtomOpKind::Shr:
             if (!inShiftRange(*r, w))
@@ -902,13 +936,51 @@ namespace refractir::reify {
         return l && r;
       }
 
+      // The float width an expression computes in. Single precision rounds
+      // after every operation, so evaluating an f32 comparison as if it were
+      // f64 can decide it the other way.
+      std::uint32_t inferFloatWidth(const Expr &e) const {
+        auto ofAtom = [&](const Atom &a) -> std::uint32_t {
+          return std::visit(
+              [&](const auto &x) -> std::uint32_t {
+                using T = std::decay_t<decltype(x)>;
+                if constexpr (std::is_same_v<T, RValueAtom> || std::is_same_v<T, UnaryAtom>)
+                  return floatWidthOf(x.rval);
+                else if constexpr (std::is_same_v<T, OpAtom>)
+                  return floatWidthOf(x.rval);
+                else if constexpr (std::is_same_v<T, CoefAtom>) {
+                  if (auto id = std::get_if<LocalOrSymId>(&x.coef))
+                    if (auto loc = std::get_if<LocalId>(id)) {
+                      LValue lv;
+                      lv.base = *loc;
+                      return floatWidthOf(lv);
+                    }
+                  return 0;
+                } else if constexpr (std::is_same_v<T, CastAtom>) {
+                  auto b = TypeUtils::getFloatBitWidth(x.dstType);
+                  return b ? *b : 0;
+                } else
+                  return 0;
+              },
+              a.v
+          );
+        };
+        if (std::uint32_t w = ofAtom(e.first))
+          return w;
+        for (const auto &t: e.rest)
+          if (std::uint32_t w = ofAtom(t.atom))
+            return w;
+        return 64;
+      }
+
       // A comparison of two known floats is decided exactly.
       std::optional<bool> floatHolds(const Cond &c) {
         bool bad = false;
-        auto l = evalFloatExpr(c.lhs, 64, bad);
+        const std::uint32_t fw = inferFloatWidth(c.lhs);
+        auto l = evalFloatExpr(c.lhs, fw, bad);
         if (bad)
           return std::nullopt;
-        auto r = evalFloatExpr(c.rhs, 64, bad);
+        auto r = evalFloatExpr(c.rhs, fw, bad);
         if (bad || !l || !r)
           return std::nullopt;
         switch (c.op) {
@@ -1130,9 +1202,7 @@ namespace refractir::reify {
       }
 
       IntervalEnv env_;
-      std::unordered_map<std::string, std::uint64_t> bitOf_;
-      std::vector<std::string> leafOfBit_;
-      std::uint64_t blame_ = 0;
+      bool record_ = false;
       // Float leaf -> its exact value. Absent means unknown; there is no
       // "range of floats" here by design (see the header).
       FloatEnv floats_;
@@ -1140,6 +1210,10 @@ namespace refractir::reify {
       // pointer). A pointer absent from the map points somewhere unknown.
       PtrEnv ptrs_;
       const StructMap &structs_;
+      std::vector<IntervalEnv> snaps_;
+      std::unordered_map<std::string, std::uint64_t> bitOf_;
+      std::vector<std::string> leafOfBit_;
+      std::uint64_t blame_ = 0;
       std::unordered_map<std::string, TypePtr> types_;
       std::string reason_;
     };
@@ -1150,6 +1224,228 @@ namespace refractir::reify {
       const FunDecl &fn, const StructMap &structs, const TraceBody &body, const EntryState &entry
   ) {
     return Checker(fn, structs, entry).run(body);
+  }
+
+  // --- backward narrowing ---------------------------------------------------
+
+  namespace {
+
+    // A requirement on a value: where it must lie for the trace to run as the
+    // profile ran it. Requirements only tighten as they travel backward.
+    struct Need {
+      I64 lo = kI64Min;
+      I64 hi = kI64Max;
+
+      bool none() const { return lo == kI64Min && hi == kI64Max; }
+    };
+
+    Need meet(Need a, const Need &b) {
+      a.lo = std::max(a.lo, b.lo);
+      a.hi = std::min(a.hi, b.hi);
+      return a;
+    }
+
+    // The local an expression is a bare read of, if it is one. Narrowing only
+    // follows single-operand shapes — a bare read, or one shifted by a known
+    // amount. Anything else stops the requirement there, which costs a ceiling
+    // its tightness and never its soundness.
+    const std::string *bareLocal(const Expr &e) {
+      if (!e.rest.empty())
+        return nullptr;
+      if (auto rv = std::get_if<RValueAtom>(&e.first.v))
+        return rv->rval.accesses.empty() ? &rv->rval.base.name : nullptr;
+      if (auto co = std::get_if<CoefAtom>(&e.first.v))
+        if (auto id = std::get_if<LocalOrSymId>(&co->coef))
+          if (auto loc = std::get_if<LocalId>(id))
+            return &loc->name;
+      return nullptr;
+    }
+
+    // The declared type of a local, for the width its arithmetic must fit.
+    TypePtr localTypeOf(const FunDecl &fn, const std::string &nm) {
+      for (const auto &p: fn.params)
+        if (p.name.name == nm)
+          return p.type;
+      for (const auto &l: fn.lets)
+        if (l.name.name == nm)
+          return l.type;
+      return nullptr;
+    }
+
+    // The value of a literal or a bare local at one point of the trace.
+    Interval valueAt(const Atom &a, const IntervalEnv &env) {
+      if (auto co = std::get_if<CoefAtom>(&a.v)) {
+        if (auto il = std::get_if<IntLit>(&co->coef))
+          return Interval{il->value, il->value, false, 0, 0};
+        if (auto id = std::get_if<LocalOrSymId>(&co->coef))
+          if (auto loc = std::get_if<LocalId>(id))
+            if (auto it = env.find(loc->name); it != env.end())
+              return it->second;
+      }
+      if (auto rv = std::get_if<RValueAtom>(&a.v))
+        if (rv->rval.accesses.empty())
+          if (auto it = env.find(rv->rval.base.name); it != env.end())
+            return it->second;
+      return unknownOf();
+    }
+
+  } // namespace
+
+  std::unordered_map<std::string, Interval> ceilings(
+      const FunDecl &fn, const StructMap &structs, const TraceBody &body, const EntryState &entry
+  ) {
+    // Forward first: a requirement pushed back through `%d = %x + %k` needs to
+    // know what %k held there, which is what the forward pass recorded.
+    Checker fwd(fn, structs, entry, /*record=*/true);
+    fwd.run(body);
+    const std::vector<IntervalEnv> &snaps = fwd.snapshots();
+
+    std::unordered_map<std::string, Need> need;
+    auto tighten = [&](const std::string &nm, const Need &n) {
+      need[nm] = meet(need.count(nm) ? need[nm] : Need{}, n);
+    };
+
+    std::size_t check = body.checks.size();
+    for (std::size_t i = body.stmts.size(); i-- > 0;) {
+      const IntervalEnv &env = i < snaps.size() ? snaps[i] : entry.ints;
+      // Conditions recorded after this statement are met on the way back.
+      while (check > 0 && body.checks[check - 1].afterStmt > i) {
+        --check;
+        const PathCheck &c = body.checks[check];
+        const IntervalEnv &cenv =
+            c.checkEnvIndex() < snaps.size() ? snaps[c.checkEnvIndex()] : entry.ints;
+        // A comparison constrains both of its sides, so each is narrowed
+        // against what the other can be. Mirroring the operator is what makes
+        // the second one work: `a < b` bounds a from above and b from below.
+        const bool flip[2] = {false, true};
+        for (bool mirror: flip) {
+          const Expr &self = mirror ? c.cond.rhs : c.cond.lhs;
+          const Expr &peer = mirror ? c.cond.lhs : c.cond.rhs;
+          const std::string *nm = bareLocal(self);
+          if (!nm || !peer.rest.empty())
+            continue;
+          const Interval other = valueAt(peer.first, cenv);
+          if (other.unknown)
+            continue;
+          RelOp op = c.cond.op;
+          if (mirror)
+            switch (op) {
+              case RelOp::LT:
+                op = RelOp::GT;
+                break;
+              case RelOp::LE:
+                op = RelOp::GE;
+                break;
+              case RelOp::GT:
+                op = RelOp::LT;
+                break;
+              case RelOp::GE:
+                op = RelOp::LE;
+                break;
+              default:
+                break;
+            }
+          Need n;
+          switch (op) {
+            case RelOp::LT:
+              if (c.taken)
+                n.hi = other.lo - 1;
+              else
+                n.lo = other.hi;
+              break;
+            case RelOp::LE:
+              if (c.taken)
+                n.hi = other.lo;
+              else
+                n.lo = other.hi + 1;
+              break;
+            case RelOp::GT:
+              if (c.taken)
+                n.lo = other.hi + 1;
+              else
+                n.hi = other.lo;
+              break;
+            case RelOp::GE:
+              if (c.taken)
+                n.lo = other.hi;
+              else
+                n.hi = other.lo - 1;
+              break;
+            case RelOp::EQ:
+              if (c.taken && other.isConst())
+                n.lo = n.hi = other.lo;
+              break;
+            case RelOp::NE:
+              if (!c.taken && other.isConst())
+                n.lo = n.hi = other.lo;
+              break;
+          }
+          if (!n.none())
+            tighten(*nm, n);
+        }
+      }
+
+      auto *ai = std::get_if<AssignInstr>(&body.stmts[i]);
+      if (!ai || !ai->lhs.accesses.empty())
+        continue;
+      const std::string &dst = ai->lhs.base.name;
+      Need have = need.count(dst) ? need[dst] : Need{};
+      // Not every requirement comes from downstream: an assignment that can
+      // overflow requires its own result to fit, which bounds its operands
+      // just as a branch does.
+      if (ai->rhs.rest.size() == 1) {
+        auto bits = TypeUtils::getIntBitWidth(localTypeOf(fn, dst));
+        if (bits && *bits < 64) {
+          Need w;
+          w.lo = -(I64(1) << (*bits - 1));
+          w.hi = (I64(1) << (*bits - 1)) - 1;
+          have = meet(have, w);
+        }
+      }
+      // The destination is rewritten here, so a requirement on it reaches the
+      // operands and stops.
+      need.erase(dst);
+      if (have.none())
+        continue;
+      if (const std::string *src = bareLocal(ai->rhs)) {
+        tighten(*src, have);
+        continue;
+      }
+      if (ai->rhs.rest.size() != 1)
+        continue;
+      const Interval k = valueAt(ai->rhs.rest[0].atom, env);
+      Expr head{cloneAtom(ai->rhs.first), {}, {}};
+      const std::string *src = bareLocal(head);
+      if (!src || !k.isConst())
+        continue;
+      // `%d = %x + k` requires of %x exactly what it required of %d, shifted.
+      const I64 d = ai->rhs.rest[0].op == AddOp::Plus ? k.lo : -k.lo;
+      Need n;
+      if (have.lo == kI64Min || __builtin_sub_overflow(have.lo, d, &n.lo))
+        n.lo = kI64Min;
+      if (have.hi == kI64Max || __builtin_sub_overflow(have.hi, d, &n.hi))
+        n.hi = kI64Max;
+      tighten(*src, n);
+    }
+
+    std::unordered_map<std::string, Interval> out;
+    for (const auto &[key, iv]: entry.ints) {
+      I64 lo = kI64Min, hi = kI64Max;
+      if (iv.bits && iv.bits < 64) {
+        lo = -(I64(1) << (iv.bits - 1));
+        hi = (I64(1) << (iv.bits - 1)) - 1;
+      }
+      if (auto it = need.find(key); it != need.end()) {
+        lo = std::max(lo, it->second.lo);
+        hi = std::min(hi, it->second.hi);
+      }
+      Interval c = iv;
+      c.lo = lo;
+      c.hi = std::max(lo, hi);
+      c.unknown = false;
+      out[key] = c;
+    }
+    return out;
   }
 
   Box computeBox(
@@ -1173,10 +1469,20 @@ namespace refractir::reify {
     if (!judge(entry).ok)
       return box;
 
-    // Step 2 — free leaves. A leaf is free exactly when the trace is provable
-    // without knowing it, which is one pass with the leaf left out. This is
-    // the ceiling of the whole search: nothing wider than "any value" exists,
-    // so a leaf that clears it never enters the bisection below.
+    // Step 2 — ceilings. Pushing every check's requirement backward bounds each
+    // leaf before a single trial is run: one that cannot move at all is pinned
+    // for free, and the rest have a bound to search under rather than a
+    // doubling sequence that has to discover where to stop.
+    const auto ceil = ceilings(fn, structs, body, entry);
+    for (auto &leaf: box.leaves) {
+      auto it = ceil.find(leaf.key);
+      if (it != ceil.end() && it->second.lo == it->second.hi)
+        leaf.cls = LeafClass::Pinned; // nothing else could have been proven
+    }
+
+    // Free leaves. A leaf is free exactly when the trace is provable without
+    // knowing it, which is one pass with the leaf left out. Nothing is wider
+    // than "any value", so a leaf that clears this never enters the search.
     EntryState st = entry;
     for (auto &leaf: box.leaves) {
       EntryState without = st;
@@ -1196,15 +1502,37 @@ namespace refractir::reify {
     struct Open {
       BoxLeaf *leaf;
       std::int64_t centre;
-      std::int64_t good = 0; // widest radius proven
-      std::int64_t next = 1; // radius to try
-      bool frozen = false;
+      std::int64_t good = 0;      // widest radius proven
+      std::int64_t next = 1;      // radius to try
+      bool frozen = false;        //
+      std::int64_t cap = kI64Max; // widest the ceiling allows
     };
 
     std::vector<Open> open;
-    for (auto &leaf: box.leaves)
-      if (leaf.cls != LeafClass::Free)
-        open.push_back(Open{&leaf, leaf.range.lo, 0, 1, false});
+    for (auto &leaf: box.leaves) {
+      if (leaf.cls == LeafClass::Free)
+        continue;
+      // How far the ceiling allows this leaf to move at all. Saturating,
+      // because an unconstrained ceiling is the full width of the type and
+      // subtracting its ends would overflow — which silently pinned every
+      // leaf the narrowing had nothing to say about. The wider side decides:
+      // a radius is clipped to the type on the way in, so a leaf sitting at
+      // its type's edge can still open in the one direction it has.
+      auto span = [](std::int64_t from, std::int64_t to) -> std::int64_t {
+        std::int64_t d = 0;
+        if (__builtin_sub_overflow(to, from, &d))
+          return kI64Max;
+        return d < 0 ? 0 : d;
+      };
+      std::int64_t cap = kI64Max;
+      if (auto it = ceil.find(leaf.key); it != ceil.end()) {
+        const std::int64_t centre = leaf.range.lo;
+        cap = std::max(span(it->second.lo, centre), span(centre, it->second.hi));
+        if (cap <= 0)
+          continue; // the ceiling holds it still; no pass spent on it
+      }
+      open.push_back(Open{&leaf, leaf.range.lo, 0, 1, false, cap});
+    }
     if (open.empty())
       return box;
 
@@ -1247,7 +1575,12 @@ namespace refractir::reify {
         for (auto &o: open)
           if (!o.frozen) {
             o.good = o.next;
-            o.next = o.next * 2;
+            // Doubling stops at the ceiling: past it the trial would only be
+            // refused, and by a check that was known in advance.
+            if (o.good >= o.cap)
+              o.frozen = true;
+            else
+              o.next = std::min(o.next * 2, o.cap);
           }
         continue;
       }

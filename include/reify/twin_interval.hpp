@@ -139,6 +139,22 @@ namespace refractir::reify {
     std::size_t passes = 0; // interval passes spent computing it
   };
 
+  // The widest range each integer leaf could possibly take, obtained by
+  // pushing every check's requirement backward through the trace: an addition
+  // that must not overflow bounds its operands, a branch that must go one way
+  // bounds what it compares, and so on back to the entry.
+  //
+  // These are upper bounds and nothing more. Narrowing is not exact — it
+  // ignores how operands relate to one another — so a ceiling may contain
+  // values that do not actually work, and a search must still prove what it
+  // claims. What a ceiling is good for is not searching above it: a leaf whose
+  // ceiling is a single value is pinned without a single pass, one whose
+  // ceiling is its whole type is a free candidate, and everything else has a
+  // bound to bisect under instead of a doubling sequence to guess at.
+  std::unordered_map<std::string, Interval> ceilings(
+      const FunDecl &fn, const StructMap &structs, const TraceBody &body, const EntryState &entry
+  );
+
   // Compute the widest box the interval pass can prove for `body`, starting
   // from the profiled state. Leaves are freed where a proof allows, otherwise
   // widened in lockstep — every open leaf advances by the same relative step
