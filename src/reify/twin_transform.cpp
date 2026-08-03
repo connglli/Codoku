@@ -361,8 +361,8 @@ namespace refractir::reify {
       std::vector<GuardRoot> guardRoots; // the entire guardable state, in
                                          // profile (name-sorted) order
       std::vector<LeafRef> defs;         // per-leaf constant reconstruction of s'
-      std::vector<Instr> twinInstrs;     // the region's flattened executed trace
-      std::vector<PathCheck> checks;     // the branches that body assumes
+      TraceBody body;                    // the region's flattened executed trace
+      EntryState entry;                  // the profiled state, as the box's floor
       std::string exitLabel;             // block the twin jumps to (region exit)
     };
 
@@ -789,6 +789,8 @@ namespace refractir::reify {
       // What the interval pass made of the trace at the profiled state. It
       // does not gate the graft; it says how much room a guard has to widen.
       std::string interval;
+      // How far the guard may open: one class per integer leaf.
+      Box box;
     };
 
     // The profiled state, leaf by leaf: every integer pinned to the one value
@@ -902,11 +904,11 @@ namespace refractir::reify {
         auto body = flattenTrace(executed, plan.exitLabel, byLabel, &why);
         if (!body)
           return false;
-        const IntervalVerdict iv =
-            checkTrace(fn, structs, *body, pointBox(fn, pts[t]->vars, structs, layout));
+        EntryState es = pointBox(fn, pts[t]->vars, structs, layout);
+        const IntervalVerdict iv = checkTrace(fn, structs, *body, es);
         note = iv.ok ? "ok" : iv.reason;
-        plan.twinInstrs = std::move(body->stmts);
-        plan.checks = std::move(body->checks);
+        plan.entry = std::move(es);
+        plan.body = std::move(*body);
         return true;
       };
 
@@ -928,6 +930,38 @@ namespace refractir::reify {
       }
       c.interval = note;
       return c;
+    }
+
+    // How many leaves of each class the box ended up with, which is what a
+    // reader of the log wants: a guard that frees leaves says more than one
+    // that merely widens them.
+    std::string describeBox(const Box &b) {
+      std::size_t nFree = 0, nRanged = 0, nPinned = 0;
+      std::string widest;
+      std::int64_t best = 0;
+      for (const auto &l: b.leaves) {
+        switch (l.cls) {
+          case LeafClass::Free:
+            ++nFree;
+            break;
+          case LeafClass::Ranged: {
+            ++nRanged;
+            const std::int64_t w = l.range.hi - l.range.lo;
+            if (w > best) {
+              best = w;
+              widest = l.key;
+            }
+            break;
+          }
+          default:
+            ++nPinned;
+        }
+      }
+      std::string out = "box: " + std::to_string(nFree) + " free, " + std::to_string(nRanged) +
+                        " ranged, " + std::to_string(nPinned) + " pinned";
+      if (!widest.empty())
+        out += " (widest " + widest + " +/-" + std::to_string(best / 2) + ")";
+      return out + " [" + std::to_string(b.passes) + " passes]";
     }
 
     // The interestingness features of a candidate: loop iterations collapsed
@@ -1006,11 +1040,15 @@ namespace refractir::reify {
           // plan (it is the trace itself), so there is nothing to synthesize.
           auto commit = [&](const std::string &fnName, Cand &c,
                             std::unordered_map<std::string, TwinPlan> &decided) {
+            // Only regions actually being twinned pay for a box.
+            if (const FunDecl *fnp = findFn(fnName))
+              c.box = computeBox(*fnp, structs, c.plan.body, c.plan.entry, ctx.rng);
             vlog(
                 fnName + " " + c.label + ": grafted region -> " + c.plan.exitLabel + " (" +
-                std::to_string(c.nBlocks) + " blk, " + std::to_string(c.plan.twinInstrs.size()) +
-                " stmts, " + std::to_string(c.plan.checks.size()) + " path cond, interval " +
-                c.interval + ")" + (c.fellBack ? " [window fell back to one block]" : "")
+                std::to_string(c.nBlocks) + " blk, " + std::to_string(c.plan.body.stmts.size()) +
+                " stmts, " + std::to_string(c.plan.body.checks.size()) + " path cond, interval " +
+                c.interval + ", " + describeBox(c.box) + ")" +
+                (c.fellBack ? " [window fell back to one block]" : "")
             );
             decided.emplace(c.label, std::move(c.plan));
           };
@@ -1165,7 +1203,7 @@ namespace refractir::reify {
 
         Block twin;
         twin.label = BlockLabel{twinL, {}};
-        twin.instrs = std::move(plan.twinInstrs);
+        twin.instrs = std::move(plan.body.stmts);
         twin.term = brTo(plan.exitLabel);
         out.push_back(std::move(twin));
 

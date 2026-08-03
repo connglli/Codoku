@@ -39,8 +39,10 @@
 
 #include <cstdint>
 #include <optional>
+#include <random>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "ast/ast.hpp"
 #include "reify/twin_mini.hpp"
@@ -54,6 +56,12 @@ namespace refractir::reify {
     std::int64_t lo = 0;
     std::int64_t hi = 0;
     bool unknown = false;
+    // Which entry leaves this value was computed from, one bit each. A check
+    // that fails names them, so a search widening the box knows which leaves
+    // to freeze rather than freezing all of them. Only integer leaves get a
+    // bit: floats and pointers are pinned, so they can never be the reason a
+    // widened box fails. Callers leave this alone — the pass assigns the bits.
+    std::uint64_t deps = 0;
 
     bool isConst() const { return !unknown && lo == hi; }
   };
@@ -90,6 +98,10 @@ namespace refractir::reify {
     // Why the trace could not be proven — the failing operation and what it
     // needed. Empty when ok.
     std::string reason;
+    // The entry leaves the failing check depended on. Empty when the failure
+    // involved nothing the caller can widen (an untracked value, say), which
+    // means narrowing the box cannot help.
+    std::vector<std::string> blame;
   };
 
   // Check `body` over every state in `entry`. `fn` supplies the declared types
@@ -97,6 +109,40 @@ namespace refractir::reify {
   // resolves field types.
   IntervalVerdict checkTrace(
       const FunDecl &fn, const StructMap &structs, const TraceBody &body, const EntryState &entry
+  );
+
+  // What a guard may say about one leaf.
+  //
+  //   Free   — the trace is provable with this leaf unknown, so the guard does
+  //            not mention it at all. Only a proof can establish this; no
+  //            amount of sampling could, since it covers every value.
+  //   Ranged — provable over `range` but not beyond it: `lo <= x <= hi`.
+  //   Pinned — not provable with the leaf moved at all: `x == v`.
+  enum class LeafClass { Free, Ranged, Pinned };
+
+  struct BoxLeaf {
+    std::string key;
+    LeafClass cls = LeafClass::Pinned;
+    Interval range; // meaningful when Ranged
+  };
+
+  // The states a guard admits, one entry per integer leaf. Floats and pointers
+  // are absent because they are always pinned: bounding a float needs
+  // rounding-aware arithmetic and a pointer has no range to speak of.
+  struct Box {
+    std::vector<BoxLeaf> leaves;
+    std::size_t passes = 0; // interval passes spent computing it
+  };
+
+  // Compute the widest box the interval pass can prove for `body`, starting
+  // from the profiled state. Leaves are freed where a proof allows, otherwise
+  // widened in lockstep — every open leaf advances by the same relative step
+  // each round, and a round the pass refuses freezes only the leaves that
+  // round's failing check depended on, so no leaf's width depends on the order
+  // a loop visited it. `rng` settles how the remaining slack is split.
+  Box computeBox(
+      const FunDecl &fn, const StructMap &structs, const TraceBody &body, const EntryState &entry,
+      std::mt19937 &rng
   );
 
 } // namespace refractir::reify

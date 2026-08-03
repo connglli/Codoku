@@ -547,4 +547,15 @@ namespace refractir::reify::rytwin::hp {
   // ===========================================================================
   inline constexpr double kInterestingTemp = 0.5;
 
+  // ===========================================================================
+  // Guard box
+  //
+  // How far the interval pass is asked to widen a guard. Rounds bound the
+  // lockstep doubling (each is one pass over the trace, so this is cheap); the
+  // trim is a seeded percentage shaved off each proven run, because a maximal
+  // run is the same run every time and makes guards recognizable.
+  // ===========================================================================
+  inline constexpr std::size_t kTwinBisectMaxRounds = 24;
+  inline constexpr int kTwinBoxTrimPct = 25;
+
 } // namespace refractir::reify::rytwin::hp

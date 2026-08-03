@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "analysis/type_utils.hpp"
+#include "reify/hyperparameters.hpp"
 #include "reify/twin_mini.hpp"
 
 namespace refractir::reify {
@@ -19,15 +20,23 @@ namespace refractir::reify {
     constexpr I64 kI64Min = std::numeric_limits<I64>::min();
     constexpr I64 kI64Max = std::numeric_limits<I64>::max();
 
-    Interval unknownOf() {
+    Interval unknownOf(std::uint64_t deps = 0) {
       Interval v;
       v.unknown = true;
       v.lo = kI64Min;
       v.hi = kI64Max;
+      v.deps = deps;
       return v;
     }
 
-    Interval constant(I64 c) { return Interval{c, c, false}; }
+    Interval constant(I64 c) { return Interval{c, c, false, 0}; }
+
+    // Every value carries the entry leaves it came from, so a check that
+    // fails can name them.
+    Interval withDeps(Interval v, std::uint64_t deps) {
+      v.deps = deps;
+      return v;
+    }
 
     // The representable range of a signed N-bit value. Widths above 64 are not
     // representable in the domain, so they are reported as unknown.
@@ -81,6 +90,27 @@ namespace refractir::reify {
           types_[p.name.name] = p.type;
         for (const auto &l: fn.lets)
           types_[l.name.name] = l.type;
+        // One bit per integer entry leaf, in a stable order so two runs blame
+        // the same leaves. Past 64 leaves the rest share "no bit", which costs
+        // blame precision and nothing else.
+        std::vector<std::string> keys;
+        keys.reserve(env_.size());
+        for (const auto &[k, v]: env_)
+          keys.push_back(k);
+        std::sort(keys.begin(), keys.end());
+        for (std::size_t i = 0; i < keys.size() && i < 64; ++i) {
+          bitOf_[keys[i]] = std::uint64_t(1) << i;
+          leafOfBit_.push_back(keys[i]);
+          env_[keys[i]].deps = std::uint64_t(1) << i;
+        }
+      }
+
+      std::vector<std::string> blamed() const {
+        std::vector<std::string> out;
+        for (std::size_t i = 0; i < leafOfBit_.size(); ++i)
+          if (blame_ & (std::uint64_t(1) << i))
+            out.push_back(leafOfBit_[i]);
+        return out;
       }
 
       IntervalVerdict run(const TraceBody &body) {
@@ -99,14 +129,15 @@ namespace refractir::reify {
         for (; next < body.checks.size(); ++next)
           if (!decides(body.checks[next]))
             return fail("branch could go either way: " + reason_);
-        return IntervalVerdict{true, ""};
+        return IntervalVerdict{true, "", {}};
       }
 
     private:
-      IntervalVerdict fail(const std::string &why) { return IntervalVerdict{false, why}; }
+      IntervalVerdict fail(const std::string &why) { return IntervalVerdict{false, why, blamed()}; }
 
-      bool reject(std::string why) {
+      bool reject(std::string why, std::uint64_t deps = 0) {
         reason_ = std::move(why);
+        blame_ = deps;
         return false;
       }
 
@@ -572,14 +603,15 @@ namespace refractir::reify {
                 if (!v)
                   return std::nullopt;
                 if (v->unknown)
-                  return unknownOf();
-                return Interval{~v->hi, ~v->lo, false}; // ~ is monotone decreasing
+                  return unknownOf(v->deps);
+                // ~ is monotone decreasing
+                return Interval{~v->hi, ~v->lo, false, v->deps};
               } else if constexpr (std::is_same_v<T, CmpAtom>) {
                 // i1 true is -1 (spec §6.4), so a comparison is one of {0, -1}.
                 auto l = evalSelectVal(x.lhs, 0), r = evalSelectVal(x.rhs, 0);
                 if (!l || !r)
                   return std::nullopt;
-                return Interval{-1, 0, false};
+                return Interval{-1, 0, false, l->deps | r->deps};
               } else if constexpr (std::is_same_v<T, SelectAtom>)
                 return evalSelect(x, bits);
               else if constexpr (std::is_same_v<T, CastAtom>)
@@ -612,9 +644,10 @@ namespace refractir::reify {
         auto t = evalSelectVal(s.vtrue, bits), f = evalSelectVal(s.vfalse, bits);
         if (!t || !f)
           return std::nullopt;
+        const std::uint64_t deps = t->deps | f->deps;
         if (t->unknown || f->unknown)
-          return unknownOf();
-        return Interval{std::min(t->lo, f->lo), std::max(t->hi, f->hi), false};
+          return unknownOf(deps);
+        return Interval{std::min(t->lo, f->lo), std::max(t->hi, f->hi), false, deps};
       }
 
       std::optional<Interval> evalCast(const CastAtom &c) {
@@ -652,7 +685,7 @@ namespace refractir::reify {
           return std::nullopt;
         // Widening keeps the value; narrowing truncates, which the domain does
         // not model, so it is only exact when the value already fits.
-        return fits(*src, *bits) ? *src : unknownOf();
+        return fits(*src, *bits) ? *src : unknownOf(src->deps);
       }
 
       std::optional<Interval> evalOp(const OpAtom &o, std::uint32_t bits) {
@@ -662,6 +695,7 @@ namespace refractir::reify {
         auto r = readChecked(o.rval);
         if (!r)
           return std::nullopt;
+        const std::uint64_t deps = l->deps | r->deps;
         const std::uint32_t w = bits ? bits : widthOf(o.rval);
         switch (o.op) {
           case AtomOpKind::Mul:
@@ -669,52 +703,54 @@ namespace refractir::reify {
           case AtomOpKind::Div:
           case AtomOpKind::Mod: {
             if (r->unknown || (r->lo <= 0 && r->hi >= 0))
-              return reject("divisor may be zero"), std::nullopt;
+              return reject("divisor may be zero", deps), std::nullopt;
             // INT_MIN / -1 is the one division that overflows.
             I64 lo = 0, hi = 0;
             if (rangeOf(w, lo, hi) && (l->unknown || l->lo <= lo) && r->lo <= -1 && r->hi >= -1)
-              return reject("division may overflow (MIN / -1)"), std::nullopt;
+              return reject("division may overflow (MIN / -1)", deps), std::nullopt;
             if (l->isConst() && r->isConst())
-              return constant(o.op == AtomOpKind::Div ? l->lo / r->lo : l->lo % r->lo);
-            return unknownOf();
+              return withDeps(
+                  constant(o.op == AtomOpKind::Div ? l->lo / r->lo : l->lo % r->lo), deps
+              );
+            return unknownOf(deps);
           }
           case AtomOpKind::Shl: {
             if (l->unknown || l->lo < 0)
-              return reject("left shift of a possibly negative value"), std::nullopt;
+              return reject("left shift of a possibly negative value", deps), std::nullopt;
             if (!inShiftRange(*r, w))
               return std::nullopt;
             // x << n is x * 2^n; the largest operands decide overflow.
             I64 factor = 0;
             if (r->hi >= 63 || mulOv(I64(1) << r->hi, 1, factor))
-              return reject("shift amount too large to bound"), std::nullopt;
+              return reject("shift amount too large to bound", deps), std::nullopt;
             return mulI(*l, constant(I64(1) << r->hi), w);
           }
           case AtomOpKind::Shr:
             if (!inShiftRange(*r, w))
               return std::nullopt;
             if (l->isConst() && r->isConst())
-              return constant(l->lo >> r->lo);
-            return unknownOf();
+              return withDeps(constant(l->lo >> r->lo), deps);
+            return unknownOf(deps);
           case AtomOpKind::LShr:
             if (!inShiftRange(*r, w))
               return std::nullopt;
             if (l->isConst() && r->isConst())
-              return constant(signExtend(toUnsigned(l->lo, w) >> r->lo, w));
-            return unknownOf();
+              return withDeps(constant(signExtend(toUnsigned(l->lo, w) >> r->lo, w)), deps);
+            return unknownOf(deps);
           default: {
             // & | ^ : a sound range needs bit-level reasoning, so only known
             // operands fold. Everything else widens, which is where a
             // bit-level domain would pay off first.
             if (!l->isConst() || !r->isConst())
-              return unknownOf();
+              return unknownOf(deps);
             const I64 a = l->lo, b = r->lo;
             switch (o.op) {
               case AtomOpKind::And:
-                return constant(a & b);
+                return withDeps(constant(a & b), deps);
               case AtomOpKind::Or:
-                return constant(a | b);
+                return withDeps(constant(a | b), deps);
               default:
-                return constant(a ^ b);
+                return withDeps(constant(a ^ b), deps);
             }
           }
         }
@@ -722,7 +758,7 @@ namespace refractir::reify {
 
       bool inShiftRange(const Interval &amount, std::uint32_t bits) {
         if (amount.unknown || amount.lo < 0 || amount.hi >= (I64) bits)
-          return reject("shift amount may be out of range");
+          return reject("shift amount may be out of range", amount.deps);
         return true;
       }
 
@@ -744,32 +780,35 @@ namespace refractir::reify {
           const Interval &a, const Interval &b, I64 loL, I64 loR, I64 hiL, I64 hiR,
           std::uint32_t bits, Op op, const char *why
       ) {
+        const std::uint64_t deps = a.deps | b.deps;
         if (a.unknown || b.unknown)
-          return reject(std::string(why) + " (an operand is not tracked)"), std::nullopt;
+          return reject(std::string(why) + " (an operand is not tracked)", deps), std::nullopt;
         I64 lo = 0, hi = 0;
         if (op(loL, loR, lo) || op(hiL, hiR, hi))
-          return reject(why), std::nullopt;
-        Interval out{lo, hi, false};
+          return reject(why, deps), std::nullopt;
+        Interval out{lo, hi, false, deps};
         if (bits && !fits(out, bits))
-          return reject(why), std::nullopt;
+          return reject(why, deps), std::nullopt;
         return out;
       }
 
       std::optional<Interval> mulI(const Interval &a, const Interval &b, std::uint32_t bits) {
+        const std::uint64_t deps = a.deps | b.deps;
         if (a.unknown || b.unknown)
-          return reject("multiplication may overflow (an operand is not tracked)"), std::nullopt;
+          return reject("multiplication may overflow (an operand is not tracked)", deps),
+                 std::nullopt;
         const I64 ends[4][2] = {{a.lo, b.lo}, {a.lo, b.hi}, {a.hi, b.lo}, {a.hi, b.hi}};
         I64 lo = kI64Max, hi = kI64Min;
         for (const auto &e: ends) {
           I64 p = 0;
           if (mulOv(e[0], e[1], p))
-            return reject("multiplication may overflow"), std::nullopt;
+            return reject("multiplication may overflow", deps), std::nullopt;
           lo = std::min(lo, p);
           hi = std::max(hi, p);
         }
-        Interval out{lo, hi, false};
+        Interval out{lo, hi, false, deps};
         if (bits && !fits(out, bits))
-          return reject("multiplication may overflow"), std::nullopt;
+          return reject("multiplication may overflow", deps), std::nullopt;
         return out;
       }
 
@@ -818,7 +857,7 @@ namespace refractir::reify {
           return false;
         auto always = holds(chk.cond.op, *l, *r);
         if (!always)
-          return reject("condition is not settled by the entry range");
+          return reject("condition is not settled by the entry range", l->deps | r->deps);
         return *always == chk.taken;
       }
 
@@ -904,7 +943,7 @@ namespace refractir::reify {
             }
           }
           if (iv.unknown || iv.lo < 0 || iv.hi >= (I64) n)
-            return reject("index may be out of bounds");
+            return reject("index may be out of bounds", iv.deps);
           t = elem;
         }
         return true;
@@ -975,7 +1014,9 @@ namespace refractir::reify {
                   return false;
                 auto always = holds(x.cond.op, *l, *r);
                 if (!always || !*always)
-                  return reject("a require is not provable over the entry range");
+                  return reject(
+                      "a require is not provable over the entry range", l->deps | r->deps
+                  );
                 return true;
               } else {
                 // assume: a solver hint, not a runtime check.
@@ -1002,6 +1043,9 @@ namespace refractir::reify {
       }
 
       IntervalEnv env_;
+      std::unordered_map<std::string, std::uint64_t> bitOf_;
+      std::vector<std::string> leafOfBit_;
+      std::uint64_t blame_ = 0;
       // Float leaf -> its exact value. Absent means unknown; there is no
       // "range of floats" here by design (see the header).
       FloatEnv floats_;
@@ -1019,6 +1063,144 @@ namespace refractir::reify {
       const FunDecl &fn, const StructMap &structs, const TraceBody &body, const EntryState &entry
   ) {
     return Checker(fn, structs, entry).run(body);
+  }
+
+  Box computeBox(
+      const FunDecl &fn, const StructMap &structs, const TraceBody &body, const EntryState &entry,
+      std::mt19937 &rng
+  ) {
+    Box box;
+    auto judge = [&](const EntryState &st) {
+      ++box.passes;
+      return checkTrace(fn, structs, body, st);
+    };
+
+    // Step 1 — the floor. Everything pinned is the guard rytwin already
+    // emits, so if the pass cannot even prove that, no widening is possible
+    // and the answer is the floor itself.
+    for (const auto &[k, v]: entry.ints)
+      box.leaves.push_back(BoxLeaf{k, LeafClass::Pinned, v});
+    std::sort(box.leaves.begin(), box.leaves.end(), [](const BoxLeaf &a, const BoxLeaf &b) {
+      return a.key < b.key;
+    });
+    if (!judge(entry).ok)
+      return box;
+
+    // Step 2 — free leaves. A leaf is free exactly when the trace is provable
+    // without knowing it, which is one pass with the leaf left out. This is
+    // the ceiling of the whole search: nothing wider than "any value" exists,
+    // so a leaf that clears it never enters the bisection below.
+    EntryState st = entry;
+    for (auto &leaf: box.leaves) {
+      EntryState without = st;
+      without.ints.erase(leaf.key);
+      if (judge(without).ok) {
+        leaf.cls = LeafClass::Free;
+        st = std::move(without);
+      }
+    }
+
+    // Step 3 — lockstep bisection over what is left. Each open leaf carries a
+    // radius; every round doubles all of them at once and one pass judges the
+    // result, so widening costs a pass per round rather than per leaf. A
+    // refused round freezes only the leaves its failing check depended on —
+    // the others keep growing, which is what stops a leaf's width from
+    // depending on the order it happened to be visited in.
+    struct Open {
+      BoxLeaf *leaf;
+      std::int64_t centre;
+      std::int64_t good = 0; // widest radius proven
+      std::int64_t next = 1; // radius to try
+      bool frozen = false;
+    };
+
+    std::vector<Open> open;
+    for (auto &leaf: box.leaves)
+      if (leaf.cls != LeafClass::Free)
+        open.push_back(Open{&leaf, leaf.range.lo, 0, 1, false});
+    if (open.empty())
+      return box;
+
+    auto widen = [&](const std::vector<std::int64_t> &radii) {
+      EntryState trial = st;
+      for (std::size_t i = 0; i < open.size(); ++i) {
+        Interval iv = open[i].leaf->range;
+        iv.lo = open[i].centre - radii[i];
+        iv.hi = open[i].centre + radii[i];
+        iv.unknown = false;
+        trial.ints[open[i].leaf->key] = iv;
+      }
+      return trial;
+    };
+
+    for (std::size_t round = 0; round < rytwin::hp::kTwinBisectMaxRounds; ++round) {
+      std::vector<std::int64_t> radii;
+      bool anyOpen = false;
+      for (auto &o: open) {
+        radii.push_back(o.frozen ? o.good : o.next);
+        anyOpen = anyOpen || !o.frozen;
+      }
+      if (!anyOpen)
+        break;
+      const IntervalVerdict v = judge(widen(radii));
+      if (v.ok) {
+        for (auto &o: open)
+          if (!o.frozen) {
+            o.good = o.next;
+            o.next = o.next * 2;
+          }
+        continue;
+      }
+      // Freeze what this failure actually depended on. A failure that blames
+      // nothing is not about any leaf we are moving, so it freezes everything
+      // — continuing would just retry the same refusal.
+      bool froze = false;
+      for (auto &o: open)
+        if (!o.frozen && std::find(v.blame.begin(), v.blame.end(), o.leaf->key) != v.blame.end()) {
+          o.frozen = true;
+          froze = true;
+        }
+      // A refusal that names nothing still open is not about the leaves being
+      // moved — retrying would only repeat it, so the round ends the search.
+      if (!froze)
+        for (auto &o: open)
+          o.frozen = true;
+    }
+
+    // Step 4 — settle each frozen leaf between its last proven radius and the
+    // one that failed, so a run does not stop at whatever power of two it
+    // happened to reach.
+    for (auto &o: open) {
+      std::int64_t lo = o.good, hi = o.next;
+      while (lo + 1 < hi) {
+        const std::int64_t mid = lo + (hi - lo) / 2;
+        std::vector<std::int64_t> radii;
+        for (auto &p: open)
+          radii.push_back(&p == &o ? mid : p.good);
+        if (judge(widen(radii)).ok)
+          lo = mid;
+        else
+          hi = mid;
+      }
+      o.good = lo;
+    }
+
+    // Trim each run by a small seeded amount: narrowing is always sound, and
+    // maximal runs would make every guard for a given region identical.
+    std::uniform_int_distribution<int> trim(0, rytwin::hp::kTwinBoxTrimPct);
+    for (auto &o: open) {
+      if (o.good <= 0)
+        continue;
+      const std::int64_t cut = o.good * trim(rng) / 100;
+      o.good -= cut;
+      if (o.good <= 0)
+        continue;
+      o.leaf->cls = LeafClass::Ranged;
+      o.leaf->range.lo = o.centre - o.good;
+      o.leaf->range.hi = o.centre + o.good;
+      o.leaf->range.unknown = false;
+    }
+    return box;
   }
 
 } // namespace refractir::reify

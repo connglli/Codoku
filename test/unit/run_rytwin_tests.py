@@ -782,6 +782,18 @@ fun @floats(%p0: i32) : i32 {
 """
 
 
+def box_counts(line):
+  """(free, ranged, pinned) from a graft log line, or None."""
+  m = re.search(r"box: (\d+) free, (\d+) ranged, (\d+) pinned", line)
+  return tuple(int(g) for g in m.groups()) if m else None
+
+
+def box_widest(line):
+  """(leaf, radius) of the widest ranged leaf, or None."""
+  m = re.search(r"widest (\S+) \+/-(\d+)", line)
+  return (m.group(1), int(m.group(2))) if m else None
+
+
 def interval_note(line):
   m = re.search(r"interval (ok|[^)]+)", line)
   return m.group(1) if m else None
@@ -822,6 +834,58 @@ def test_interval_pass_follows_memory(rytwin, symiri):
     r1 = symiri_result(symiri, p1, "@loaddiv", ["3"])
     r2 = symiri_result(symiri, p2, "@loaddiv", ["3"])
     check("memory-bearing twin still equivalent", r1[1:] == r2[1:], f"{r1} vs {r2}")
+
+
+def test_box_pins_control_and_opens_data(rytwin):
+  """The shape of a loop is pinned and its data is not: moving the trip count
+  or the induction variable takes another path, so the failing check names
+  them and they stop; the accumulator has nothing to stop it but overflow."""
+  with tempfile.TemporaryDirectory() as d:
+    r, lines, _, _ = graft_log(rytwin, d, LOOP_FIXTURE, "loopreg", [])
+    check("loop fixture twinned", r.returncode == 0 and lines, r.stderr[:200])
+    if not lines:
+      return
+    counts = box_counts(lines[0])
+    check("the loop's shape stays pinned", counts and counts[2] == 2, str(counts))
+    check("exactly one leaf opens", counts and counts[1] == 1, str(counts))
+    widest = box_widest(lines[0])
+    check(
+      "the accumulator is the one that opens", widest and widest[0] == "%s", str(widest)
+    )
+    check(
+      "it opens far past anything probing could enumerate",
+      widest and widest[1] > 100000,
+      str(widest),
+    )
+
+
+def test_box_frees_a_leaf_no_sampling_could(rytwin):
+  """A leaf the trace provably does not depend on is dropped, not widened —
+  no amount of probing could establish that, since it covers every value."""
+  with tempfile.TemporaryDirectory() as d:
+    r, lines, _, _ = graft_log(rytwin, d, FLOAT_FIXTURE, "floats", [])
+    check("float fixture twinned", r.returncode == 0 and lines, r.stderr[:200])
+    if not lines:
+      return
+    counts = box_counts(lines[0])
+    check("leaves come back free", counts and counts[0] > 0, str(counts))
+
+
+def test_box_is_deterministic_for_a_seed(rytwin):
+  """The search is seeded, so two runs agree — the trim that keeps guards
+  from being identical is drawn from the same stream, not from chance."""
+  with tempfile.TemporaryDirectory() as d:
+    first = graft_log(rytwin, d, CHAIN_FIXTURE, "chain", [])[1]
+  with tempfile.TemporaryDirectory() as d:
+    second = graft_log(rytwin, d, CHAIN_FIXTURE, "chain", [])[1]
+    check("both runs twinned", first and second, "")
+    if first and second:
+      check(
+        "same seed, same box",
+        box_counts(first[0]) == box_counts(second[0])
+        and box_widest(first[0]) == box_widest(second[0]),
+        f"{first[0]} vs {second[0]}",
+      )
 
 
 def test_interval_pass_follows_floats(rytwin, symiri):
@@ -2144,6 +2208,18 @@ def main():
     (
       "interval: values are followed through memory",
       lambda: test_interval_pass_follows_memory(rytwin, symiri),
+    ),
+    (
+      "box: a loop pins its shape and opens its data",
+      lambda: test_box_pins_control_and_opens_data(rytwin),
+    ),
+    (
+      "box: a leaf the trace ignores is freed",
+      lambda: test_box_frees_a_leaf_no_sampling_could(rytwin),
+    ),
+    (
+      "box: the search is seeded, not chancy",
+      lambda: test_box_is_deterministic_for_a_seed(rytwin),
     ),
     (
       "interval: float values are followed exactly",
