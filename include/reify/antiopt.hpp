@@ -87,6 +87,8 @@ namespace refractir::reify {
     // A local holding `value` at `type`, reused when one already exists.
     std::string literal(std::int64_t value, const TypePtr &type, std::vector<LetDecl> &lets);
 
+    const std::string &prefix() const { return prefix_; }
+
   private:
     std::string prefix_;
     std::size_t next_ = 0;

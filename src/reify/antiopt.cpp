@@ -28,7 +28,15 @@ namespace refractir::reify {
       d.isMutable = mut;
       d.name = LocalId{name, {}};
       d.type = type;
-      d.init = InitVal{InitVal::Kind::Int, IntLit{init, {}}, {}};
+      // A declaration's initializer has to suit its type: a scratch cell a
+      // rule routes a value through is a pointer, and `let mut %p: ptr i32 =
+      // 0;` is not a program the checker accepts.
+      if (type && std::holds_alternative<PtrType>(type->v))
+        d.init = InitVal{InitVal::Kind::Null, IntLit{0, {}}, {}};
+      else if (TypeUtils::getFloatBitWidth(type))
+        d.init = InitVal{InitVal::Kind::Float, FloatLit{(double) init, {}}, {}};
+      else
+        d.init = InitVal{InitVal::Kind::Int, IntLit{init, {}}, {}};
       return d;
     }
 
@@ -167,6 +175,25 @@ namespace refractir::reify {
           ++rep.rolledBack;
         }
       }
+    }
+
+    // The allocator hands out names in the order the rewriting happened, so
+    // declaring them in that order hands a reader the order too. Shuffling
+    // them among their own slots costs nothing — every one of these
+    // initializers is a literal, so no declaration depends on another — and
+    // renaming them is not on offer: the caller tells its own scratch from the
+    // program's state by exactly this prefix.
+    std::vector<std::size_t> slots;
+    for (std::size_t i = 0; i < ctx.lets.size(); ++i)
+      if (ctx.lets[i].name.name.rfind(ctx.names.prefix(), 0) == 0)
+        slots.push_back(i);
+    if (slots.size() > 1) {
+      std::vector<LetDecl> mine;
+      for (std::size_t i: slots)
+        mine.push_back(ctx.lets[i]);
+      std::shuffle(mine.begin(), mine.end(), ctx.rng);
+      for (std::size_t k = 0; k < slots.size(); ++k)
+        ctx.lets[slots[k]] = std::move(mine[k]);
     }
     return rep;
   }

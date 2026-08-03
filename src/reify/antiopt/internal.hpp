@@ -63,6 +63,11 @@ namespace refractir::reify::antiopt {
 
   Touches touchesOf(const Instr &ins);
 
+  // Replace every *read* of `from` with `to`. The destination of an assignment
+  // is a write and is left alone, so this re-points what a statement consumes
+  // without changing what it produces.
+  void renameReads(Instr &ins, const std::string &from, const std::string &to);
+
   // --- registration ---------------------------------------------------------
 
   using RuleList = std::vector<std::unique_ptr<AntiOptRule>>;

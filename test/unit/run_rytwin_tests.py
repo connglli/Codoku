@@ -489,55 +489,48 @@ def test_no_solver_linked(rytwin):
 
 
 def test_trace_body_unrolls_loop(rytwin):
-  """The twin body is the executed trace laid straight: a loop that ran
-  three times contributes its body three times, with no branch in between.
-  A memoized constant (or a solved one-liner) would show it once or not at
-  all."""
+  """The twin body is the executed trace laid straight: a loop that ran three
+  times contributes its body three times, with no branch in between. A
+  memoized constant (or a solved one-liner) would contribute one statement or
+  none. The count comes off the graft log rather than the emitted text,
+  because the disguise pass that follows rewrites the statements themselves —
+  and is free to reorder them, so their order is no longer the claim."""
   with tempfile.TemporaryDirectory() as d:
-    p1 = os.path.join(d, "loopreg.sir")
-    open(p1, "w").write(LOOP_FIXTURE)
-    p2 = os.path.join(d, "p2.sir")
-    r = run([rytwin, p1, "--p-twin", "1.0", "--seed", "3", "--validate", "-o", p2])
-    check("loop fixture twinned", r.returncode == 0, r.stderr[:200])
-    if r.returncode != 0:
+    r, lines, _, p2 = graft_log(rytwin, d, LOOP_FIXTURE, "loopreg", ["--validate"])
+    check("loop fixture twinned", r.returncode == 0 and lines, r.stderr[:200])
+    if not lines:
       return
-    bodies = twin_block_bodies(open(p2).read())
-    unrolled = [b for b in bodies if b.count("%s = %s + %i;") >= 3]
-    check("a twin body repeats the loop body 3x", unrolled, str(bodies)[:300])
-    if unrolled:
-      # twin_block_bodies keeps the block's terminator, which is the single
-      # jump to the region exit; no branch may appear before it.
-      inner = unrolled[0].splitlines()[:-1]
-      check(
-        "the unrolled body is straight-line",
-        not [ln for ln in inner if ln.startswith("br ")],
-        str(inner)[:200],
-      )
+    check(
+      "the trace holds the loop body three times", trace_stmts(lines[0]) == 6, lines[0]
+    )
+    # twin_block_bodies keeps each block's terminator, which is the single jump
+    # to the region exit; no branch may appear before it.
+    inner = [
+      ln for b in twin_block_bodies(open(p2).read()) for ln in b.splitlines()[:-1]
+    ]
+    check(
+      "the unrolled body is straight-line",
+      not [ln for ln in inner if ln.startswith("br ")],
+      str(inner)[:200],
+    )
+    check("and it still validates", "validated: OK" in r.stdout, r.stdout[:200])
 
 
 def test_trace_body_replays_region_stmts(rytwin):
-  """A multi-block region contributes every block's statements, in the
-  order they executed."""
+  """A multi-block region contributes every block's statements: the sequence
+  fixture holds one in each of its two blocks, and the trace holds both — one
+  reads %p0 and the other %b, so both operands survive into the twin."""
   with tempfile.TemporaryDirectory() as d:
-    p1 = os.path.join(d, "seqreg.sir")
-    open(p1, "w").write(SEQ_FIXTURE)
-    p2 = os.path.join(d, "p2.sir")
-    r = run([rytwin, p1, "--p-twin", "1.0", "--seed", "3", "--validate", "-o", p2])
-    check("sequence fixture twinned", r.returncode == 0, r.stderr[:200])
-    if r.returncode != 0:
+    r, lines, _, p2 = graft_log(rytwin, d, SEQ_FIXTURE, "seqreg", ["--validate"])
+    check("sequence fixture twinned", r.returncode == 0 and lines, r.stderr[:200])
+    if not lines:
       return
-    hit = None
-    for b in twin_block_bodies(open(p2).read()):
-      if "%a = %a + %p0;" in b and "%a = %a + %b;" in b:
-        hit = b
-        break
-    check("a twin body holds both blocks' statements", hit is not None, "")
-    if hit:
-      check(
-        "in execution order (^e before ^b1)",
-        hit.index("%a = %a + %p0;") < hit.index("%a = %a + %b;"),
-        hit[:200],
-      )
+    check(
+      "the trace holds both blocks' statements", trace_stmts(lines[0]) == 2, lines[0]
+    )
+    body = "".join(twin_block_bodies(open(p2).read()))
+    check("both blocks' operands are read", "%p0" in body and "%b" in body, body[:200])
+    check("and it still validates", "validated: OK" in r.stdout, r.stdout[:200])
 
 
 # A chain of unconditional branches: nothing about the path is in question,
@@ -821,6 +814,12 @@ def box_widest(line):
   """(leaf, radius) of the widest ranged leaf, or None."""
   m = re.search(r"widest (\S+) \+/-(\d+)", line)
   return (m.group(1), int(m.group(2))) if m else None
+
+
+def trace_stmts(line):
+  """How many statements the flattened trace held, before any rewriting."""
+  m = re.search(r"(\d+) stmts", line)
+  return int(m.group(1)) if m else None
 
 
 def interval_note(line):
@@ -1592,6 +1591,103 @@ def test_value_splits_at_a_bit(rytwin):
     "mba-bit-split fires where the sign is proven", "mba-bit-split" in kept, str(kept)
   )
   check("and the twins validate", ok)
+
+
+RECOMPUTE_FIXTURE = """// SOLVED: %p0=3
+fun @recompute(%p0: i32) : i32 {
+  let mut %t: i32 = 0;
+  let mut %r: i32 = 0;
+  let mut %s: i32 = 0;
+^entry:
+  %t = %p0 + 1;
+  br ^work;
+^work:
+  %r = %t + %t;
+  %s = %t + %r;
+  br ^done;
+^done:
+  ret %s;
+}
+"""
+
+
+def twin_sources(rytwin, fixture, name, seeds=("1", "2", "3", "4", "5", "6")):
+  """The twinned program `fixture` produces, one source string per seed."""
+  out = []
+  for seed in seeds:
+    with tempfile.TemporaryDirectory() as d:
+      p1 = os.path.join(d, name + ".sir")
+      open(p1, "w").write(fixture)
+      p2 = os.path.join(d, name + ".p2.sir")
+      r = run([rytwin, p1, "--p-twin", "1.0", "--seed", seed, "-o", p2])
+      if r.returncode == 0 and os.path.exists(p2):
+        out.append(open(p2).read())
+  return out
+
+
+def twin_text(rytwin, fixture, name, seeds=("1", "2", "3", "4", "5", "6")):
+  """The twin bodies `fixture` produces, one string per seed."""
+  return [
+    "".join(twin_block_bodies(src))
+    for src in twin_sources(rytwin, fixture, name, seeds)
+  ]
+
+
+def twin_declarations(rytwin, fixture, name, seeds=("1", "2", "3", "4", "5", "6")):
+  """The `let` declarations of every twinned program, one string per seed."""
+  out = []
+  for src in twin_sources(rytwin, fixture, name, seeds):
+    lets = [ln for ln in src.splitlines() if ln.strip().startswith("let ")]
+    out.append("\n".join(lets))
+  return out
+
+
+def test_a_value_is_recomputed_instead_of_reused(rytwin):
+  """A temp holding a value every later statement reads is a common
+  subexpression an optimizer already found. Recomputing it instead lets the
+  two copies take different rewrites and stop looking like one value."""
+  kept, ok = rules_kept(rytwin, RECOMPUTE_FIXTURE, "recompute")
+  check("un-cse fires where a temp is reused", "un-cse" in kept, str(kept))
+  check("and the twins validate", ok)
+
+
+def test_dead_statements_read_live_locals(rytwin):
+  """Statements whose result nothing reads, over locals that are live: they
+  have to be generated the way the program's own statements were, or they
+  read as padding rather than as work."""
+  kept, ok = rules_kept(rytwin, CHAIN_FIXTURE, "chain")
+  check("dead-statement fires", "dead-statement" in kept, str(kept))
+  check("and the twins validate", ok)
+
+
+def test_a_value_is_routed_through_memory(rytwin, symiri):
+  """Storing a value and loading it back turns dataflow into memory flow,
+  which an optimizer has to alias-analyse to undo."""
+  kept, ok = rules_kept(rytwin, CHAIN_FIXTURE, "chain")
+  check("memory-routing fires", "memory-routing" in kept, str(kept))
+  check("and the twins validate", ok)
+  bodies = [b for b in twin_text(rytwin, CHAIN_FIXTURE, "chain") if "store" in b]
+  check("some body goes through memory", bodies, "")
+  if bodies:
+    check("and reads it back", "load" in bodies[0], bodies[0][:200])
+
+
+def test_scratch_declarations_are_shuffled(rytwin):
+  """The engine allocates its scratch in the order it rewrites, so declaring
+  them in that order hands a reader the order the rewrites happened in.
+  (Renaming them is not on offer: the caller tells its own scratch from the
+  program's state by the prefix.)"""
+  orders = []
+  for body in twin_declarations(rytwin, RECOMPUTE_FIXTURE, "recompute"):
+    nums = [int(n) for n in re.findall(r"%__aok?(\d+)", body)]
+    if len(nums) >= 3:
+      orders.append(nums)
+  check("some twin declares three or more scratch locals", orders, "")
+  check(
+    "and at least one does not declare them in allocation order",
+    any(ns != sorted(ns) for ns in orders),
+    str(orders[:2]),
+  )
 
 
 def test_box_is_deterministic_for_a_seed(rytwin):
@@ -3012,6 +3108,22 @@ def main():
     (
       "rewrite: a value round-trips through a wider type",
       lambda: test_values_round_trip_through_a_wider_type(rytwin),
+    ),
+    (
+      "rewrite: a reused temp is recomputed instead",
+      lambda: test_a_value_is_recomputed_instead_of_reused(rytwin),
+    ),
+    (
+      "rewrite: dead statements read live locals",
+      lambda: test_dead_statements_read_live_locals(rytwin),
+    ),
+    (
+      "rewrite: a value is routed through memory",
+      lambda: test_a_value_is_routed_through_memory(rytwin, symiri),
+    ),
+    (
+      "rewrite: scratch declarations are shuffled",
+      lambda: test_scratch_declarations_are_shuffled(rytwin),
     ),
     (
       "interval: a leaf the box freed stays unknown",

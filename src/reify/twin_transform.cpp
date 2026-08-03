@@ -1300,6 +1300,9 @@ namespace refractir::reify {
             // Only regions actually being twinned pay for a box, or for the
             // rewriting that follows it: the box says which states the body
             // must stay right for, so it has to come first.
+            // The trace's own length, which is what the region contributed;
+            // the rewriting below adds to it, and says by how much itself.
+            const std::size_t traced = c.plan.body.stmts.size();
             if (FunDecl *fnp = findFn(fnName)) {
               c.box = computeBox(*fnp, structs, c.plan.body, c.plan.entry, ctx.rng);
               c.disguised = antiOptimizeBody(*fnp, structs, c.plan, c.box, ctx.rng);
@@ -1307,11 +1310,10 @@ namespace refractir::reify {
             c.plan.box = c.box;
             vlog(
                 fnName + " " + c.label + ": grafted region -> " + c.plan.exitLabel + " (" +
-                std::to_string(c.nBlocks) + " blk, " + std::to_string(c.plan.body.stmts.size()) +
-                " stmts, " + std::to_string(c.plan.body.checks.size()) + " path cond, interval " +
-                c.interval + ", " + describeBox(c.box) + ", " +
-                std::to_string(c.disguised.applied) + " rewrites (" +
-                std::to_string(c.disguised.rolledBack) + " undone" +
+                std::to_string(c.nBlocks) + " blk, " + std::to_string(traced) + " stmts, " +
+                std::to_string(c.plan.body.checks.size()) + " path cond, interval " + c.interval +
+                ", " + describeBox(c.box) + ", " + std::to_string(c.disguised.applied) +
+                " rewrites (" + std::to_string(c.disguised.rolledBack) + " undone" +
                 (c.disguised.byRule.empty() ? "" : "; " + describeRules(c.disguised)) + ")" +
                 (c.fellBack ? " [window fell back to one block]" : "")
             );
