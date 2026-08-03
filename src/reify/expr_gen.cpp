@@ -300,6 +300,11 @@ namespace refractir::reify {
     } else if (bits == 64) {
       lo = rysmith::hp::kConcreteInt_I64_Lo;
       hi = rysmith::hp::kConcreteInt_I64_Hi;
+    } else if (bits == 1) {
+      // i1 holds exactly {0, -1}: true is all-ones (spec §6.4), and any other
+      // literal is a hard type error rather than a value that wraps.
+      lo = -1;
+      hi = 0;
     } else if (bits >= 2 && bits < 64) {
       // [P7] Custom iN widths span the full signed range, mirroring the
       // standard widths above. The typechecker's strict literal range
