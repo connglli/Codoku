@@ -1,296 +1,193 @@
-# Semantic Reification and Reify
+# Semantic reification and the reify tools
 
-Reify's technique is called *Semantic Reification*, a paradigm for random program generation. Unlike syntactic reification, which operates primarily on syntax, semantic reification centers on program semantics. It distinguishes between two kinds of semantics: compile-time semantics (what a program *can* do) and runtime semantics (what a program *actually does*). The key insight is reformulating random program generation to capture both:
+Reify generates random programs by a technique called *semantic reification*. Syntactic reification works on program text; semantic reification works on program meaning, and separates two kinds of it: compile-time semantics, what a program *can* do, and runtime semantics, what a program *actually does* on one input.
 
-Given an *arbitrary* control flow graph (CFG) $g$ to capture compile-time semantics and an *arbitrary* entry-to-exit path $\pi$ within $g$ (called an execution path or EP) to capture runtime semantics, Reify produces a program $P$, input $i$, and output $o$ satisfying:
+Given an arbitrary control flow graph `g` and an arbitrary entry-to-exit path `pi` through it, reify produces a program `P`, an input `i`, and an output `o` such that:
 
-1. $P$ is both syntactically and semantically correct for $i$;
-2. $g$ corresponds to the CFG of $P$;
-3. executing $P(i)$ deterministically follows $\pi$ and produces $o$.
+1. `P` is syntactically and semantically correct for `i`;
+2. `g` is the CFG of `P`;
+3. `P(i)` deterministically follows `pi` and produces `o`.
 
-**Why this matters for compiler testing.** Although runtime semantics are fixed for a given input, compilers must reason about all possible executions when optimizing. Semantic reification exposes bugs in that reasoning while guaranteeing every generated program behaves deterministically and is free of undefined behavior *on the specified input*. Allowing arbitrary CFGs and EPs produces complex data flows and diverse control structures, enriching the behaviors available for compiler optimization passes. Compared to existing generators, Reify: (1) inherently supports arbitrary control flow including unbounded loops and irreducible regions; (2) ensures well-definedness and guaranteed termination under the generated input; (3) produces an expected output, enabling direct correctness validation without pseudo-oracles.
+The `g` fixes the compile-time semantics and the `pi` fixes the runtime semantics, so both are chosen rather than discovered.
 
+That combination is what makes the output useful for compiler testing. A compiler must reason about every possible execution when it optimizes, even though the runtime semantics of one input are fixed, and semantic reification exposes errors in that reasoning while keeping each generated program deterministic and free of undefined behaviour on its stated input. Because `g` and `pi` are arbitrary, the generator reaches control structures and data flows that a grammar-driven generator does not: unbounded loops, irreducible regions, deep type mixing. And because `o` is known before the program is ever compiled, a miscompilation shows up as a wrong answer rather than as a disagreement between two compilers, so no pseudo-oracle is needed.
 
-## Implementation
+Reify separates *leaf function generation*, compact functions with no calls, from *whole-program generation*, which composes leaf functions under an arbitrary call graph. `rysmith` implements the first, `rylink` the second, and `rytwin` transforms either into an equivalent variant.
 
-Given $g$ and $\pi$, Reify populates each basic block with random statements and jump terminators, then uses *symbolic execution* to derive a path condition and compute an input $i$ that forces $P$ to follow $\pi$ and produce $o$. The symbolic execution explores only the single EP $\pi$, avoiding the path explosion of full symbolic execution.
-
-Reify separates *leaf function generation* (compact functions with no calls) from *whole-program generation* (combining leaf functions into programs with arbitrary call graphs). This document describes the current leaf function generation pipeline and the `rysmith` tool that implements it and the `rylink` whole-program generator.
-
-
-## Leaf Function Generation
+## Leaf function generation
 
 ```
-S1. CFG Generation   — random control-flow skeleton
-S2. Path Sampling    — random entry-to-exit walk through the CFG
-S3. Program Seeding  — populate all blocks with typed statements using RefractIR
-S4. Concretization   — solve symbolic variables along the EP via SMT
-S5. Lowering         — emit concrete RefractIR, then lower to C / WASM
-S6. Validation       — compile and execute; compare output to expected
+S1. CFG generation   - random control-flow skeleton
+S2. Path sampling    - random entry-to-exit walk through the CFG
+S3. Program seeding  - populate all blocks with typed statements
+S4. Concretization   - solve the symbols along the path via SMT
+S5. Lowering         - emit concrete RefractIR, then C / WASM / Python
+S6. Validation       - execute and compare the output against o
 ```
 
+### S1: CFG generation
 
-### S1: CFG Generation
+A random CFG starts as a spanning chain from entry through the interior blocks to exit, and then stochastically gains branch edges (a second successor pointing forward) and back edges (producing loops). The result is always connected and always has a path to exit.
 
-A random CFG is generated with a configurable number of interior blocks. The structure begins as a spanning chain (entry → b0 → … → b_{n−1} → exit), then stochastically adds branch edges (second successors pointing forward) and back edges (producing loops). The result is always connected with a guaranteed path to exit.
+A back edge may land past a loop header, which makes the CFG irreducible. When reducible CFGs are required, the CFG is repaired instead of resampled: a retreating edge whose target does not dominate its source is deleted, one per re-analysis pass, so every valid loop survives and only irreducible cycles are broken.
 
-Back edges may land past a loop header and make the CFG **irreducible**. When reducible CFGs are required, the CFG is repaired: retreating edges whose target does not dominate their source are deleted, one per re-analysis pass, so every valid loop survives and only irreducible cycles are broken.
+### S2: Path sampling
 
-
-### S2: Path Sampling
-
-An execution path is sampled by a random walk from entry to exit. Back edges are counted per traversal to bound loop iterations. If the walk gets stuck, BFS finds the shortest escape to exit. The path is a sequence of block labels, e.g.:
+The execution path is a random walk from entry to exit, counting each back-edge traversal so loop iteration counts stay bounded. A walk that gets stuck escapes to exit along the shortest BFS route. The result is a sequence of block labels:
 
 ```
-^entry → ^b0 → ^b3 → ^b0 → ^b4 → ^exit
+^entry -> ^b0 -> ^b3 -> ^b0 -> ^b4 -> ^exit
 ```
 
-The same CFG can yield many distinct paths with different loop iteration counts.
+One CFG yields many distinct paths, differing in which branches are taken and how often each loop runs.
 
+### S3: Program seeding
 
-### S3: Program Seeding
+Every block gets typed statements, and a block's role decides what kind.
 
-This is the core generation step. Every block in the CFG is populated with typed statements using RefractIR. The generation distinguishes two roles:
+An on-path block, one that appears in `pi`, uses *symbolic* variables whose values the solver picks. Symbols are declared with a domain and a kind annotation (`coef`, `value`, `index`). Interest constraints, `require` statements excluding degenerate coefficients such as 0, 1 and -1, push the solver toward programs that are worth compiling.
 
-**On-path blocks** (those appearing in $\pi$): statements use *symbolic variables* whose values will be determined by the SMT solver. Symbols are declared with domains and kind annotations (`coef`, `value`, `index`). Interest constraints — `require` statements that exclude trivial values like 0, 1, −1 from coefficients — push the solver toward diverse, non-degenerate programs.
+An off-path block uses concrete random literals. It never executes, because the solver pins every on-path branch, so control never reaches an off-path successor. Off-path code is therefore left unconstrained and may contain UB: division by a variable that could be zero, signed overflow from a wide literal, an index that could leave its array. None of it reaches the differential oracle, and all of it is surface for the optimizer's dead-code elimination, alias analysis and vectorization to work over.
 
-**Off-path blocks** (those not in $\pi$): statements use *concrete random literals*. These blocks are never executed under the generated input — the solver pins every on-path branch, so control never enters an off-path successor — but the compiler still compiles them. Off-path code is therefore deliberately left unconstrained and may contain UB (division by a variable that could be zero, signed overflow from wide literals, out-of-bounds-capable accesses, etc.). Because off-path code never runs, this UB never reaches the differential oracle; it simply maximizes the diversity of IR presented to optimization passes such as DCE, alias analysis, and vectorization.
+Off-path volume costs the solver nothing, which is why the volume knobs (`--n-stmts`, `--min-atoms`, `--max-atoms`) describe on-path blocks and off-path blocks scale them by `--off-path-multiplier`. On-path volume is the solver's bottleneck and tunes independently.
 
-Because off-path volume costs the solver nothing, the volume knobs (`--n-stmts`, `--min-atoms`, `--max-atoms`) describe **on-path** blocks, and off-path blocks scale them by `--off-path-multiplier` (default 2×). This buys compiler-facing surface for free and lets on-path volume — the solver's bottleneck — be tuned independently.
+#### Types
 
-#### Type system
+Generation draws from the full RefractIR type lattice, each variable choosing independently: integer scalars `i8` through `i64` and arbitrary `iN`, floating-point `f32` and `f64`, arrays `[N] T` and structs `@Name { … }` up to a bounded nesting depth, vectors `<N> T`, and pointers `ptr T` including `ptr ptr T` chains. Mixed types appear within one function, and a scalar type boundary is crossed by an explicit cast atom, which is what exercises a compiler's promotion and narrowing paths.
 
-Reify uses the full RefractIR type lattice. Each variable independently draws its type from:
+A floating-point variable is initialized on-path by casting from an integer symbol, `(f32) %?s0`, which keeps the SMT problem in bit-vector theory. Off-path float code uses concrete literals.
 
-| Category | Types |
-|---|---|
-| Integer scalars | `i8`, `i16`, `i32`, `i64` (and arbitrary `iN`) |
-| Floating-point | `f32`, `f64` (disable with `--no-fp`) |
-| Arrays | `[N] T` for any element type `T` (depth-bounded) |
-| Structs | `@Name { f0: T0; f1: T1; … }` with heterogeneous field types |
-| Pointers | `ptr T` for any `T`, including `ptr ptr T` chains |
+#### Expressions
 
-Mixed types appear within the same function. Scalar type boundaries are crossed with explicit `CastAtom` nodes (sign-extension, truncation, integer-to-float, float-to-integer), which directly test compiler type promotion and narrowing paths.
+Expressions are generated type-directedly: given a target type `T`, the generator produces an expression of type `T`, and every atom in one expression shares that type. The repertoire covers linear terms with a symbolic coefficient (`coef_sym * var`), the bitwise and shift operators, `~var`, explicit casts, `load` through a pointer variable, `addr` of a local, a one-level `select`, and division or modulo by a concrete non-zero denominator.
 
-Floating-point variables are initialized on-path by casting from an integer symbol (`(f32) %?s0`), keeping the SMT problem in BV theory. Off-path float code uses concrete literals.
+Division and modulo keep a concrete denominator on-path, as in `%?s3 / 7`, which yields the divide-by-constant patterns that stress strength reduction. Off-path division uses any literal, zero included.
 
-#### Expression diversity
-
-Expressions are generated *type-directedly*: given a target type `T`, the generator produces an `Expr` of type `T`. All atoms in a single `Expr` share the same type. The atom repertoire includes:
-
-- `coef_sym * var` — linear with symbolic coefficient (on-path)
-- `coef_sym & var`, `| var`, `^ var`, `<< var`, `>> var`, `lshr var` — bitwise / shift
-- `~var` — bitwise NOT
-- `(T) src` — explicit cast from another type
-- `load ptr_var` — dereference a pointer variable
-- `addr lv` — take the address of a local (produces `ptr T`)
-- `select (cond) ? a : b` — lazy ternary (one level deep)
-- `coef_sym / concrete_nonzero` — integer division with concrete denominator
-- `coef_sym % concrete_nonzero` — integer modulo with concrete denominator
-
-Division and modulo use concrete non-zero denominators on-path (e.g., `%?s3 / 7`), producing div-by-constant patterns that stress compiler strength-reduction. Off-path division uses any concrete literal including zero.
+A symbolic coefficient is typed to match its expression context, so an `i64` expression takes a `coef i64` symbol and an `i32` expression a `coef i32` one. That reads as natural code, a 64-bit multiply against a 64-bit coefficient, and reaches type-specific optimization patterns.
 
 #### Pointer initialization
 
-`addr lv` is an expression atom, not a valid `let` initializer. Pointer variables are therefore declared as `undef` and assigned in the entry block before any other generation:
+`addr lv` is an expression atom, not a valid `let` initializer, so a pointer variable is declared `undef` and assigned in the entry block before anything else is generated:
 
 ```sir
 fun @func0() : i32 {
-  let mut %v0: i32 = %?s0;        // integer var, init from input sym
-  let mut %p0: ptr i32 = undef;   // pointer var, init deferred
-  let mut %pp0: ptr ptr i32 = undef;  // depth-2 pointer, init deferred
-  ...
+  let mut %v0: i32 = %?s0;           // integer var, init from input sym
+  let mut %p0: ptr i32 = undef;      // pointer var, init deferred
+  let mut %pp0: ptr ptr i32 = undef; // depth-2 pointer, init deferred
 ^entry:
-  %p0 = addr %v0;                 // concrete address assignment
-  %pp0 = addr %p0;                // ptr ptr chain
+  %p0 = addr %v0;
+  %pp0 = addr %p0;
   require %?s0 != 0, "nonzero input";
   ...
 ```
 
-Since `^entry` is always the first block on every path, this guarantees definite initialization for all pointer variables regardless of which path is sampled.
-
-#### On-path coef symbols
-
-Symbolic coefficients are typed to match the expression context. An expression of type `i64` uses a `coef i64` symbol; one of type `i32` uses a `coef i32` symbol. This produces more natural programs (a 64-bit multiply with a 64-bit coefficient) and tests type-specific optimization patterns.
-
+`^entry` is the first block on every path, so every pointer is definitely initialized whichever path is sampled.
 
 ### S4: Concretization
 
-`symirsolve` (or the in-process `SymbolicExecutor` when using `rysmith`) performs path-directed symbolic execution along $\pi$:
+`symirsolve`, or the in-process symbolic executor when running under `rysmith`, executes `pi` symbolically: it collects the path conditions from branch terminators, the `require` constraints (interest constraints and UB guards), and the computed value of each assignment, encodes them as bit-vector constraints, and asks Bitwuzla for a satisfying assignment. The model is substituted back through `SIRPrinter` to give a fully concrete `.sir`. Off-path blocks pass through untouched, their literals needing no solving.
 
-1. Executes each on-path block symbolically, collecting:
-   - Path conditions from branch terminators
-   - `require` constraints (interest constraints, UB guards)
-   - Computation results for each assignment
-2. Encodes everything as SMT constraints in bitvector theory
-3. Calls Bitwuzla to find a satisfying assignment for all symbols
-4. Substitutes the model into the program via `SIRPrinter`, emitting a fully concrete `.sir`
-
-The off-path blocks pass through untouched — their concrete literals need no solving.
-
-Multiple concretizations of the same symbolic template (different solver seeds, or re-generation with a different RNG seed) produce structurally similar programs with different numeric values, exploring distinct optimization opportunities from the same control-flow structure.
-
+Solving the same symbolic template again, with a different solver or RNG seed, gives a structurally similar program with different numbers, so one control-flow structure yields many distinct optimization problems.
 
 ### S5: Lowering
 
-The concrete `.sir` file is lowered to C, WASM, or Python by `symirc`:
+`symirc` lowers the concrete `.sir` to C, WASM or Python:
 
 ```
-rysmith  →  concrete .sir  →  symirc -t c  →  .c  →  gcc / clang (link with -lm)
-                           →  symirc -t wasm →  .wat / .wasm
-                           →  symirc -t python →  .py
+rysmith -> concrete .sir -> symirc -t c      -> .c   -> gcc / clang (link -lm)
+                         -> symirc -t wasm   -> .wat / .wasm
+                         -> symirc -t python -> .py
 ```
 
-The generated C code is suitable for direct compilation and execution under the generated input $i$. The expected output $o$ is the return value of the function (the checksum over all live variables at exit).
-
+The expected output `o` is the function's return value, a checksum over every live variable at exit.
 
 ### S6: Validation
 
-The generated program is compiled with the target compiler and executed under $i$. If the output differs from $o$, Reify reports a potential miscompilation.
+The program is compiled and executed under `i`. An output other than `o` is a potential miscompilation:
 
 ```
-Expected:  func0() = -847
-Compiled (-O3):  func0() = -846   → POTENTIAL BUG
+Expected:        func0() = -847
+Compiled (-O3):  func0() = -846   -> POTENTIAL BUG
 ```
 
-Differential testing across compiler versions or optimization levels is also supported.
+Differential testing across compiler versions or optimization levels works the same way.
 
+## Whole-program generation
 
-## Whole-Program Generation
+S1 to S6 produce independent functions. To build a whole program, reify generates a random call graph and applies a semantics-preserving peephole rewrite: a constant `c` in a caller becomes `f(i) + (c - o)`, where `f(i) = o` is known from `f`'s own concretization. The call is real, and the constant's runtime value is unchanged.
 
-The leaf generation pipeline (S1–S6) produces independent functions. To build a complete program, Reify generates a random call graph (CG) and applies *semantics-preserving peephole rewriting*: a constant `c` in a caller is replaced with `f(i) + (c − o)`, where `f(i) = o`. This establishes an inter-procedural call while preserving the constant's value at runtime.
-
-Whole-program generation is implemented by `rylink`, described below. The pipeline:
-
-```
-W1. Pool ingest        — load a directory of rysmith-emitted (.sir + .json) pairs
-W2. CG generation      — pick K functions and build a DAG call graph over them
-W3. Bundle merge       — parse each .sir, union into one Program (dedup structs by name)
-W4. Peephole rewrite   — for each (caller, callee) edge, splice `call @callee(args) + (c − o)`
-W5. Anti-optimization  — rewrite every block by identities that cannot trap (--no-antiopt)
-W6. Lowering           — emit program.sir + optional symirc --split-by-source C/WASM/Python
-W7. Validation         — symiri runs the bundled entry with its solved params; check return
-```
-
-Each chosen leaf function brings its own solved realization (one of the `--n-inits` rysmith concretizations) so the rewrite expression `call + (c − o)` is semantically equivalent to the original literal at runtime. The call-realization transform (`CallRealizeTransform`, a whole-program `Transform`) consumes each rewrite site at most once across the entire program; composing two rewrites on the same literal would produce a left-to-right call chain (`f1() + f2() + …`) whose prefix sums can wrap in unintended ways even though each individual rewrite is BV-sound.
-
-Every function in a bundle comes out of one statement generator, so they read alike. W5 rewrites them by identities applied in the direction a compiler does not — reversed peepholes, arithmetic/bitwise crossings, restructuring — using the anti-optimization engine. A bundled program is concrete, with no set of states to prove anything over, so only rules that cannot introduce a trapping operation apply; those hold whatever the state, as does any composition of them.
-
-## Twin-Program Generation
-
-A twin program is an equivalent variant of a given program: `f2(i) == f1(i)` for every input, with the same UB outcome. `rytwin` builds one from a leaf function and the input that concretizes it, so the execution is deterministic and known; nothing here asks a solver. Its unit is a **region**: the maximal single-entry region rooted at an executed block, covering every later block that entry *dominates* on the executed path. The pipeline:
+`rylink` implements this:
 
 ```
-T1. State profile      — every initialized local at each on-path point, from the
-                         .state.json sidecar (rysmith --emit-state) or by interpreting
-T2. Region planning    — pick a dominance region whose live-in state a guard can state
-T3. Trace flattening   — the statements the run executed, branches dropped, loops laid out
-T4. Guard box          — an interval pass opens each leaf as far as it can prove
-T5. Anti-optimization  — the W5 engine again, here licensed by the box
-T6. Graft              — splice the guarded diamond; --validate spot-checks the box
+W1. Pool ingest       - load a directory of rysmith (.sir + .json) pairs
+W2. CG generation     - pick K functions, build a DAG call graph over them
+W3. Bundle merge      - parse each .sir, union into one Program (dedup structs by name)
+W4. Peephole rewrite  - per (caller, callee) edge, splice `call @callee(args) + (c - o)`
+W5. Anti-optimization - rewrite every block by identities that cannot trap
+W6. Lowering          - program.sir plus optional C / WASM / Python
+W7. Validation        - run the bundled entry and check its outcome
 ```
+
+Each chosen leaf brings its own solved realization, one of the `--n-inits` concretizations `rysmith` emitted, which is what makes `call + (c - o)` equal the original literal at runtime. `CallRealizeTransform` consumes each rewrite site at most once across the whole program: composing two rewrites on one literal would build a left-to-right call chain, `f1() + f2() + …`, whose prefix sums can wrap even though each rewrite is individually sound in bit-vector arithmetic.
+
+Every function in a bundle comes out of the same statement generator, so they read alike. W5 breaks that up by rewriting them with identities applied in the direction a compiler does not take: reversed peepholes, arithmetic and bitwise crossings, restructuring. The rule families live in [src/reify/antiopt](../src/reify/antiopt), driven by [include/reify/antiopt.hpp](../include/reify/antiopt.hpp). A bundled program is concrete, with no set of states to prove anything over, so only rules that cannot introduce a trapping operation apply; those hold whatever the state does, and so does any composition of them.
+
+## Twin-program generation
+
+A twin program is an equivalent variant: `f2(i) == f1(i)` for every input, with the same UB outcome. `rytwin` builds one from a program and the input that concretizes it, so the execution is deterministic and known, and no solver is involved anywhere.
+
+Its unit is a *region*: the maximal single-entry region rooted at an executed block, covering every later block that the entry dominates on the executed path.
+
+```
+T1. State profile     - every initialized local at each on-path point, from the
+                        .state.json sidecar (rysmith --emit-state) or by interpreting
+T2. Region planning   - pick a dominance region whose live-in state a guard can state
+T3. Trace flattening  - the statements the run executed, branches dropped, loops laid out
+T4. Guard box         - an interval pass opens each leaf as far as it can prove
+T5. Anti-optimization - the W5 engine again, here licensed by the box
+T6. Graft             - splice the guarded diamond; --validate spot-checks the box
+```
+
+The graft is a diamond at the region entry:
 
 ```
 ^X:           br call @__twg_<fn>_<X>(<state>) != 0  ->  ^X__twin  else  ^X__orig
 ^X__twin:     R'                            ->  br ^<exit>
-^X__orig:     the region's entry block, unchanged — the region runs on from here
+^X__orig:     the region's entry block, unchanged - the region runs on from here
 ```
 
-The guard takes over the region entry's own label, so no predecessor edge is rewritten, and the arms rejoin at the exit the region left to. Because the body is the executed trace, it is right for every state that follows the same path UB-free, which is far more than the profiled one — so the guard states per leaf what the interval pass proves: nothing at all (free), `lo <= x <= hi` (ranged), or `x == v` (pinned). Every comparison it makes is total, so the guard cannot trap. Having a proof also buys the rewriting more than W5 gets: rules that can trap are kept where the box clears them, and a family of them reads the box's own facts. Regions holding a non-intrinsic call are not twinned, since a callee could mutate state the frame diff does not see.
+The guard takes over the region entry's own label, so no predecessor edge is rewritten, and the two arms rejoin at the exit the region left to.
 
-## Tool: rysmith
+The twin body is the executed trace, which makes it correct for every state that follows the same path UB-free, a far larger set than the one profiled state. The guard therefore states per leaf what the interval pass proves: nothing at all (free), `lo <= x <= hi` (ranged), or `x == v` (pinned). Every comparison the guard makes is total, so the guard itself cannot trap.
 
-`rysmith` implements S1–S5 in a single in-process C++ binary. It builds RefractIR program ASTs directly in memory, calls `SymbolicExecutor` in-process (no subprocess), and emits concrete `.sir` files via `SIRPrinter`. It can optionally invoke `symiri` for S6 validation. The main focus is function generation. It does not test the compilers directly.
+Having a proof also buys the rewriting more than W5 gets. Rules that can trap are kept wherever the box clears them, and a family of rules reads the box's facts directly.
 
-### Usage
+A region holding a non-intrinsic call is not twinned, since a callee could mutate state the frame diff does not see.
+
+## rysmith
+
+`rysmith` runs S1 to S5 in one process. It builds the program AST in memory, calls the symbolic executor in-process rather than as a subprocess, and writes concrete `.sir` through `SIRPrinter`. It can invoke `symiri` for S6 under `--validate`. Its subject is function generation; it does not test compilers itself.
 
 ```
 rysmith [OPTIONS]
 ```
 
-### Options
-
-#### Type control
-
-| Flag | Default | Description |
-|---|---|---|
-| `--no-fp` | off | Disable `f32`/`f64` types entirely |
-| `--max-ptr-depth N` | 2 | Maximum pointer nesting depth (`ptr ptr T` = depth 2) |
-| `--max-agg-nest N` | 2 | Maximum aggregate nesting depth |
-| `--max-agg-elems N` | 3 | Maximum array size and struct field count |
-
-#### Generation
-
-| Flag | Default | Description |
-|---|---|---|
-| `--n-vars N` | 10 | Total variables per function (types drawn independently) |
-| `--n-stmts N` | 3 | Statements per on-path block |
-| `--off-path-multiplier F` | 2.0 | Scale `--n-stmts` / `--min-atoms` / `--max-atoms` by `F` in off-path blocks |
-
-#### Operators
-
-| Flag | Default | Description |
-|---|---|---|
-| `--no-divmod` | off | Disable integer division and modulo |
-| `--no-select` | off | Disable `select` ternary expressions |
-
-#### CFG
-
-| Flag | Default | Description |
-|---|---|---|
-| `--n-bbls N` | 15 | Basic blocks between entry and exit per CFG |
-| `--p-branch F` | 0.5 | Probability of a two-successor (branch) block |
-| `--p-backedge F` | 0.3 | Probability of a back edge (loop) from a non-entry/exit block |
-
-#### Solver
-
-| Flag | Default | Description |
-|---|---|---|
-| `--timeout N` | 2000 | SMT solver timeout per attempt (ms) |
-| `--seed N` | random | Master RNG seed |
-| `--require-ub` | off | Generate programs that **trigger** UB on the sampled path instead of UB-free ones (see below). Implies `--no-crc32`. |
-| `--require-nonterm` | off | Generate UB-free programs that **diverge** (⇑) on the sampled input instead of terminating ones (see below). Samples a lasso instead of an entry-to-exit path; implies `--require-reducible` and `--no-crc32`; pairs with `--max-lasso-period`. The full type lattice is available — integer, float, and pointer leaves are all closeable. |
-| `--no-crc32` | off | Keep the sum-form checksum (`%_chk = %_chk + <leaf>`) in the emitted program instead of rewriting it to `@crc32_update` calls |
-
-#### Output
-
-| Flag | Default | Description |
-|---|---|---|
-| `-n, --n-funcs N` | 1 | Number of leaf functions to generate |
-| `--n-inits N` | 3 | Concretizations per CFG+path template |
-| `--max-loop-iter N` | 1 | Max iterations of any single loop in the sampled path |
-| `--min-loop-iter N` | unset | If set, force at least one loop in the path to iterate ≥ N times (rejects loop-free CFGs) |
-| `--max-retries N` | 2 | Retry attempts on solver failure (simpler path each time) |
-| `-o, --output-dir PATH` | `reify_out` | Output directory for `.sir` files |
-| `--target sir\|c\|wasm\|python` | `sir` | Optionally compile each concrete `.sir` in-process (`python` implies `--require-reducible`) |
-| `--require-reducible` | off | Only generate reducible CFGs (irreducible back edges are repaired away) |
-| `--structured-lowering true\|false\|random` | `false` | Structured lowering for the C (goto-free) and WASM (dispatch-free) targets, resolved per program; `true`/`random` imply `--require-reducible` |
-| `--vec-lowering <s>` | `random` | Vector lowering strategy, resolved per program; `random` sweeps the target's set (C: all five; python: all but `vecext`) |
-| `--keep-require` | off | Include `require` checks in compiled output |
-| `--keep-ub-guards` | off | Keep the backends' dynamic UB guards in compiled output even for UB-free programs. By default UB-free generation (i.e. without `--require-ub`) drops them — see below |
-| `--keep-symbolic` | off | Write intermediate symbolic `.sir` to disk |
-| `--validate` | off | Run `symiri` on each concrete `.sir` and check its `Result:` line matches the descriptor's captured CRC32 retValue |
-| `--emit-main` | off | Append a `@main()` wrapper that calls the entry with its solver-synthesised params and asserts the CRC32 retValue via `@check_chksum` |
-| `--emit-desc` | off | Emit per-function descriptor JSON (`func_<id>_<i>.json`) used by `rylink`; records a `reducible` bool computed from the emitted function so structuring consumers can filter seeds, and a `has_ub` bool (true under `--require-ub`) so `rylink` knows whether the leaf's UB guards can be dropped |
-| `--emit-state pbb\|ppp` | off | Emit a `func_<id>_<i>.state.json` profile of the concrete state at each program point (`pbb` = per basic-block entry, `ppp` = per program point) — loaded by `rytwin` when present, sparing it the in-process profiling run |
-| `-v, --verbose` | off | Verbose progress output |
-
-### Example
+The full option list is `rysmith --help`, declared in [src/rysmith.cpp](../src/rysmith.cpp). The knobs group into type control (`--no-fp`, `--max-ptr-depth`, `--max-agg-nest`, …), generation volume (`--n-vars`, `--n-stmts`, `--min-atoms`, `--off-path-multiplier`), operator repertoire (`--no-divmod`, `--no-select`, `--no-intrinsics`, …), CFG shape (`--n-bbls`, `--p-branch`, `--p-backedge`), solver control (`--timeout`, `--seed`, `--max-retries`), and output (`-n`, `--n-inits`, `-o`, `--target`, the `--emit-*` family). The sections below cover the modes whose semantics are not evident from the flag name.
 
 ```sh
-# Generate 10 diverse functions, 3 concretizations each, validate all
+# 10 functions, 3 concretizations each, all validated
 rysmith -n 10 --n-inits 3 --validate -o out/
 
-# Stress pointer and mixed-type generation, disable floats
+# stress pointers and mixed types, no floats
 rysmith -n 20 --no-fp --max-ptr-depth 2 --max-agg-nest 2 -o out/
 
-# Reproduce a specific run
+# reproduce a run
 rysmith -n 30 --seed 42 -o out/
 ```
 
 ### Output format
 
-Each concrete `.sir` file is a valid RefractIR program containing one function `@funcN`. All variables are initialized to concrete integer or float values. The `^exit` block folds **every** scalar leaf of every let-init local and every parameter — recursing through nested arrays, structs, and vector lanes — into a running CRC32 state and returns it:
+Each concrete `.sir` holds one function `@funcN` with every variable initialized to a concrete value. The `^exit` block folds every scalar leaf of every local and parameter, recursing through nested arrays, structs and vector lanes, into a running CRC32 state and returns it:
 
 ```sir
 intrinsic @crc32_update(%state: i32, %val: i32) : i32;
@@ -312,23 +209,23 @@ fun @func0(%pa0: i32) : i32 {
 }
 ```
 
-The return value is the expected output $o$. Internally rysmith asks the solver for the cheaper sum-based contract (`%_chk = %_chk + atom`), then a post-solve rewriter replaces every accumulator step with a `@crc32_update` call before the .sir is written; the solver never has to encode the CRC32 recurrence. After lowering to C with `symirc -t c`, executing the function should always return this value regardless of compiler version or optimization level — the helper carries a function-local `static` lookup table and a `static __attribute__((noinline))` qualifier (see `docs/intrinsics.md` §12.7) so the optimizer cannot fold the chain.
+That return value is the expected output `o`. The solver never sees the CRC32 recurrence: it is asked for the cheaper sum-form contract, `%_chk = %_chk + atom`, and a post-solve rewriter replaces each accumulator step with a `@crc32_update` call before the file is written. After lowering to C, the function returns `o` whatever the compiler and optimization level, because the helper carries a function-local `static` table and a `static __attribute__((noinline))` qualifier that stop the optimizer folding the chain ([intrinsics.md](./intrinsics.md) §12.7).
 
-With `--emit-main`, rysmith additionally appends a `@main()` wrapper that calls `@func0` with the solver-synthesised parameter values and asserts the return matches the captured CRC32 via `@check_chksum(EXPECTED, %r);`. The C lowering of `@check_chksum` aborts on mismatch (`fprintf(stderr, …); abort();`) — that externally-visible side effect anchors the entire call chain against IPA-CP, so the compiler cannot fold the body away even at `-O3 -flto`.
+`--emit-main` appends a `@main()` that calls the entry with the solver's parameter values and asserts the return against the captured checksum through `@check_chksum(EXPECTED, %r);`. The C lowering of `@check_chksum` aborts on mismatch, and that externally visible side effect anchors the whole call chain against interprocedural constant propagation, so the body survives `-O3 -flto`.
 
-### Generating UB-triggering programs (`--require-ub`)
+### Generating UB-triggering programs
 
-By default every generated program is UB-free on its input: the solver asserts each operation's safety guard, so the concretization executes cleanly and returns the checksum. With `--require-ub`, rysmith instead asks the solver to **negate** the conjunction of those guards (delegated to `symirsolve`'s RequireUB mode — see [symirsolve.md](./symirsolve.md)), so the concretization is guaranteed to trigger at least one UB on the sampled path. This is used to exercise the UB-detection of downstream tools.
+By default the solver asserts each operation's safety guard, so the program executes cleanly and returns its checksum. `--require-ub` asks it to negate the conjunction of those guards instead, delegating to `symirsolve`'s RequireUB mode ([symirsolve.md](./symirsolve.md)), so the concretization triggers at least one UB on the sampled path. That is what exercises a downstream tool's UB detection.
 
-`--require-ub` **implies `--no-crc32`.** The solver reasons about the *sum-form* checksum (`%_chk = %_chk + <leaf>`, the cheap contract above), and one legitimate way to satisfy "at least one UB on the path" is to overflow that signed accumulator. The post-solve CRC32 rewriter, however, replaces every `%_chk = %_chk + <leaf>` with a total `@crc32_update(...)` call — which cannot overflow — so it would silently *delete* the very UB the solver just proved, leaving the emitted program UB-free. Keeping the sum form (`--no-crc32`) makes the program rysmith emits byte-identical to the one it solved, so a solver-found UB is guaranteed to trap under the interpreter. This costs nothing: a UB-triggering program aborts before it reaches a clean `ret`, so its CRC32 return-value oracle is vestigial anyway.
+`--require-ub` implies `--no-crc32`, and the reason matters. The solver reasons about the sum-form checksum, and one legitimate way to satisfy "at least one UB on this path" is to overflow that signed accumulator. The post-solve CRC32 rewriter would then replace `%_chk = %_chk + <leaf>` with a total `@crc32_update` call, which cannot overflow, deleting the very UB the solver just proved and leaving an emitted program that is UB-free. Keeping the sum form makes the emitted program byte-identical to the solved one, so a solver-found UB is guaranteed to trap under the interpreter. It costs nothing, because a UB-triggering program aborts before reaching a clean `ret` and its return-value oracle is vestigial anyway.
 
-### Generating non-terminating programs (`--require-nonterm`)
+### Generating non-terminating programs
 
-By default a generated program terminates and returns its checksum. With `--require-nonterm`, rysmith generates programs that are UB-free and **diverge** (⇑) on their input. The witness is a *lasso*: a stem ρ from `^entry` to a loop header `^h`, then a cycle γ closing back at `^h`, carried as the finite prefix ρ·γ. The mode implies `--require-reducible`, so every sampled back edge has a header that dominates it.
+`--require-nonterm` generates programs that are UB-free and diverge on their input. The witness is a lasso: a stem from `^entry` to a loop header `^h`, then a cycle closing back at `^h`, carried as the finite prefix stem followed by lap. The mode implies `--require-reducible`, so every sampled back edge has a header that dominates it.
 
-The certificate is a **state fixed point**: the mutable state at `^h` must be bit-identical on the first arrival and the revisit, alongside the UB guards of the stem and the lap. A deterministic lap that begins and ends in σ_h replays forever, so one finite SMT query certifies an infinite UB-free run. [symirsolve](./symirsolve.md) owns that query; its equality is value identity rather than IEEE `==`, which disagree on ±0 ([float.md](./float.md) §2.1).
+The certificate is a state fixed point. The mutable state at `^h` must be bit-identical on the first arrival and on the revisit, alongside the UB guards of the stem and the lap. A deterministic lap that begins and ends in the same state replays forever, so one finite SMT query certifies an infinite UB-free run. [symirsolve.md](./symirsolve.md) owns that query, including why its equality is value identity rather than IEEE `==`.
 
-A random cycle almost never admits a fixed point, so the cycle carries one additive correction symbol per mutable leaf it touches, `leaf = leaf + %?ntK`. The closer is uniform because `+` is the invertible operation in every domain:
+A random cycle almost never admits a fixed point on its own, so the cycle carries one additive correction symbol per mutable leaf it touches, `leaf = leaf + %?ntK`. The closer is uniform because `+` is the invertible operation in every domain:
 
 | leaf type | symbol | why it closes |
 |---|---|---|
@@ -336,67 +233,47 @@ A random cycle almost never admits a fixed point, so the cycle carries one addit
 | `fN` | `fN` | reaches the header value whenever the difference is representable |
 | `ptr T` | `i64` | shifts the offset inside the pointee's object |
 
-Shapes that cannot close (a float too far from its header value, a pointer that changed object) come back UNSAT and rysmith resamples: about 70% of seeds solve over the full type lattice against 85% over integers alone, and `--no-fp --max-ptr-depth 0` restores the higher rate.
+A shape that cannot close, a float too far from its header value or a pointer that changed object, comes back UNSAT and `rysmith` resamples. About 70% of seeds solve over the full type lattice, against 85% over integers alone; `--no-fp --max-ptr-depth 0` restores the higher rate.
 
-`--max-lasso-period N` asks for a state that recurs only after `k` laps, `k` drawn per attempt. Two constraints keep the orbit primitive: σ_k = σ_h, and σ_i ≠ σ_h at every earlier arrival. The corrections cannot supply a k-cycle alone, since `+` traps on overflow and the solver would answer `c = 0`, so a modular counter goes in the latch. Yield falls from about 70% at `k = 1` to 60% at `N = 4`.
+`--max-lasso-period N` asks for a state that recurs only after `k` laps, with `k` drawn per attempt. Two constraints keep the orbit primitive: the state at lap `k` equals the header state, and the state at every earlier arrival does not. The corrections cannot supply a `k`-cycle by themselves, since `+` traps on overflow and the solver would answer `c = 0`, so a modular counter goes in the latch instead. Yield falls from about 70% at `k = 1` to 60% at `N = 4`.
 
-The mode implies `--no-crc32`: a diverging program has no return value, and the post-solve oracle capture would hang on one. Validation is a bounded replay instead: the interpreter runs stem and laps under a fuel bound and checks that two arrivals one orbit apart carry bit-identical state, that no UB fires, and that no `ret` is reached. `--emit-main` still applies, asserting a random `EXPECTED` the program never reaches, so a correct compilation hangs and a miscompiled one aborts. The descriptor records `outcome: diverge`, which `rylink` composes homogeneously and `rytwin` refuses.
+The mode implies `--no-crc32`, since a diverging program has no return value and the post-solve oracle capture would hang waiting for one. Validation is a bounded replay instead: the interpreter runs the stem and the laps under a fuel bound and checks that two arrivals one orbit apart carry bit-identical state, that no UB fires, and that no `ret` is reached. `--emit-main` still applies, asserting a random `EXPECTED` the program never reaches, so a correct compilation hangs and a miscompiled one aborts. The descriptor records `outcome: diverge`, which `rylink` composes homogeneously and `rytwin` refuses.
 
-C needs help to preserve divergence: C11 §6.8.5p6 lets a compiler delete a side-effect-free loop, and gcc and clang do so non-deterministically at `-O2`. rysmith plants an `@observe` beacon in the cycle, the identity in value and an observable `volatile` write in C ([intrinsics.md](./intrinsics.md) §12.7), so the loop survives at `-O0` and `-O2` under both. WASM and Python have no forward-progress assumption and need no beacon.
+C needs help to preserve divergence, because C11 §6.8.5p6 lets a compiler delete a side-effect-free loop, and gcc and clang both do so non-deterministically at `-O2`. `rysmith` plants an `@observe` beacon in the cycle, the identity on values and an observable `volatile` write in the C lowering ([intrinsics.md](./intrinsics.md) §12.7), so the loop survives at `-O0` and `-O2` under both compilers. WASM and Python have no forward-progress assumption and need no beacon.
 
-### Dropping UB guards for UB-free output
+### Dropping UB guards
 
-The C/WASM/Python backends emit dynamic UB guards (`symirc --no-ub-guards`; see [symirc.md](./symirc.md#omitting-ub-guards---no-ub-guards-v023)). Because those guards only ever fire on a UB path, a program the reify pipeline proves UB-free renders them dead weight, so the tools **drop them automatically** rather than exposing a flag:
+The backends emit dynamic UB guards, and `symirc --no-ub-guards` drops them ([symirc.md](./symirc.md#omitting-ub-guards)). Those guards only ever fire on a UB path, so on a program the reify pipeline proves UB-free they are dead weight, and the tools drop them automatically rather than exposing the decision as a flag.
 
-- **rysmith** drops the guards whenever it is not in `--require-ub` mode, and records `has_ub` in each `--emit-desc` descriptor accordingly.
-- **rylink** drops them only when *every* selected pool leaf has `has_ub: false` — a bundle is UB-free iff all its leaves are. Legacy descriptors without the field parse as `has_ub: true`, so their guards are conservatively kept.
-- **rytwin** drops them unconditionally: a twin is equivalence-preserving over UB-free input, and the interpreter it profiles `p1` with would itself fail on any UB.
+`rysmith` drops them whenever it is not in `--require-ub` mode, and records `has_ub` in each descriptor accordingly. `rylink` drops them only when every selected pool leaf has `has_ub: false`, since a bundle is UB-free exactly when all its leaves are; a descriptor without the field parses as `has_ub: true` and its guards are kept. `rytwin` drops them unconditionally, because a twin preserves equivalence over UB-free input and the interpreter it profiles with would have failed on any UB.
 
-Each tool takes **`--keep-ub-guards`** to force the guards back on — useful for catching a mislabeled UB-free program that *does* trigger UB, which then traps at runtime instead of silently misbehaving.
+Each tool takes `--keep-ub-guards` to force them back on, which catches a program mislabeled UB-free that does trigger UB: it traps at runtime instead of misbehaving quietly.
 
+## rylink
 
-## Tool: rylink
-
-`rylink` reads a rysmith function pool, builds whole programs over it, and (optionally) compiles and validates each one following W1-W7.
-
-### Pool outcome (homogeneity)
-
-Every whole program rylink builds has a single well-defined behavior, so the pool must be **homogeneous**: every leaf's descriptor `outcome` must be the same — all `return`, all `trap`, or all `diverge`. A mixed pool has no well-defined fused behavior (a returning caller splicing a `call` to a trapping or non-terminating callee), so rylink **rejects it with an error**. The common outcome becomes the whole program's outcome and selects how `--validate` checks each program:
-
-| Pool | Fused program | `--validate` asserts |
-|---|---|---|
-| **`return`** (default rysmith) | returns the entry's value; peephole `call + (c − o)` preserves each rewritten literal | the entry returns its descriptor's solved `ret` |
-| **`trap`** (`--require-ub`) | triggers UB — the entry (or a spliced trap callee) traps | the program **traps** under `symiri` |
-| **`diverge`** (`--require-nonterm`) | diverges — the entry is the unmodified diverging leaf (its empty `ret` means no value-preserving call splices, so callees ride along as compiler surface) | the program **diverges** (bounded-replay on the entry's lasso header, taken from the descriptor path) |
-
-UB guards are dropped for `return`/`diverge` bundles (both UB-free) and kept for `trap`. With `--emit-main`, a `diverge` entry's `@main` uses a random `i32` checksum (the entry never returns, so the check is unreachable, but the compiler must keep the computation — see the `--emit-main` note under `--require-nonterm`).
-
-When `--structured-lowering` is `true`/`random` — or the target is `python` — seed programs may not be reducible (older pools, or runs without `rysmith --require-reducible`), so rylink **discards every pool seed whose descriptor's `reducible` flag is false** before generation (descriptors predating the flag parse as false and are conservatively discarded too). If no reducible seeds remain, rylink aborts with a pointer to `rysmith --require-reducible`. The composed program is then reducible by construction: every inlined seed is, and the generated `@main` wrapper's CFG is trivial.
-
-### Usage
+`rylink` reads a `rysmith` function pool, builds whole programs over it through W1 to W7, and optionally compiles and validates each one.
 
 ```
 rylink [OPTIONS]
 ```
 
-### Options
+The full option list is `rylink --help`, declared in [src/rylink.cpp](../src/rylink.cpp).
 
-| Flag | Default | Description |
+### Pool homogeneity
+
+Every whole program `rylink` builds has one well-defined behaviour, which requires the pool to be homogeneous: every leaf descriptor's `outcome` must agree, all `return`, all `trap`, or all `diverge`. A mixed pool has no well-defined fused behaviour, a returning caller splicing a call to a trapping or non-terminating callee, so `rylink` rejects it with an error. The common outcome becomes the program's outcome and decides what `--validate` asserts:
+
+| Pool | Fused program | `--validate` asserts |
 |---|---|---|
-| `-i, --input-dir PATH` | `rysmith_out` | Directory of rysmith-emitted `(.sir + .json)` pairs (`rysmith --emit-desc`) |
-| `-o, --output-dir PATH` | `rylink_out` | Root; each program lands in `<root>/prog_<id>_<i>/` |
-| `-n, --n-progs N` | 1 | Number of whole programs to generate |
-| `--id HEX6` | random | 6-hex-char generation ID prefix |
-| `--seed N` | random | RNG seed |
-| `--n-nodes N` | 4 | Target number of call-graph nodes per program |
-| `--max-outdeg N` | 3 | Maximum out-degree per CG node |
-| `--target sir\|c\|wasm\|python` | `c` | `c` uses `symirc --split-by-source`; `python` emits a single `program.py`; `sir` skips lowering |
-| `--structured-lowering true\|false\|random` | `false` | Structured lowering for the C (goto-free) and WASM (dispatch-free) targets, resolved per program |
-| `--vec-lowering <s>` | `random` | Vector lowering strategy, resolved per program from the target's set (C: all five; python: all but `vecext`) |
-| `--keep-require` | off | Keep `require` checks in C/WASM output |
-| `--keep-ub-guards` | off | Keep the dynamic UB guards even when the bundle is UB-free (default: dropped — see *Dropping UB guards* above) |
-| `--validate` | off | Run `symiri` on each emitted program and assert the entry returns its descriptor's solved value |
-| `-v, --verbose` | off | Per-init log lines (`validated: OK`, `symirc FAIL`, etc.) |
+| `return` (default `rysmith`) | returns the entry's value; the peephole `call + (c - o)` preserves each rewritten literal | the entry returns its descriptor's solved `ret` |
+| `trap` (`--require-ub`) | triggers UB, in the entry or in a spliced trapping callee | the program traps under `symiri` |
+| `diverge` (`--require-nonterm`) | diverges; the entry is the unmodified diverging leaf, and its empty `ret` means no value-preserving call splices, so the callees ride along as compiler surface | the program diverges, by bounded replay on the entry's lasso header from the descriptor path |
+
+UB guards are dropped for `return` and `diverge` bundles, both UB-free, and kept for `trap`. Under `--emit-main`, a `diverge` entry's `@main` asserts a random `i32` checksum: the entry never returns, so the check is unreachable, but the compiler still has to keep the computation.
+
+### Reducible pools
+
+When `--structured-lowering` is `true` or `random`, or the target is `python`, the composed program has to be reducible. Pool seeds may not be, so `rylink` discards every seed whose descriptor `reducible` flag is false before generating, a descriptor predating the flag parsing as false. If no reducible seed remains it aborts, pointing at `rysmith --require-reducible`. What survives composes into a reducible program by construction, since every inlined seed is reducible and the generated `@main` wrapper's CFG is trivial.
 
 ### Output layout
 
@@ -406,117 +283,72 @@ Each program lives in its own subdirectory:
 rylink_out/
   prog_<id>_0/
     program.sir        # bundled RefractIR (header comments: ENTRY, CG, PARAMS, RETURN)
-    common.h           # symirc --split-by-source artefacts (when --target c)
+    common.h           # symirc --split-by-source artefacts, under --target c
     program.c
   prog_<id>_1/
     ...
 ```
 
-The bundled `.sir` is the source of truth for every downstream consumer. Header comments record the entry function, the call graph, the solved parameter values for the entry, and the expected return value — making each bundle reproducible without consulting the descriptor JSON.
-
-### Example
+The bundled `.sir` is the source of truth for every downstream consumer. Its header comments record the entry function, the call graph, the entry's solved parameter values and its expected return, which makes a bundle reproducible without the descriptor JSON.
 
 ```sh
-# 1. Build a pool of 200 leaf functions with descriptors
+# 1. build a pool of 200 leaf functions with descriptors
 rysmith -n 200 --emit-desc -o pool/
 
-# 2. Generate 10 whole programs of ~4 functions each, validate every one
+# 2. 10 whole programs of about 4 functions each, all validated
 rylink -n 10 --n-nodes 4 --validate -i pool/ -o progs/
 
 # 3. C target with require checks kept
 rylink -n 5 --target c --keep-require -i pool/ -o progs/
 
-# 4. Structured (goto-free) C over a reducible pool
+# 4. structured (goto-free) C over a reducible pool
 rysmith -n 200 --emit-desc --require-reducible -o pool/
 rylink -n 5 --target c --structured-lowering random -i pool/ -o progs/
 ```
 
-## Tool: rytwin
+## rytwin
 
-`rytwin` is an **equivalence-preserving program transformer**. Given a generated program `f1` (a rysmith leaf or a rylink whole program), it emits an equivalent program `f2` such that `f1(i) == f2(i)` for **every** input `i` — same result, same undefined-behaviour outcome. Whole programs are profiled from `@main`, and twins are grafted into any function along the executed trace; the state capture is frame-aware, so states are attributed to the right activation even when block labels repeat across functions.
-
-rytwin only transforms **UB-free terminating** programs, because it profiles `f1` by interpreting it on its solved input. When the descriptor is present, a `trap` (`--require-ub`) or `diverge` (`--require-nonterm`) input is **rejected up front** with a clear message (profiling one would trap, the other would hang). Without a descriptor the profiling run is **bounded** by a block-step cap (`kNoDescProfileStepCap`, 3200): a terminating program finishes well within it, a trapping one throws UB, and a non-terminating one hits the cap — all reported as a clean failure rather than a hang.
-
-### Usage
+`rytwin` takes a generated program `f1`, a `rysmith` leaf or a `rylink` whole program, and emits an equivalent `f2`: same result and same undefined-behaviour outcome for every input. A whole program is profiled from `@main` and twins are grafted into any function along the executed trace; the state capture is frame-aware, so a state is attributed to the right activation even when block labels repeat across functions.
 
 ```sh
 rytwin <f1.sir> [OPTIONS]
 ```
 
-The descriptor (`func_<id>_<i>.json`) and, when present, the state profile (`<stem>.state.json`) are read from `f1`'s directory following rysmith's naming, so only `f1` is passed positionally. Without a sidecar the profile is computed in-process: rytwin interprets `f1` on its solved input (the descriptor realization, or `f1`'s `// SOLVED:` header when no descriptor is present).
+The full option list is `rytwin --help`, declared in [src/rytwin.cpp](../src/rytwin.cpp). Only `f1` is passed positionally: the descriptor (`func_<id>_<i>.json`) and, when present, the state profile (`<stem>.state.json`) are read from `f1`'s directory following `rysmith`'s naming. Without a sidecar the profile is computed in-process, by interpreting `f1` on its solved input, taken from the descriptor realization or from `f1`'s own `// SOLVED:` header.
 
-| Flag | Default | Description |
-|---|---|---|
-| `-o, --output PATH` | — | Output `.sir` (`f2`) |
-| `--p-twin P` | 0.5 | Probability of grafting a twin for each candidate region |
-| `--twin-select random\|interesting` | `random` | Region-selection policy (see *Region selection* below) |
-| `--seed N` | random | RNG seed |
-| `--target sir\|c\|wasm` | `sir` | Optionally compile `f2` via the in-process backend |
-| `--validate` | off | Run `symiri` on `f1` and `f2` with the profiled input, assert they agree and that at least one twin executed, then spot-check states sampled inside each guard's box (region vs twin body, bit-exact) |
-| `-v, --verbose` | off | Log each twin decision (grafted / skipped / rejected, with reason) to stderr |
-| `--keep-require` | off | Keep `require` checks in compiled output |
-| `--keep-ub-guards` | off | Keep the dynamic UB guards in the compiled twin (default: dropped — the twin is assumed UB-free; see *Dropping UB guards* above) |
-| `--emit-main` | off | Keep `@main` un-mangled in compiled output |
+`rytwin` transforms UB-free terminating programs only, because it profiles `f1` by interpreting it. With a descriptor present, a `trap` or `diverge` input is rejected up front with a clear message, since profiling one would trap and the other would hang. Without a descriptor the profiling run is bounded by a block-step cap (`kNoDescProfileStepCap`, 3200): a terminating program finishes well inside it, a trapping one throws UB, and a non-terminating one hits the cap, all three reported as a clean failure rather than a hang.
 
-### Twin unit
+### The twin unit
 
-The twin unit is the maximal single-entry region rooted at an executed block:
-every later block the entry *dominates* on the executed path, up to the first
-block it does not (or the function's return). The guard fires on the region's
-entry state, the twin reproduces the region's **net** effect and jumps straight
-to the region exit, **skipping every intermediate block and every loop
-iteration in between**. A whole loop collapses when its header is the region
-entry; a straight-line run collapses to one block, which is the degenerate case
-rather than a separate mode. A region is only twinned when its entry state is
-fully guardable and every covered block is free of non-intrinsic calls (a
-callee could mutate outer-frame state the net diff does not see); otherwise the
-window falls back to the single block at its entry.
+The twin unit is the maximal single-entry region rooted at an executed block: every later block the entry dominates on the executed path, up to the first block it does not, or the function's return.
+
+The guard fires on the region's entry state, and the twin reproduces the region's net effect and jumps straight to the region exit, skipping every intermediate block and every loop iteration in between. A whole loop collapses when its header is the region entry. A straight-line run collapses to one block, which is the degenerate case of the same rule rather than a second mode.
+
+A region is twinned only when its entry state is fully guardable and every covered block is free of non-intrinsic calls. Otherwise the window falls back to the single block at its entry.
 
 ### Region selection
 
-`--twin-select` is a **policy that assigns each eligible region a twin
-probability**; every region is then twinned by an independent draw (a single
-block is the degenerate one-block region, so the same rule covers both). The
-two policies differ only in that probability:
+`--twin-select` names a policy that assigns each eligible region a twin probability; every region is then twinned by an independent draw. A single block is the degenerate one-block region, so one rule covers both. The policies differ only in that probability.
 
-- **`random`** (default) — every region gets probability `--p-twin` (uniform).
-- **`interesting`** — the probability is tilted by how hard the region's twin
-  is to prove equivalent. Each region is scored
-  `1000·(loop iterations collapsed) + 10·(distinct blocks) + 5·(changed
-  leaves) + (entry fan-in)` — so collapsing a whole loop dominates — the score
-  is normalized to `norm ∈ [0,1]` program-wide, and the twin probability is
-  `p = pTwin ^ exp((0.5 − norm) / T)` with a fixed softmax temperature
-  `T = 0.5`. That is monotone in the score, and is `1` at `--p-twin 1` (twin
-  all) and `0` at `--p-twin 0` (twin none), so `--p-twin` still sets the
-  overall rate while the score biases *which* regions win it.
+`random`, the default, gives every region probability `--p-twin`.
 
-Overlapping regions are resolved in trace order — the first region drawn
-claims its blocks, and later regions covering any claimed block are dropped.
-Twin bodies are synthesized only for the regions actually chosen. Selection
-spans the **whole program** (all functions in the profiled trace), so on a
-rylink program `interesting` concentrates twins on the hardest regions across
-functions rather than scattering them uniformly.
+`interesting` tilts the probability by how hard the region's twin is to prove equivalent. Each region scores `1000*(loop iterations collapsed) + 10*(distinct blocks) + 5*(changed leaves) + (entry fan-in)`, so collapsing a whole loop dominates. The score is normalized program-wide to `norm` in `[0,1]`, and the twin probability is `p = pTwin ^ exp((0.5 - norm) / T)` at a fixed softmax temperature `T = 0.5`. That is monotone in the score, and it is `1` at `--p-twin 1` and `0` at `--p-twin 0`, so `--p-twin` still sets the overall rate while the score biases which regions win it.
 
-### Example
+Overlapping regions resolve in trace order: the first region drawn claims its blocks, and a later region covering any claimed block is dropped. Twin bodies are synthesized only for the regions actually chosen. Selection spans the whole program, every function in the profiled trace, so on a `rylink` program `interesting` concentrates twins on the hardest regions across functions instead of scattering them uniformly.
 
 ```sh
-# 1. Generate a program (pointer-free here, so more blocks are twin-eligible)
+# 1. generate a program (pointer-free, so more blocks are twin-eligible)
 rysmith -n 1 --emit-desc --emit-main --max-ptr-depth 0 -o out/
 
-# 2. Emit an equivalent twin, twinning every eligible block, and self-validate
+# 2. emit an equivalent twin, twinning every eligible region, and self-validate
 rytwin out/func_<id>_0.sir --p-twin 1.0 --validate -o out/twin.sir
 
-# 3. Differential test: compile both and compare
+# 3. differential test: compile both and compare
 rytwin out/func_<id>_0.sir --p-twin 1.0 --target c --emit-main -o out/twin.sir
 ```
 
-## Known Issues
+`--validate` runs `symiri` on `f1` and `f2` with the profiled input, asserts they agree and that at least one twin executed, and then spot-checks states sampled inside each guard's box, comparing the region against the twin body bit-exactly.
 
-The following commits, together, cause a 3-5x rysmith performace degradation:
+## Generation throughput
 
-1. 14343fc completely removed trivial "lit op lit" atoms.
-2. e390437 excluded store statements from counting into --n-stmts.
-3. 7118748 introduced indirect store and load.
-
-Limiting them would bring back some trivial patterns that might not be
-bad for compiler testing, and would allow more performant generation.
+Three generator choices dominate the cost of a `rysmith` run: no trivially constant `lit op lit` atoms, store statements not counting toward `--n-stmts`, and indirect loads and stores. Each raises the solver work per function, and relaxing any of them would trade output quality for throughput. [.agents/notes/implementation/2026-08-05-rysmith-throughput.md](../.agents/notes/implementation/2026-08-05-rysmith-throughput.md) records what they cost together and what a per-change attribution would take.

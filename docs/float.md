@@ -1,472 +1,223 @@
-# RefractIR Floating-Point
+# RefractIR floating-point
 
-This document consolidates every floating-point commitment RefractIR makes,
-across the spec, the interpreter (`symiri`), the C/WASM backends
-(`symirc`), and the solver (`symirsolve`). It is a companion to the
-formal spec — every section names the spec reference it derives from —
-and to its siblings [`undefined.md`](./undefined.md) (UB rules,
-per-tool) and [`intrinsics.md`](./intrinsics.md) (intrinsic taxonomy).
+This document collects every floating-point commitment RefractIR makes, across the spec, the interpreter, the backends and the solver. Each section names the spec reference it derives from. Its siblings are [undefined.md](./undefined.md), which states the UB rules per tool, and [intrinsics.md](./intrinsics.md), which owns the intrinsic taxonomy.
 
-RefractIR's FP design has one overriding principle:
+One principle governs the design:
 
-> **Every FP operation produces the same bit pattern on every backend.**
+> Every FP operation produces the same bit pattern on every backend.
 
-That is the *only* property worth defending. Everything below — the
-finite-only domain, RNE everywhere, `fmod` semantics, the canonical
-serialization invariant, the libm-sameness rule for future intrinsics —
-exists to keep that property mechanical and checkable, not aspirational.
-
----
+That is the only property worth defending, and everything below exists to keep it mechanical and checkable: the finite-only domain, RNE everywhere, `fmod` semantics, and the canonical serialization invariant. The matching rule for intrinsics, that the interpreter and every backend agree on every value, lives with the intrinsic taxonomy in [intrinsics.md](./intrinsics.md).
 
 ## 1. Value model (spec §2.9)
 
-- **Types.** `f32` (IEEE 754 binary32) and `f64` (IEEE 754 binary64).
-  No `f16`, `f128`, `bfloat16`, x87 80-bit extended, or decimal floats.
-- **Domain — finite only.** The only valid RefractIR FP values are
-  *finite* IEEE 754 values. `±∞` and NaN are **not** RefractIR values; any
-  op whose IEEE result would be `±∞` or NaN is **UB** (§7.4 rules 6–7).
-  Programs that depend on infinity or NaN propagation are outside the
-  language.
-- **Signed zero.** `+0.0` and `-0.0` are distinct bit patterns,
-  both valid. They compare equal (`0.0 == -0.0` is `true`) but are
-  distinguishable by `@signbit` (planned, batch D) and by `to_bits`.
-  The canonical serializer preserves the sign bit across every text
-  boundary.
-- **Subnormals.** Subnormal (denormal) values are first-class finite
-  values. RefractIR does **not** flush-to-zero, and no backend may enable
-  FTZ/DAZ. `parseFloatLiteral` accepts subnormals; only true overflow
-  to `±HUGE_VAL` is rejected.
-- **Rounding.** All ops use **round-to-nearest, ties-to-even** (IEEE
-  `roundNearestTiesToEven` / SMT `RNE`). There is no alternate rounding
-  mode, no `fenv` access, and no rounding mode parameter on any
-  intrinsic.
+The types are `f32` (IEEE 754 binary32) and `f64` (IEEE 754 binary64). There is no `f16`, `f128`, `bfloat16`, x87 80-bit extended, or decimal float.
 
-SMT sort mapping:
+The domain is finite only. The valid RefractIR floating-point values are exactly the finite IEEE 754 values; `±∞` and NaN are not values of the language, and any operation whose IEEE result would be one of them is UB (spec §7.4 rules 6 and 7). A program that depends on infinity or NaN propagation is outside the language.
 
-| RefractIR type | SMT sort               |
-|------------|------------------------|
-| `f32`      | `(_ FloatingPoint 8 24)`  |
-| `f64`      | `(_ FloatingPoint 11 53)` |
+`+0.0` and `-0.0` are distinct bit patterns and both valid. They compare equal under `==`, and `@signbit` and `@to_bits` tell them apart. The canonical serializer preserves the sign bit across every text boundary.
 
----
+Subnormal values are first-class. RefractIR does not flush to zero, and no backend may enable FTZ or DAZ. `parseFloatLiteral` accepts subnormals, rejecting only true overflow to `±HUGE_VAL`.
+
+Every operation rounds to nearest, ties to even (IEEE `roundNearestTiesToEven`, SMT `RNE`). There is no alternate rounding mode, no `fenv` access, and no rounding-mode parameter on any intrinsic.
+
+| RefractIR type | SMT sort |
+|---|---|
+| `f32` | `(_ FloatingPoint 8 24)` |
+| `f64` | `(_ FloatingPoint 11 53)` |
 
 ## 2. Operations and rounding
 
-All scalar operators are typed homogeneously: every atom in a `+`/`-`
-chain shares the exact same FP type; `*`, `/`, `%` and atom-level coefs
-likewise. Mixed-width or int↔float arithmetic requires an explicit `as`
-cast (§6.7).
+Scalar operators are typed homogeneously: every atom in a `+` or `-` chain shares one FP type, and so do `*`, `/`, `%` and the atom-level coefficients. Mixing widths, or integers with floats, requires an explicit `as` cast (spec §6.7).
 
-| Op  | Semantics                                  | Rounding | UB rule  |
-|-----|--------------------------------------------|----------|----------|
-| `+` | IEEE add                                   | RNE      | §7.4-6,7 |
-| `-` | IEEE sub                                   | RNE      | §7.4-6,7 |
-| `*` | IEEE mul                                   | RNE      | §7.4-6,7 |
-| `/` | IEEE div                                   | RNE      | §7.4-6,7 |
-| `%` | C `fmod` (truncated-quotient remainder)    | RNE      | §7.4-6,7 |
+| Op | Semantics | Rounding | UB rule |
+|---|---|---|---|
+| `+` | IEEE add | RNE | §7.4-6,7 |
+| `-` | IEEE sub | RNE | §7.4-6,7 |
+| `*` | IEEE mul | RNE | §7.4-6,7 |
+| `/` | IEEE div | RNE | §7.4-6,7 |
+| `%` | C `fmod`, truncated-quotient remainder | RNE | §7.4-6,7 |
 
-Each op's result must be **finite** (not `±∞`, not NaN); otherwise the
-path is UB. This is the cross-backend contract: each backend asserts
-finiteness after every FP arithmetic op.
+Each result must be finite, or the path is UB. The interpreter, the C backend and the Python backend check finiteness after every FP arithmetic operation, and the solver conjoins it to the path condition. Among the operators, the WASM backend guards only the `%` intermediate (§11.3); a non-finite result of a plain `+`, `-`, `*` or `/` is not trapped there, and a UB path silently computes with it ([symirc.md](./symirc.md#refinement-and-undefined-behaviour)). FP intrinsics are guarded on every backend, WASM included ([intrinsics.md](./intrinsics.md)).
 
-There are no other built-in FP operators in the v0.2.2 language.
-Everything else (`sqrt`, `fabs`, `floor`, `ceil`, `trunc`, `rint`,
-`fma`, …) is reserved for the *intrinsic* layer — see [`intrinsics.md`
-batch D](./intrinsics.md#p0--solver-doc-c--wasm-doc).
+Those five are the only built-in FP operators. Everything else, `sqrt`, `fabs`, `floor`, `fma` and the rest, lives in the intrinsic layer that [intrinsics.md](./intrinsics.md) §12.6 specifies.
 
 ### 2.1 Comparison
 
-`cmp <relop>` lifts to FP transparently. Lane-wise on vectors, scalar
-otherwise. Result type is `i1` (scalar) or `<N> i1` (mask).
+`cmp <relop>` lifts to FP transparently, lane-wise on vectors and scalar otherwise, giving `i1` or `<N> i1`.
 
-| relop      | Meaning                                                |
-|------------|--------------------------------------------------------|
-| `==`, `!=` | IEEE numeric equality. `+0.0 == -0.0` is `true`.       |
-| `<`, `<=`  | IEEE ordered less-than / less-equal.                   |
-| `>`, `>=`  | IEEE ordered greater-than / greater-equal.             |
+| relop | Meaning |
+|---|---|
+| `==`, `!=` | IEEE numeric equality; `+0.0 == -0.0` is true |
+| `<`, `<=` | IEEE ordered less-than, less-equal |
+| `>`, `>=` | IEEE ordered greater-than, greater-equal |
 
-Because NaN is UB, the "unordered" cases of the IEEE relops never
-arise: by the time `cmp` runs, both operands are finite, so every relop
-is total.
+NaN is UB, so the unordered cases of the IEEE relops never arise: both operands are finite by the time `cmp` runs, and every relop is total.
 
-**Two equalities — do not conflate them.** RefractIR distinguishes
-*comparing* two floats from *two floats being the same value*:
+RefractIR keeps two notions of float equality apart, and conflating them is a real bug rather than a pedantic distinction:
 
 | notion | applies to | `+0.0` vs `-0.0` | SMT |
-|--------|------------|------------------|-----|
-| **IEEE comparison** | the `==` / `!=` operators, `cmp` | **equal** | `fp.eq` |
-| **Value identity** | state recurrence, model equality, any "is this the same value" question | **distinct** | `=` |
+|---|---|---|---|
+| IEEE comparison | the `==` and `!=` operators, `cmp` | equal | `fp.eq` |
+| Value identity | state recurrence, model equality, any "is this the same value" question | distinct | `=` |
 
-The operator answers a numeric question and follows IEEE, so `+0.0 ==
--0.0` is `true` (§1). Value identity asks whether two floats *are* the
-same RefractIR value; since `+0.0` and `-0.0` are distinct values that
-`@signbit` and `@to_bits` tell apart, identity keeps them apart too.
+The operator answers a numeric question and follows IEEE. Value identity asks whether two floats *are* the same RefractIR value, and since `+0.0` and `-0.0` are distinct values that `@signbit` and `@to_bits` tell apart, identity keeps them apart too.
 
-The language surfaces only the comparison form. Value identity has no
-operator: an analysis that needs "same value" must reach for it
-directly — `@to_bits` equality at the source level, SMT `=` (never
-`fp.eq`) in the solver, or a raw bit comparison in the interpreter. Any
-whole-state question ("did this state recur?", "do these two models
-agree?") is an identity question, so answering it with `==` would
-silently merge the two zeros. A dedicated `@is_bitexact` predicate is a
-candidate for a future revision (spec §13).
+Only the comparison form is in the language. Value identity has no operator, so an analysis that needs it reaches for it directly: `@to_bits` equality at the source level, SMT `=` rather than `fp.eq` in the solver, a raw bit comparison in the interpreter. Every whole-state question, whether a state recurred or whether two models agree, is an identity question, and answering it with `==` silently merges the two zeros. Spec §13 lists a dedicated `@is_bitexact` predicate as a candidate for a future revision.
 
-### 2.2 `select` and FP
+### 2.2 select
 
-`select cond, a, b` evaluates only the selected arm (lazy). The unused
-arm's UB does **not** fire (§7.2). This means `select (y != 0.0), x/y, 0.0`
-is a legal idiom to dodge divide-by-zero UB on the `y == 0` path.
+`select cond, a, b` evaluates only the arm it takes, so UB in the other arm does not fire (spec §7.2). `select (y != 0.0), x/y, 0.0` is therefore a legal way to dodge divide-by-zero UB on the `y == 0` path.
 
----
+## 3. The `%` operator is `fmod`, not `remainder`
 
-## 3. The `%` operator: `fmod`, not `remainder`
-
-This is the most-likely-to-trip-up corner of the language.
-
-RefractIR's `%` is **C `fmod`** (truncated quotient), **not** IEEE 754
-`remainder` (`fp.rem`):
+RefractIR's `%` is C `fmod`, the truncated-quotient remainder, not IEEE 754 `remainder` (`fp.rem`):
 
 > `x % y = x - trunc(x / y) * y`
 
-where `trunc` rounds toward zero. The sign of the result follows the
-sign of `x`, matching integer `%` (§2.5).
+with `trunc` rounding toward zero. The sign of the result follows the sign of `x`, which matches integer `%` (spec §2.5).
 
-`fmod` differs from `remainder` in two visible ways:
-- **Sign rule.** `remainder` returns the result with the smallest
-  absolute value, possibly negative when `x > 0`; `fmod` preserves
-  `sign(x)`.
-- **Half-quotient ties.** When `x/y` is exactly a half-integer,
-  `remainder` rounds to even; `fmod` rounds toward zero.
+The two differ visibly in two places. `remainder` returns the result of smallest absolute value, which can be negative when `x > 0`, while `fmod` preserves `sign(x)`. And when `x/y` is exactly a half-integer, `remainder` rounds the quotient to even while `fmod` rounds it toward zero.
 
-If a future intrinsic needs IEEE `remainder` semantics, that lands as
-`@remainder` (tier P1 in `intrinsics.md`) — explicitly distinct from
-`@fmod` (also P1, redundant with `%` but kept for clarity at the source
-level).
+`x % 0.0`, for either signed zero, has NaN as its IEEE result and is UB under §7.4 rule 7. Overflow of the result itself cannot happen mathematically, since the true remainder has magnitude below `|y|`; it can only arrive spuriously through the SMT and WASM lowerings, which §11 covers.
 
-UB cases for `%`:
-- `x % 0.0` (any signed zero) — IEEE result is NaN — UB (§7.4-7).
-- `x` finite, `y` finite, non-zero, but result overflows — cannot
-  happen mathematically for `fmod` (the true remainder has magnitude
-  `< |y|`); only spurious from the SMT/WASM lowering, see §11.
-
----
+An intrinsic needing IEEE `remainder` semantics would land as `@remainder`, distinct from an `@fmod` intrinsic that would duplicate `%` at the source level. Both sit at tier P1 in [intrinsics.md](./intrinsics.md).
 
 ## 4. Casts (`as`)
 
-All four directions are well-typed under §6.4. Each cast is a
-**single-rounding** op under RNE, except for the f32→f64 widening
-which is always exact.
+All four directions are well-typed under spec §6.4. Each cast rounds once under RNE, except the f32 to f64 widening, which is exact.
 
-| Cast            | Semantics                                                                         | UB                                |
-|-----------------|-----------------------------------------------------------------------------------|-----------------------------------|
-| `iN as fM`      | Convert signed integer to FP under RNE.                                           | If result overflows (e.g. `i64` → `f32` near `2^128`). |
-| `fN as iM`      | Truncate toward zero, then check fit.                                             | Out-of-range after truncation (§7.4-8).               |
-| `f32 as f64`    | Exact widening (every f32 is an f64).                                             | Never.                            |
-| `f64 as f32`    | Round-to-f32 under RNE.                                                           | If the rounded result is `±∞`.    |
+| Cast | Semantics | UB |
+|---|---|---|
+| `iN as fM` | Signed integer to FP under RNE | Never: with `N <= 64` (§11 lowering), every `iN` magnitude is far below `f32`'s finite maximum |
+| `fN as iM` | Truncate toward zero, then check the fit | Out of range after truncation (§7.4-8) |
+| `f32 as f64` | Exact widening: every f32 is an f64 | Never |
+| `f64 as f32` | Round to f32 under RNE | Rounded result is `±∞` |
 
-Vector casts apply per lane.
+Vector casts apply per lane. There are no pointer-to-float casts (spec §13 non-goals).
 
-There are no pointer↔float casts (forbidden by §13 non-goals).
+## 5. UB rules
 
----
+The three FP UB rules from spec §7.4 also appear in [undefined.md](./undefined.md#scalar-arithmetic-71-74), which is the per-tool enforcement reference:
 
-## 5. UB rules (recap)
+* Rule 6, FP overflow: any `+`, `-`, `*`, `/` whose RNE result would be `±∞`.
+* Rule 7, FP invalid: any operation whose result would be NaN, which covers `0/0` and `x % 0`.
+* Rule 8, float-to-int out of range: `fN as iM` where the truncated mathematical value falls outside `iM`.
 
-The three FP UB rules from §7.4 also appear in
-[`undefined.md` §Scalar arithmetic](./undefined.md#scalar-arithmetic-71-74),
-which is the per-tool enforcement reference. Summary:
-
-- **Rule 6 — FP overflow.** Any `+`, `-`, `*`, `/` whose RNE result
-  would be `±∞` is UB.
-- **Rule 7 — FP invalid (NaN).** Any op whose result would be NaN is UB.
-  Covers `0/0` and `x % 0`.
-- **Rule 8 — Float-to-int out-of-range.** `fN as iM` is UB if the
-  truncated mathematical value is outside `iM`'s representable range.
-
-Per-lane analogues apply to vectors (rule 21).
-
----
+Rule 21 applies the per-lane analogues to vectors.
 
 ## 6. Vector FP (spec §2.11, §6.9)
 
-- Vectors `<N> f32` and `<N> f64` are first-class value types. `N ≥ 2`.
-- Lane-wise arithmetic: every scalar op lifts to the corresponding
-  lane-wise op. Rounding mode, UB rules, and `cmp` semantics are
-  identical to scalar — applied per lane.
-- `cmp <relop> v, w` on FP vectors yields `<N> i1` (a per-lane mask).
-- No FP-vector intrinsics ship in v0.2.2. Horizontal reductions
-  (`@reduce_add`, `@reduce_max`, …) are tier P1 (vector SIMD work,
-  §13).
+`<N> f32` and `<N> f64` are first-class value types for `N >= 2`. Every scalar operation lifts to its lane-wise counterpart, with identical rounding, UB rules and `cmp` semantics applied per lane, so `cmp <relop> v, w` yields `<N> i1`.
 
-Vectors are not addressable (no `ptr <N> T`, no `addr` on a vector
-local) — see §13 non-goals.
+The horizontal reductions `@reduce_add`, `@reduce_min` and `@reduce_max` fold an FP vector to a scalar; [intrinsics.md](./intrinsics.md) §12.8 specifies the fold order and the min/max tie-break, both of which matter for bit-exactness.
 
----
+Vectors are not addressable: there is no `ptr <N> T` and no `addr` on a vector local (spec §13).
 
 ## 7. Literals and inference
 
-- **Float literal token.** `1.5`, `-0.2`, `1e-5`, `3.14E+2`.
-  Decimal-only — **no hex-float literals** at the source level.
-- **No `inf`, `nan`, `INFINITY`, `NAN` literal forms.** Programs cannot
-  construct non-finite values; that follows directly from the
-  finite-only domain.
-- **Default inference.** A bare float literal is `f32` if the
-  surrounding context does not force `f64`. Coexisting with the integer
-  default of `i32`, this matches the "narrow if possible" tradition
-  C / Rust users expect.
-- **Bit-exact parsing.** Every float literal is parsed by
-  `refractir::parseFloatLiteral` (which wraps `std::strtod` — never
-  `std::stod`, see §9 below).
-- **`undef` of FP type** is allowed at the type level (any leaf may be
-  `undef`); reading it is UB (§7.1 rule 3).
+A float literal is decimal, as in `1.5`, `-0.2`, `1e-5`, `3.14E+2`. There are no hex-float source literals, and no `inf`, `nan`, `INFINITY` or `NAN` literal forms, which follows directly from the finite-only domain: a program cannot construct a non-finite value.
 
----
+A bare float literal is `f32` unless the surrounding context forces `f64`, alongside the integer default of `i32`. Every float literal parses through `refractir::parseFloatLiteral`, never `std::stod` (§9).
 
-## 8. Coexistence with integer `%` semantics
+`undef` of FP type is allowed at the type level, as any leaf may be `undef`, and reading it is UB under §7.1 rule 3.
 
-The `%` operator on integers is also truncated-quotient (`bvsrem`,
-C-like), and `fmod` on floats was chosen to match that. The
-language-level mental model is:
+## 8. Why `fmod` and not `remainder`
 
-> `x % y` always means "the remainder when `x / y` is truncated toward zero."
+Integer `%` is also truncated-quotient (`bvsrem`, as in C), and float `%` was chosen to match it, so one mental model covers both:
 
-uniformly for both integers and floats. This avoids an asymmetry that
-trips up users who write `% 0.5` for fractional-part tricks (where
-`remainder` would give a negative remainder when `x > 0`).
+> `x % y` is the remainder when `x / y` is truncated toward zero.
 
----
+The alternative introduces an asymmetry that trips up anyone writing `% 0.5` for a fractional-part trick, where `remainder` returns a negative value for positive `x`.
 
-## 9. Canonical serialization invariant (CLAUDE.md, MANDATORY)
+## 9. Canonical serialization
 
-RefractIR carries `f32`/`f64` values **bit-exactly** across every text
-boundary: `.sir` source, descriptor JSON, SOLVED/PARAMS/RETURN headers,
-model-dump files, and CLI positional args. Two canonical entry points
-own this:
+RefractIR carries `f32` and `f64` values bit-exactly across every text boundary: `.sir` source, descriptor JSON, the `SOLVED` / `PARAMS` / `RETURN` headers, model-dump files, and CLI positional arguments. Two entry points in [include/ast/ast.hpp](../include/ast/ast.hpp) own this, and every producer and consumer goes through them.
 
-- **`refractir::formatDouble(double)`** (`include/ast/ast.hpp`) — shortest
-  decimal string that round-trips via
-  `std::to_chars(…, std::chars_format::shortest)`, with `.0` appended
-  if neither `.` nor exponent appears (so an integer-valued literal
-  still tokenises as float). Preserves signed zero.
-- **`refractir::parseFloatLiteral(std::string)`** — wraps `std::strtod`.
-  Accepts subnormals; only true overflow to `±HUGE_VAL` raises.
-  **Never use `std::stod`** — libstdc++ throws `out_of_range` on any
-  `ERANGE` including valid subnormals.
+`refractir::formatDouble(double)` emits the shortest decimal string that round-trips via `std::to_chars(…, std::chars_format::shortest)`, appending `.0` when neither a `.` nor an exponent appears, so an integer-valued literal still tokenises as a float and signed zero survives.
 
-Intentional, documented divergences:
+`refractir::parseFloatLiteral(std::string)` wraps `std::strtod`. It accepts subnormals and raises only on true overflow to `±HUGE_VAL`. Never use `std::stod`: libstdc++ throws `out_of_range` on any `ERANGE`, valid subnormals included, so a perfectly representable denormal would abort the interpreter.
 
-| Site                       | Why                                            |
-|----------------------------|------------------------------------------------|
-| `src/backend/c_backend.cpp`   | Emits **C grammar** floats (`f`/`F` suffix). Its own bit-exact formatter; comments point back to `refractir::formatDouble`. |
-| `src/backend/wasm_backend.cpp`| Emits **WAT grammar** floats (`±inf`/`nan` syntax, `f32.const`/`f64.const`). Its own bit-exact formatter. |
+Two sites diverge on purpose, because they emit a different grammar. [src/backend/c_backend.cpp](../src/backend/c_backend.cpp) emits C floats with the `f` suffix, and [src/backend/wasm_backend.cpp](../src/backend/wasm_backend.cpp) emits WAT floats with `f32.const` / `f64.const` syntax. Each carries its own bit-exact formatter and a comment pointing back to `formatDouble`.
 
-If you are about to write `std::stod`, `std::to_string(double)`,
-`std::ostringstream` with `precision(17)`, `printf("%.17g", …)`, or
-`printf("%f", …)` in RefractIR code — **stop and use the canonical pair**.
+Before writing `std::stod`, `std::to_string(double)`, an `std::ostringstream` with `precision(17)`, `printf("%.17g", …)` or `printf("%f", …)` anywhere in RefractIR, use the canonical pair instead.
 
-**The invariant covers the SMT boundary too.** Handing a float to a
-solver is a value crossing, and a decimal rendering loses on both ends:
-`std::to_string` formats with `%f`, keeping only six fraction digits (so
-`1e-7` becomes `"0.000000"`, flushing a positive value to zero), and a
-decimal string parses through a *real*, which has no signed zero (so
-`-0.0` comes back `+0.0`). Build FP constants from the `double` itself:
-`ISolver::make_fp_value_from_real`, which goes to
-`Z3_mk_fpa_numeral_double` on the Alive backend and to Bitwuzla's
-sign/exponent/significand triple constructor. The decimal-string
-`make_fp_value` is **not** for values that started life as a `double`.
+The invariant covers the SMT boundary too, because handing a float to a solver is a value crossing and a decimal rendering loses at both ends. `std::to_string` formats with `%f` and keeps six fraction digits, so `1e-7` becomes `"0.000000"`, flushing a positive value to zero. And a decimal string parses through a real, which has no signed zero, so `-0.0` comes back `+0.0`. Build FP constants from the `double` itself through `ISolver::make_fp_value_from_real`, which reaches `Z3_mk_fpa_numeral_double` on the Alive backend and Bitwuzla's sign, exponent and significand constructor. The decimal-string `make_fp_value` is not for a value that started life as a `double`.
 
-The interpreter emits its `Result:` line via `printf("%a", …)` (hex
-float). Hex-float form is parseable by `strtod` and bit-exact by
-construction — that is what the xval harness compares against the
-C-side `printf("Result: %a\n", …)`. Hex float as a *source-level*
-literal is **not** supported; this is purely a serialization channel
-for results.
-
----
+The interpreter's `Result:` line is the one channel in hex-float form, via `printf("%a", …)`. Hex float is parseable by `strtod` and bit-exact by construction, which is what lets the cross-validation harness compare it against the C side's `printf("Result: %a\n", …)` byte for byte. It is a serialization channel only; hex float is not a source-level literal.
 
 ## 10. SMT encoding (spec §9, §2.9)
 
-All FP reasoning happens in **QF_FP** (CVC5, Z3, Bitwuzla all support
-this; RefractIR does not require any solver-specific extension).
+All FP reasoning happens in QF_FP, which CVC5, Z3 and Bitwuzla all support, and RefractIR requires no solver-specific extension. The sorts are `(_ FloatingPoint 8 24)` and `(_ FloatingPoint 11 53)`.
 
-- Sorts: `(_ FloatingPoint 8 24)` and `(_ FloatingPoint 11 53)`.
-- A single `roundNearestTiesToEven` rounding-mode constant is created
-  once per `Solver` and threaded through every FP op.
-- After every FP `+`, `-`, `*`, `/`, the encoder conjoins
-  `(not (fp.isInfinite t)) AND (not (fp.isNaN t))` to `PC`. The
-  solver's `assertFPFinite` helper centralizes this; see
-  `solver.cpp:1698`.
-- Symbol values (`sym %?x: value f32`) are encoded as fresh FP
-  constants of the corresponding sort. No `sym` of vector-FP type is
-  rejected — vector FP symbols are per-lane independent.
-- `%` (fmod) encodes as
-  `fp.sub(x, fp.mul(fp.roundToIntegral[RTZ](fp.div[RNE](x, y)), y))`
-  — see §11 for an important caveat about this encoding.
-- Casts encode through `fp.to_fp` / `fp.to_sbv` with RNE for the
-  conversion step and an explicit BV-range check for `fN as iM`.
+A single `roundNearestTiesToEven` constant is created once per solver and threaded through every FP operation.
 
----
+After every FP `+`, `-`, `*` and `/`, the encoder conjoins `(not (fp.isInfinite t))` and `(not (fp.isNaN t))` to the path condition; `assertFPFinite` in [src/solver/internal.hpp](../src/solver/internal.hpp) centralizes it.
 
-## 11. Lowering principles and the cross-backend contract
+A `sym %?x: value f32` encodes as a fresh FP constant of the matching sort. Vector FP symbols are allowed, their lanes independent.
 
-The bit-exactness goal partitions into three responsibilities.
+`%` encodes as `fp.sub(x, fp.mul(fp.roundToIntegral[RTZ](fp.div[RNE](x, y)), y))`; §11 covers the caveat on the intermediate. Casts encode through `fp.to_fp` and `fp.to_sbv`, with RNE on the conversion and an explicit BV range check for `fN as iM`.
 
-### 11.1 Interpreter (`symiri`)
+## 11. Lowering and the cross-backend contract
 
-- Sets `std::fesetround(FE_TONEAREST)` at startup, and on x86 also
-  clears MXCSR FTZ and DAZ so subnormals are not flushed in case a
-  parent process or upstream library left them set.
-- Stores f32 values as `double` in `floatVal`; after every f32 op,
-  narrows via `static_cast<double>(static_cast<float>(v))` and runs
-  `std::isinf`/`std::isnan` finiteness checks (`checkFPResult`,
-  `interpreter.cpp:16`). This narrow-then-check pattern is bit-exact
-  with single-rounded f32 arithmetic by an "innocuous double
-  rounding" theorem: if the intermediate precision satisfies `q ≥
-  2p + 1` where `p` is the target precision, computing in `q` then
-  rounding to `p` matches single-rounded precision-`p` arithmetic
-  for every RNE-rounded binary op among `+ - × ÷ √`. RefractIR uses
-  `p = 24` (f32), `q = 53` (f64), so `53 ≥ 49` ✓
-  (Boldo & Melquiond, *When Double Rounding is Odd*, 2005).
-- Parameter binding rounds f32 args to f32 precision before the body
-  runs. Stored f32 locals truncate the held `double` to 4-byte storage
-  so re-reads agree with the C backend (`interpreter.cpp:825`,
-  `998`, `1222`).
-- `%` calls `std::fmod` / `std::fmodf` from libm, with an explicit
-  §2.9 intermediate-`x/y` finiteness check before the fmod call so
-  the operand-precision overflow rule (§7.4 rule 6 applied to the
-  inner `fp.div` of the encoding) is enforced consistently with the
-  WASM and solver paths.
-- `as` to integer pre-bounds-checks against `[-2^(bits-1), 2^(bits-1))`
-  before `static_cast<int64_t>`.
+Bit-exactness partitions into one responsibility per tool.
 
-### 11.2 C backend (`symirc --target c`)
+### 11.1 Interpreter
 
-- Emits `float` / `double` for `f32` / `f64`.
-- Emits float literals via the backend's own bit-exact formatter
-  (intentional divergence from `formatDouble` — different grammar).
-- Emits `fmodf` / `fmod` for `%`, wrapped in a GCC statement
-  expression that pre-evaluates `x/y` and traps on a non-finite
-  intermediate, enforcing §2.9 alongside the interpreter and WASM
-  paths.
-- Forces lane-unroll for float vector `%` so each lane goes through
-  the lane-wise fmod helper (GCC vector extensions don't define `%`
-  for floats, so the inline path would otherwise emit invalid C).
-- Emits explicit `isinf` / `isnan` checks after every FP arithmetic op
-  (UBSan's `-fsanitize=float-divide-by-zero` does not catch
-  finite-overflow-to-∞ by itself).
-- Pins FP behaviour **at the source level**, not via harness compile
-  flags. Every emitted compilation unit (via `common.h`) carries
-  three guards:
-  ```c
-  #if !defined(__STDC_IEC_559__) || __STDC_IEC_559__ != 1
-  # error "RefractIR-lowered C requires an IEC 60559 / IEEE 754 conforming implementation"
-  #endif
-  #if !defined(FLT_EVAL_METHOD) || FLT_EVAL_METHOD != 0
-  # error "RefractIR-lowered C requires an implementation with FLT_EVAL_METHOD == 0"
-  #endif
-  #pragma STDC FP_CONTRACT OFF
-  ```
-  The C standard mandates the `#pragma` override any `-ffp-contract`
-  flag the caller passes, and `FLT_EVAL_METHOD == 0` rules out x87 /
-  `long double` excess-precision evaluation. The xval and reify-diff
-  harnesses therefore do not need to pass any extra FP flags.
-- Required compile flags for cross-validation: `-fsanitize=undefined
-  -fno-sanitize-recover=all -lm`. `-Ofast` and `-ffast-math` are
-  forbidden (they bypass the source-level pragma).
+The interpreter sets `std::fesetround(FE_TONEAREST)` at startup and, on x86, clears MXCSR FTZ and DAZ, in case a parent process or an upstream library left them set.
 
-### 11.3 WASM backend (`symirc --target wasm`)
+It stores f32 values as `double` and, after every f32 operation, narrows via `static_cast<double>(static_cast<float>(v))` and runs the finiteness checks in `checkFPResult`. That narrow-then-check pattern is bit-exact with single-rounded f32 arithmetic: computing in precision `q` and then rounding to precision `p` matches single-rounded precision-`p` arithmetic for every RNE-rounded binary operation among `+ - * / sqrt` when `q >= 2p + 1` (Boldo and Melquiond, *When Double Rounding is Odd*, 2005), and RefractIR has `p = 24` and `q = 53`.
 
-- Emits `f32.const` / `f64.const` via its own bit-exact formatter.
-- Emits `f32.{add,sub,mul,div}` / `f64.{add,sub,mul,div}` directly.
-- `%` is composed inline as the §2.9 encoding `x - fN.trunc(x / y) * y`
-  (no native `fN.rem` instruction in WASM MVP). The §2.9 finiteness
-  rule on the intermediate `x/y` falls out naturally because a
-  non-finite intermediate propagates to the final result, which the
-  post-op finiteness check would catch — **except** the WASM backend
-  does not yet emit a post-op finiteness check for `%` (tracked
-  follow-up; the four `fp_rem_intermediate_overflow_*.sir` tests
-  carry `// SKIP: WASM` until this lands).
-- f32↔f64 conversion uses `f64.promote_f32` / `f32.demote_f64`.
+Parameter binding rounds an f32 argument to f32 precision before the body runs, and a stored f32 local truncates its held `double` to 4-byte storage, so a re-read agrees with the C backend.
 
-### 11.4 Solver (`symirsolve`)
+`%` calls `std::fmod` or `std::fmodf`, preceded by an explicit finiteness check on the intermediate `x/y`, which enforces the §2.9 operand-precision overflow rule consistently with the WASM and solver paths. A cast to integer bounds-checks against `[-2^(bits-1), 2^(bits-1))` before the `static_cast<int64_t>`.
 
-- Already described in §10.
+### 11.2 C backend
 
-### 11.5 Reify-diff cross-validation
+The C backend emits `float` and `double`, and float literals through its own bit-exact formatter.
 
-The reify-diff harness solves a path, reifies the model into a concrete
-`.sir`, runs the interpreter, compiles the C output, runs both, and
-**diffs the `Result:` line byte-equally**. The interpreter prints via
-`printf("%a", …)`; the C harness's main also prints via `%a`. Hex-float
-output makes every bit observable.
+`%` emits `fmodf` or `fmod` wrapped in a GCC statement expression that pre-evaluates `x/y` and traps on a non-finite intermediate, matching the interpreter and WASM. A float vector `%` is forced to lane-unroll through the lane-wise fmod helper, since GCC vector extensions do not define `%` for floats and the inline path would emit invalid C.
 
-The xval test harness compiles with **`gcc … -fsanitize=undefined
--fno-sanitize-recover=all -lm`** (no opt level explicitly set, so
-default `-O0`). The harness deliberately passes no `-ffp-contract`
-or `-fexcess-precision` flag — those concerns are pinned at the
-source level by the C backend's emitted `#pragma STDC FP_CONTRACT
-OFF` and `FLT_EVAL_METHOD == 0` `#error` guards (§11.2).
+Explicit `isinf` and `isnan` checks follow every FP arithmetic operation, because `-fsanitize=float-divide-by-zero` does not catch finite overflow to infinity by itself.
 
-### 11.6 Libm-sameness rule (forward-looking)
+FP behaviour is pinned at the source level rather than through harness compile flags. Every emitted compilation unit carries three guards via `common.h`:
 
-When a future intrinsic is **libm-backed** on the C and interpreter
-targets (planned for tier P3 — transcendentals like `@exp`, `@log`,
-`@sin`), both targets must link against the *same* libm so that the
-last-ULP behaviour is byte-equal by construction. The WASM target
-**rejects** any such intrinsic at compile time ("no native WASM op
-whose polyfill would diverge from the C target"). The solver rejects
-the path. See [`intrinsics.md` §Tier summary](./intrinsics.md).
+```c
+#if !defined(__STDC_IEC_559__) || __STDC_IEC_559__ != 1
+# error "RefractIR-lowered C requires an IEC 60559 / IEEE 754 conforming implementation"
+#endif
+#if !defined(FLT_EVAL_METHOD) || FLT_EVAL_METHOD != 0
+# error "RefractIR-lowered C requires an implementation with FLT_EVAL_METHOD == 0"
+#endif
+#pragma STDC FP_CONTRACT OFF
+```
 
-This rule does not apply to batch D — every batch D intrinsic is
-either correctly-rounded by IEEE 754 (so libm divergence cannot occur)
-or pure bit manipulation. That is the design criterion that makes
-batch D shippable in the first place.
+The C standard requires the pragma to override any `-ffp-contract` flag the caller passes, and `FLT_EVAL_METHOD == 0` rules out x87 and `long double` excess-precision evaluation, so no harness has to pass an FP flag.
 
----
+Cross-validation compiles with `-fsanitize=undefined -fno-sanitize-recover=all -lm`. `-Ofast` and `-ffast-math` are forbidden, since they bypass the source-level pragma.
+
+### 11.3 WASM backend
+
+The WASM backend emits `f32.const` and `f64.const` through its own bit-exact formatter, and `f32.{add,sub,mul,div}` / `f64.{add,sub,mul,div}` directly. f32 and f64 conversion uses `f64.promote_f32` and `f32.demote_f64`.
+
+WASM MVP has no `fN.rem`, so `%` is composed inline as the §2.9 encoding `x - fN.trunc(x / y) * y`, with an explicit finiteness trap on the intermediate `x/y`: the quotient is spilled to a scratch local and a non-finite value hits `unreachable`, enforcing §7.4 rule 6 on the encoding's inner division exactly as the interpreter and the C backend do. `--no-ub-guards` elides the whole stack-neutral check. This is the one FP trap the WASM backend emits for the operators; plain `+`, `-`, `*` and `/` results carry no finiteness guard (§2).
+
+### 11.4 Cross-validation
+
+The cross-validation harness solves a path, reifies the model into a concrete `.sir`, runs the interpreter, compiles the C output, runs that, and diffs the `Result:` line byte for byte. Both sides print through `%a`, so every bit is observable.
+
+It compiles with `gcc … -fsanitize=undefined -fno-sanitize-recover=all -lm` and no explicit optimization level. It deliberately passes no `-ffp-contract` or `-fexcess-precision` flag, because the C backend pins both concerns at the source level (§11.2).
 
 ## 12. What is intentionally excluded
 
-These are not gaps to fix; they are explicit non-goals that simplify
-the cross-backend contract.
+These are not gaps. Each one simplifies the cross-backend contract.
 
-| Excluded                                       | Why                                                                                                                                |
-|------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------|
-| `±∞`, NaN as values                            | Single-source-of-truth domain. No quiet/signaling NaN distinction, no NaN payload, no NaN-vs-NaN comparison weirdness.             |
-| Alternate rounding modes (`RTZ`, `RU`, `RD`, `RMM`) | RNE is universal across SSE2 / AArch64 / WASM / SMT. Other modes would require fenv plumbing or per-op rounding parameters.       |
-| `fenv` access (`feenableexcept`, `fegetround`, FP exceptions) | Process-level mutable state; impossible to reproduce in WASM, and breaks SMT semantics.                                            |
-| Decimal floats, `f16`, `f128`, bfloat16, x87 80-bit | None are universally available across all backends.                                                                                |
-| Hex-float source literals (`0x1.8p+3`)         | Decimal literals plus the canonical bit-exact serializer already round-trip every value. Hex floats are a serialization-only form. |
-| `signaling NaN`, `quiet NaN`, NaN payloads     | Outside the finite-only domain by construction.                                                                                    |
-| Subnormal flush-to-zero (`FTZ`/`DAZ`)          | Subnormals are first-class. Backends must not enable FTZ/DAZ.                                                                      |
-| FMA contraction (`a*b+c → fma(a,b,c)`)         | A `*` followed by `+` is two separate ops with two separate UB-finiteness checks. Implicit contraction would silently change the rounding behaviour. The C backend emits `#pragma STDC FP_CONTRACT OFF` to forbid it at the source level (§11.2). |
-| Pointer ↔ float casts                          | Forbidden in v0.2.2 (spec §13 non-goals).                                                                                          |
-
----
-
-## 13. Forward look — batch D and beyond
-
-Batch D (the FP basic IEEE family — `@fabs`, `@fneg`, `@copysign`,
-`@fmin`, `@fmax`, `@sqrt`, `@fma`, `@floor`/`@ceil`/`@trunc`/`@rint`,
-`@signbit`, `@is_normal`, `@is_subnormal`, `@to_bits`/`@from_bits`,
-`@fract`, `@recip`, `@to_degrees`/`@to_radians`) is precisely the subset
-of FP intrinsics where bit-exactness across backends is guaranteed by
-either pure bit-manipulation or IEEE-required correct rounding. The
-exponent-manipulation functions (`@ldexp`/`@scalbn`/`@ilogb`/`@logb`)
-are intentionally **excluded** from batch D: scaling by `2^exp` for a
-symbolic integer `exp` and exponent extraction have no clean QF_FP
-encoding, so they are not solver-friendly. Three care points for the
-members that remain deferred:
-
-- `@fma` must lower to `fma()`/`fmaf()` (libm-backed), never `x*y+z`.
-- `@rint` must use a fenv-independent lowering (`__builtin_roundeven*`
-  or SSE4.1 `roundsd` with the RNE immediate baked in).
-- `@to_degrees`/`@to_radians` must pin the conversion constant to a
-  documented bit pattern in the spec.
-
-Tiers P1 (composed-WASM lowerings) and beyond — including IEEE
-`@remainder`, `@fmod` as an intrinsic, transcendentals, vector
-reductions — defer to later versions. See [`intrinsics.md` Tier
-summary](./intrinsics.md).
-
-The libm-sameness rule (§11.6) applies only to tier P3 and beyond.
-Batch D is exempt by construction.
+| Excluded | Why |
+|---|---|
+| `±∞` and NaN as values | One domain, one source of truth. No quiet/signaling distinction, no payloads, no NaN comparison corner cases. |
+| Alternate rounding modes (`RTZ`, `RU`, `RD`, `RMM`) | RNE is universal across SSE2, AArch64, WASM and SMT. Anything else needs fenv plumbing or a per-operation rounding parameter. |
+| `fenv` access | Process-level mutable state, impossible to reproduce in WASM, and it breaks SMT semantics. |
+| Decimal floats, `f16`, `f128`, bfloat16, x87 80-bit | None is universally available across the backends. |
+| Hex-float source literals (`0x1.8p+3`) | Decimal literals plus the canonical serializer already round-trip every value; hex float stays a serialization form. |
+| Subnormal flush-to-zero | Subnormals are first-class, so no backend may enable FTZ or DAZ. |
+| FMA contraction | A `*` followed by a `+` is two operations with two finiteness checks. Contracting them silently changes the rounding, which is why the C backend emits `#pragma STDC FP_CONTRACT OFF`. |
+| Pointer to float casts | Spec §13 non-goal. |

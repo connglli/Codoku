@@ -1,172 +1,117 @@
 # RefractIR
 
 > [!WARNING]
-> The project is under active development. APIs and IR details are still evolving, but semantic decisions in `docs/SPEC_v0.2.2.md` are authoritative for the current release (v0.2.2): function calls (`call`), external declarations (`decl`) with link/contract forms, and standard intrinsics.
->
-> The version in development is v0.2.3; `docs/SPEC_v0.2.3.md` doubles as its roadmap: native WASM SIMD-128 lowering, the Python target, horizontal reductions, `shuffle`, addressable vectors, vectors in aggregates, and function attributes are designed and tracked there as **[Planned]** (or **[Shipped]** if already implemented).
+> RefractIR is under active development: APIs and IR details are still evolving. [docs/SPEC_v0.2.3.md](./docs/SPEC_v0.2.3.md) is the normative specification and doubles as the roadmap for the v0.2.3 line, marking each feature `[Shipped]` or `[Planned]`.
 
-RefractIR (internally SymIR) is a **CFG-based symbolic intermediate representation** designed for program synthesis, symbolic execution, and constraint generation for SMT solvers using **bit-vector (BV) logic**.
+RefractIR (internally SymIR) is a CFG-based symbolic intermediate representation for program synthesis, symbolic execution, and constraint generation for SMT solvers over bit-vector logic. It is a foundation for tools that reason about program semantics, explore execution paths, or synthesize code satisfying a stated property.
 
-It provides a robust foundation for building tools that need to reason about program semantics, explore execution paths, or synthesize code snippets that satisfy specific properties.
+A RefractIR program is a template rather than a finished program: it may contain symbols, unknowns whose values a solver picks later under constraints drawn from a chosen execution path and from explicit properties on that path.
 
-## Table of Contents
+Core concepts:
 
-- [Core Concepts](#💡-core-concepts)
-- [Tools Overview](#🛠️-tools-overview)
-- [Getting Started](#🚀-getting-started)
-  - [Prerequisites](#prerequisites)
-  - [Building](#building)
-  - [Usage](#usage)
-  - [Switching SMT Backends](#switching-smt-backends)
-- [RefractIR Example](#📝-refractir-example)
-- [Project Structure](#📁-project-structure)
-- [Documentation](#📚-documentation)
+* Path-oriented: designed for symbolic execution and path-based analysis.
+* Symbolic by design: a program may be symbolic (solver-chosen unknowns marked with `?`) or fully concrete.
+* Explicit control flow: basic blocks and `br` terminators, with no structured-nesting requirement.
+* SMT-friendly: expressions are restricted to flat, left-to-right forms, so the generated bit-vector constraints stay predictable.
+* Strict semantics: undefined behaviour (division by zero, out-of-bounds access, and the rest of [docs/undefined.md](./docs/undefined.md)) makes the executed path infeasible rather than merely suspect, which is what makes a wrong answer a bug report.
 
-## 💡 Core Concepts
-
-- **Path-Oriented:** Designed specifically for symbolic execution and path-based analysis.
-- **Symbolic by Design:** Programs may be **symbolic** (contain solver-chosen unknowns marked with `?`) or fully concrete.
-- **Explicit Control Flow:** CFG-based representation using basic blocks and `br` instructions (no structured nesting requirements).
-- **SMT-Friendly:** Expressions are intentionally restricted to flat, left-to-right forms to ensure predictable BV constraints.
-- **Strict Semantics:** Includes **strict undefined behavior (UB)** for operations like division-by-zero or out-of-bounds access, facilitating bug-finding.
-
-## 🛠️ Tools Overview
+## 🛠️ Tools overview
 
 | Tool | Purpose |
 | :--- | :--- |
-| `symiri` | **Interpreter**: Execute `.sir` programs directly with concrete values or symbol bindings. |
-| `symirc` | **Compiler**: Translate `.sir` programs into optimized C, WebAssembly (WASM), or Python. |
-| `symirsolve` | **Solver**: Concretize symbolic programs by solving path constraints via SMT. |
-| `rysmith` | **Reifier**: Generate random RefractIR leaf functions for compiler testing. |
-| `rylink` | **Reifier**: Generate random RefractIR whole programs for compiler testing. |
-| `rytwin` | **Reifier**: Transform a generated program into a semantically-equivalent variant. |
+| `symiri` | Interpreter: execute `.sir` programs directly with concrete values or symbol bindings. |
+| `symirc` | Compiler: translate `.sir` programs into C, WebAssembly, or Python. |
+| `symirsolve` | Solver: concretize symbolic programs by solving path constraints via SMT. |
+| `rysmith` | Generator: random RefractIR leaf functions for compiler testing. |
+| `rylink` | Generator: random whole programs composed from a leaf-function pool. |
+| `rytwin` | Transformer: an equivalent variant of a generated program. |
 
-## 🚀 Getting Started
+## 🚀 Getting started
 
 ### Prerequisites
 
-
-We recommend experimenting with RefractIR inside **a docker environment**.
-
-Build the image first:
+The quickest path is a container:
 
 ```bash
 docker build -t refractir:latest --build-arg UID=$(id -u) --build-arg GID=$(id -g) .
-```
-
-Then start the container:
-
-```bash
 docker run -it --rm -v $(pwd):/workspace refractir:latest bash
 ```
 
-Once inside, skip the prerequisites below and jump directly to the [Building](#building) section.
+Once inside, skip prerequisites below and jump directly to the [Building](#building) section.
 
-To run RefractIR in **a local environment** instead, the following tools are required:
+To run RefractIR locally instead, the following tools are required:
 
-- **C++20** compatible compiler (GCC 10+ or Clang 10+)
-- **Bitwuzla** (Required by default)
+- C++20 compatible compiler (GCC 10+ or Clang 10+)
+- Bitwuzla (Required by default)
   - Install: https://github.com/bitwuzla/bitwuzla
-- **Z3** (Optional)
+- Z3 (Optional)
   - Install: https://github.com/Z3Prover/z3
-- **Python 3** (Optional, for the test suite and for running Python-target output)
-- **WASM runtime** (Optional, for running WASM backend tests such as Wasmtime, Wasmer, or Node.js)
+- Python 3 (Optional, for the test suite and for running Python-target output)
+- WASM runtime (Optional, for running WASM backend tests such as Wasmtime, Wasmer, or Node.js)
 
 ### Building
 
-To build all tools (interpreter, compiler, and solver):
+Build every tool, then run the test suite:
 
 ```bash
 make -j$(nproc)
-```
-
-To test all tools (interpreter, compiler, and solver):
-
-```bash
 make test
 ```
 
-### Usages
+### Usage
 
-#### Interpret a Concrete Program
+Interpret a concrete program, then a symbolic one with its symbols bound:
+
 ```bash
-./symiri examples/hello.sir
+./symiri test/interp/complex_he_lcs.sir
+./symiri test/interp/basic.sir --sym %?a=10 --dump-trace
 ```
 
-#### Interpret a Symbolic Program with Bindings
-Provide concrete values for symbols at runtime:
+Compile to each target:
+
 ```bash
-./symiri examples/template.sir --sym %?a=10 --dump-trace
+./symirc examples/bubble_sort.sir --target c      -o out.c
+./symirc examples/bubble_sort.sir --target wasm   -o out.wat
+./symirc examples/bubble_sort.sir --target python -o out.py
 ```
 
-#### Compile to C, WebAssembly, or Python
+Solve for symbol values, either along a path you name or over sampled paths. Every example ships the path that concretizes it in a sibling `_path.txt`:
+
 ```bash
-# Compile to C
-./symirc input.sir --target c -o out.c
-
-# Compile to WebAssembly
-./symirc input.sir --target wasm -o out.wat
-
-# Compile to Python (requires reducible control flow)
-./symirc input.sir --target python -o out.py
+./symirsolve examples/ptr_counter.sir --path "$(cat examples/ptr_counter_path.txt)" -o concrete.sir
+./symirsolve examples/ptr_counter.sir --sample 100 --require-terminal -o concrete.sir
 ```
 
-#### Solve for Symbolic Values
-Automatically find values for symbols that satisfy any execution path within 100 samples:
-```bash
-./symirsolve template.sir --sample 100 --require-terminal -o concrete.sir
-```
+Generate random programs. `--emit-desc` writes the descriptors `rylink` needs:
 
-Automatically find values for symbols that satisfy a specific execution path:
 ```bash
-./symirsolve template.sir --path '^entry,^b1,^exit' -o concrete.sir
-```
-
-#### Generate Random Programs
-```bash
-# --emit-desc is required for rylink to generate a program.
 ./rysmith --emit-desc -n 100
 ./rylink -n 100
 ```
 
-#### Emit an Equivalent Twin
+Emit an equivalent twin of a generated program. `rytwin` reads the `.state.json` sidecar when it is there and profiles the program in-process otherwise:
+
 ```bash
-# Generate a program, then emit an equivalent variant. rytwin loads the
-# .state.json sidecar when present and otherwise profiles the program
-# in-process (no --emit-state needed).
 ./rysmith -n 1 --emit-desc -o out/
 ./rytwin --p-twin 0.5 --validate -o out/<func>.twin.sir out/<func>.sir
 ```
 
-### Switching SMT Backends
+### Switching SMT backends
 
-RefractIR supports multiple SMT solvers via an abstract interface. The following backends are available:
-
-- **Bitwuzla (Default):** Highly optimized for Bit-Vector (BV) and Floating-Point (FP) logic. It is the recommended solver for performance and reliability in symbolic execution tasks.
-- **AliveSMT (Z3-based):** A Z3-based backend derived from the Alive2 project. It provides an alternative for verification tasks where Z3's specific heuristics or theories are preferred.
-
-The solver backend is selected at compile-time using the `SOLVER` variable in the `Makefile`.
+The solver backend is selected at compile time through the `SOLVER` variable:
 
 ```bash
-# Build with Bitwuzla (default)
-make SOLVER=bitwuzla
-
-# Build with AliveSMT (Z3)
+make SOLVER=bitwuzla   # default
 make SOLVER=alivesmt
 ```
 
-## 📝 RefractIR Example
+Bitwuzla is tuned for bit-vector and floating-point logic and is the faster choice for our symbolic execution. AliveSMT is a Z3-based backend derived from Alive2, an alternative where Z3's heuristics or theories are preferred.
 
-A 4-round substitution-permutation cipher that exercises the full v0.2.2 surface area in one file:
+## 📝 RefractIR example
 
-- **Structs + `ptrfield`** — the round state (`@CipherState`) is touched exclusively through typed pointers projected from a single `addr` of the struct.
-- **Vectors** — a `<16> i8` S-box and a `<4> i32` round-constant table are held in SIMD registers and indexed per lane.
-- **Function calls** — pure helpers `@sbox` (byte→byte) and `@mix` (i32 accumulator update) are invoked from `@main`'s round loop.
-- **Overloaded intrinsics** — `@popcount` is declared at both `i8` and `i32` widths; the type checker pins each call site to the correct overload, and the C/WASM backends and the solver all agree. `@rotl(i32, i32)` is the diffusion primitive.
+A four-round substitution-permutation cipher, exercising structs and `ptrfield`, SIMD vectors, function calls and overloaded intrinsics in one file. The round state `@CipherState` is touched only through typed pointers projected from a single `addr`. A `<16> i8` S-box and a `<4> i32` round-constant table live in vector registers and are indexed per lane. `@popcount` is declared at both `i8` and `i32` widths, and the type checker pins each call site to the right overload. One plaintext byte is symbolic, and the solver picks a value driving the diffusion accumulator to a target.
 
-One plaintext byte is symbolic (`%?byte2`); the solver synthesises a value that drives the diffusion accumulator to a precomputed target.
-
-```rust
+```sir
 struct @CipherState {
   s0:    i8;   // byte 0 of the 4-byte block
   s1:    i8;   // byte 1
@@ -176,13 +121,12 @@ struct @CipherState {
   round: i32;  // round counter (0..3)
 }
 
-// Overloaded intrinsics — same name, distinct signatures.  The type
-// checker pins the chosen overload onto every call site.
+// Overloaded intrinsics: same name, distinct signatures.
 intrinsic @popcount(%x: i8)  : i8;
 intrinsic @popcount(%x: i32) : i32;
 intrinsic @rotl(%x: i32, %n: i32) : i32;
 
-// Pure helper: substitute one byte through a 16-entry SIMD S-box.
+// Substitute one byte through a 16-entry SIMD S-box.
 fun @sbox(%v: i8) : i8 {
   let %tbl: <16> i8 = {0x6, 0xB, 0x5, 0x4, 0x2, 0xE, 0x7, 0xA,
                        0x9, 0xD, 0xF, 0xC, 0x3, 0x1, 0x0, 0x8};
@@ -197,7 +141,7 @@ fun @sbox(%v: i8) : i8 {
   ret %out;
 }
 
-// Pure helper: round mix —  rotl(acc XOR (byte_pop_sum + popcount(rc)), n).
+// Round mix: rotl(acc XOR (byte_pop_sum + popcount(rc)), n).
 fun @mix(%acc: i32, %byte_pop_sum: i32, %rc: i32, %round_idx: i32) : i32 {
   let mut %pop_rc:  i32 = 0;
   let mut %mix_in:  i32 = 0;
@@ -268,20 +212,19 @@ fun @main() : i32 {
 }
 ```
 
-The full annotated source is at [./examples/minicipher_v022.sir](./examples/minicipher_v022.sir).
-Find more examples in [./examples](./examples/) and [./test/](./test/).
+The annotated source is [examples/minicipher_v022.sir](./examples/minicipher_v022.sir). More programs live in [examples](./examples/) and [test](./test/).
 
-## 📁 Project Structure
+## 📁 Project structure
 
 ```text
 .
 ├── include/          # Header files
 │   ├── ast/          # AST definitions
-│   ├── frontend/     # Lexer, Parser, TypeChecker
-│   ├── analysis/     # CFG, Dataflow, Dominators/Loops/Structurizer, Pass Manager
+│   ├── frontend/     # Lexer, parser, type checker
+│   ├── analysis/     # CFG, dataflow, dominators/loops/structurizer, pass manager
 │   ├── backend/      # C, WASM, and Python backends
 │   ├── solver/       # SMT integration
-│   └── reify/        # Reify generators (rysmith/rylink/rytwin)
+│   └── reify/        # Reify generators (rysmith, rylink, rytwin)
 ├── src/              # Implementation files
 ├── docs/             # Tool and language documentation
 ├── test/             # Test suite and regression tests
@@ -290,20 +233,16 @@ Find more examples in [./examples](./examples/) and [./test/](./test/).
 
 ## 📚 Documentation
 
-- **[Changelog](./CHANGELOG.md)** — release history from v0.0.1 to the current version.
-- **[Language Specification (v0.2.3, current — in progress)](./docs/SPEC_v0.2.3.md)** — the current normative spec and the roadmap for the v0.2.3 line: the Python target (reducible CFGs only), native WASM SIMD-128 vector lowering, completed intrinsic support on WASM, horizontal `@reduce_*` intrinsics, `shuffle`, addressable vectors, vectors in aggregates, and function attributes.
-- **[Language Specification (v0.2.2, archived)](./docs/SPEC_v0.2.2.md)** — function calls (`call`), interprocedural execution, external declarations (`decl`) with `-I` link resolution and behavioral contracts (`pre`/`post`/`ret`), and standard intrinsics.
-- **[Language Specification (v0.2.1, archived)](./docs/SPEC_v0.2.1.md)** — aggregate pointers (`ptr [N] T`, `ptr @S`, `ptrindex`, `ptrfield`), SIMD vector types (`<N> T`), and `cmp` expressions.
-- **[Language Specification (v0.2.0, archived)](./docs/SPEC_v0.2.0.md)** — the pointer baseline (`ptr T`, `addr`, `load`, `store`, `null`).
-- **[Language Specification (v0.1.0, archived)](./docs/SPEC_v0.1.0.md)** — the pre-pointer baseline, kept for reference.
-- **[Standard Intrinsics reference](./docs/intrinsics.md)** — per-intrinsic signatures, SMT encodings, UB conditions, and C/WASM lowering rules.
-- **[Floating-point model](./docs/float.md)** — the finite-only IEEE 754 value model and bit-exact text serialization.
-- **[Undefined Behaviour reference](./docs/undefined.md)** — the strict UB model and list of UBs.
-- **[CFG Reducibility & Structured Control Flow](./docs/reducibility.md)** — dominator trees, the reducibility check, loop forests, and the control-tree structuring behind the Python target.
-- **[symiri User Guide](./docs/symiri.md)**
-- **[symirc User Guide](./docs/symirc.md)**
-- **[symirsolve User Guide](./docs/symirsolve.md)**
-- **[rysmith/rylink/rytwin User Guide](./docs/reify.md)**
+* [Changelog](./CHANGELOG.md): release history from v0.0.1 onward.
+* [Language specification (v0.2.3, current)](./docs/SPEC_v0.2.3.md): the normative spec; doubles as the v0.2.3 roadmap, marking each feature `[Shipped]` or `[Planned]`.
+* [Floating-point model](./docs/float.md): the finite-only IEEE 754 value model and bit-exact text serialization.
+* [Standard intrinsics reference](./docs/intrinsics.md): per-intrinsic signatures, SMT encodings, UB conditions, and per-backend lowering rules.
+* [Undefined behaviour reference](./docs/undefined.md): the strict UB rules and how each tool enforces them.
+* [CFG reducibility and structured control flow](./docs/reducibility.md): dominator trees, the reducibility check, loop forests, and the control-tree structuring behind the Python target and `--structured-lowering`.
+* [symiri user guide](./docs/symiri.md): the reference interpreter.
+* [symirc user guide](./docs/symirc.md): the C / WASM / Python translator.
+* [symirsolve user guide](./docs/symirsolve.md): the SMT concretizer.
+* [reify user guide](./docs/reify.md): rysmith, rylink, and rytwin.
 
 ## 📋 License
 

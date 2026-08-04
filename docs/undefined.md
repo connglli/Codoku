@@ -1,309 +1,239 @@
-# RefractIR Strict Undefined Behavior (UB)
+# RefractIR strict undefined behaviour
 
-This document is a per-rule companion to the formal spec (§7 of `SPEC_v0.2.3.md`). Each section names the rule, the spec reference, and how each of `symiri` (interpreter), `symirc` (compiler), and `symirsolve` (solver) enforces it.
+This document is a per-rule companion to spec §7. Each rule states what makes an operation undefined and how `symiri`, `symirc` and `symirsolve` each enforce it. The rule numbers are the spec's.
 
-RefractIR uses **strict UB**: if any operation on the executed path triggers UB, the entire path is **infeasible**.
+RefractIR uses strict UB: if any operation on the executed path triggers UB, the whole path is infeasible. `symiri` aborts on UB and exits non-zero. C emitted by `symirc` runs under UBSan with `-fno-sanitize-recover=all`, so UB traps the executable. `symirsolve` adds the UB-precluding constraint to the path condition, so a satisfiable model is one that avoids the UB.
 
-- `symiri` aborts on UB (immediate termination, non-zero exit).
-- `symirc`-emitted C runs under UBSan with `-fno-sanitize-recover=all`, so UB traps the executable.
-- `symirsolve` adds the UB-precluding constraint to `PC`; satisfiable models avoid the UB.
-
-> **`symirc --no-ub-guards`** (v0.2.3) removes the dynamic guards described
-> in the `symirc:` notes below (the explicit `__builtin_trap` /
-> `unreachable` / runtime-helper checks; not the UBSan-level ones, which
-> belong to the C compiler invocation). It is sound **only for programs
-> known to be UB-free**, where those guards never fire — see
-> [symirc.md](./symirc.md#omitting-ub-guards---no-ub-guards-v023). The
-> `reify` tools set it automatically for their UB-free output.
-
-The rule numbers below match the formal spec's UB rule numbers; rules unique to v0.2.1 are marked **[v0.2.1]**.
-
----
+`symirc --no-ub-guards` removes the dynamic guards described in the `symirc` notes below, meaning the explicit `__builtin_trap` / `unreachable` / runtime-helper checks, but not the UBSan-level ones, which belong to the C compiler invocation. It is sound only for a program known to be UB-free, where those guards never fire ([symirc.md](./symirc.md#omitting-ub-guards)). The reify tools set it automatically for their UB-free output.
 
 ## Scalar arithmetic (§7.1, §7.4)
 
-### Rule 1 — Integer division/modulo by zero
-`a / b` or `a % b` with `b == 0` is UB.
+### Rule 1, integer division or modulo by zero
 
-- **symiri:** checks divisor before the op.
-- **symirc:** UBSan `-fsanitize=integer-divide-by-zero`.
-- **symirsolve:** `(distinct b 0)` per division site.
+`a / b` or `a % b` with `b == 0`.
 
-### Rule 2 — Out-of-bounds array access
-`a[i]` where `a : [N] T` and `i < 0 ∨ i >= N` is UB.
+`symiri` checks the divisor before the operation, `symirc` leaves it to UBSan's `integer-divide-by-zero`, and `symirsolve` adds `(distinct b 0)` per division site.
 
-- **symiri:** bounds-checks every lvalue index.
-- **symirc:** UBSan `-fsanitize=array-bounds` (for fixed-size arrays).
-- **symirsolve:** `(bvult i N)` (unsigned-less-than handles negative as large positive).
+### Rule 2, out-of-bounds array access
 
-### Rule 3 — Reading `undef`
-Reading any leaf whose stored value is `undef` is UB. This subsumes uses of uninitialised locals, uninitialised pointer values, and uninitialised vector lanes.
+`a[i]` where `a : [N] T` and `i < 0` or `i >= N`.
 
-- **symiri:** per-leaf `undef` tracking; throws on read.
-- **symirc:** emitted code initialises every scalar leaf at declaration; `undef` is lowered to a literal `0` plus a path-pruning `assume(false)` token, so the compiled program either zero-reads or traps under UBSan.
-- **symirsolve:** every symbolic value carries an `is_defined` flag; reads conjoin it to `PC`.
+`symiri` bounds-checks every lvalue index, `symirc` relies on UBSan's `array-bounds` for fixed-size arrays, and `symirsolve` adds `(bvult i N)`, whose unsigned comparison handles a negative index as a large positive one.
 
-Also enforced statically by `DefiniteInitAnalysis` (warning-level, conservative).
+### Rule 3, reading `undef`
 
-### Rule 4 — Signed integer overflow
-`+`, `-`, `*`, `<<` whose result is outside the signed range of the target width is UB. Also `INT_MIN / -1`. RefractIR treats `<<` as signed arithmetic (not BV wrap), so `x << n` is UB if `x * 2^n` doesn't fit OR if `x < 0`.
+Reading any leaf whose stored value is `undef`. This subsumes uninitialised locals, uninitialised pointer values and uninitialised vector lanes.
 
-- **symiri:** checks via per-op signed-overflow predicate.
-- **symirc:** UBSan `-fsanitize=signed-integer-overflow,shift`.
-- **symirsolve:** `bvsaddo/bvssubo/bvsmulo` overflow predicates; for `<<`, an explicit reconstruct-and-compare.
+`symiri` tracks `undef` per leaf and throws on read. `symirc` initialises every scalar leaf at declaration and lowers `undef` to a literal `0` plus a path-pruning `assume(false)` token, so the compiled program either zero-reads or traps under UBSan. `symirsolve` carries an `is_defined` flag on every symbolic value and conjoins it at each read.
 
-### Rule 5 — Overshift
-`x << n`, `x >> n`, `x >>> n` with `n < 0` or `n >= width(x)` is UB. This is about the *amount*; the shifted result is covered by rule 4.
+`DefiniteInitAnalysis` also catches this statically, conservatively and at warning level.
 
-- **symiri:** range-checks the shift amount.
-- **symirc:** UBSan `-fsanitize=shift`.
-- **symirsolve:** `(bvult n width)`.
+### Rule 4, signed integer overflow
 
-### Rule 6 — FP overflow (±∞ result)
-Any `+`, `-`, `*`, `/` whose RNE-rounded result would be ±∞ is UB. Covers finite-operand overflow and `x / ±0.0` for non-zero `x`.
+`+`, `-`, `*` or `<<` whose result falls outside the signed range of the target width, and `INT_MIN / -1`. RefractIR treats `<<` as signed arithmetic rather than a bit-vector wrap, so `x << n` is UB when `x * 2^n` does not fit, and also when `x < 0`.
 
-- **symiri:** `std::isinf` after every FP op.
-- **symirc:** UBSan `-fsanitize=float-divide-by-zero` plus an explicit `isinf` check on every FP arithmetic result (the C backend emits the check; UBSan does not catch overflow-to-inf by itself).
-- **symirsolve:** `(not (fp.isInfinite result))` on each FP op.
+`symiri` applies a per-operation signed-overflow predicate, `symirc` relies on UBSan's `signed-integer-overflow,shift`, and `symirsolve` uses `bvsaddo` / `bvssubo` / `bvsmulo`, with an explicit reconstruct-and-compare for `<<`.
 
-### Rule 7 — FP invalid (NaN result)
-Any FP op producing NaN is UB. Covers `±0.0 / ±0.0` and `x % ±0.0`.
+### Rule 5, overshift
 
-- **symiri:** `std::isnan` after every FP op.
-- **symirc:** emitted `isnan` check after each FP op.
-- **symirsolve:** `(not (fp.isNaN result))`.
+`x << n`, `x >> n` or `x >>> n` with `n < 0` or `n >= width(x)`. This rule is about the amount; rule 4 covers the shifted result.
 
-### Rule 8 — Float-to-integer out-of-range
-`fN as iM` is UB if the truncated value (toward 0) is outside the representable range of `iM`.
+`symiri` range-checks the amount, `symirc` relies on UBSan's `shift`, and `symirsolve` adds `(bvult n width)`.
 
-- **symiri:** pre-cast bounds check.
-- **symirc:** UBSan `-fsanitize=float-cast-overflow`.
-- **symirsolve:** `(bvsle min_iM rounded)` and `(bvsle rounded max_iM)`.
+### Rule 6, FP overflow
 
----
+Any `+`, `-`, `*` or `/` whose RNE-rounded result would be `±∞`. This covers finite-operand overflow and `x / ±0.0` for non-zero `x`.
+
+`symiri` runs `std::isinf` after every FP operation. `symirc` relies on UBSan's `float-divide-by-zero` plus an explicit `isinf` check the C backend emits, since UBSan does not catch overflow to infinity by itself. `symirsolve` adds `(not (fp.isInfinite result))`.
+
+### Rule 7, FP invalid
+
+Any FP operation producing NaN, which covers `±0.0 / ±0.0` and `x % ±0.0`.
+
+`symiri` runs `std::isnan` after every FP operation, `symirc` emits an `isnan` check after each one, and `symirsolve` adds `(not (fp.isNaN result))`.
+
+### Rule 8, float-to-integer out of range
+
+`fN as iM` where the value truncated toward zero falls outside `iM`.
+
+`symiri` bounds-checks before the cast, `symirc` relies on UBSan's `float-cast-overflow`, and `symirsolve` adds `(bvsle min_iM rounded)` and `(bvsle rounded max_iM)`.
 
 ## Pointer UB (§7.5)
 
-### Rule 9 — Null pointer dereference
-`load %p` or `store %p, v` with `%p == null` is UB.
+### Rule 9, null pointer dereference
 
-- **symiri:** checks pointer ≠ `nullptr` before any deref.
-- **symirc:** the emitted load/store traps under UBSan's null sanitiser.
-- **symirsolve:** `(distinct %p (_ bv0 64))` on every deref.
+`load %p` or `store %p, v` with `%p == null`.
 
-### Rule 10 — Out-of-bounds pointer arithmetic [revised in v0.2.1]
-Every pointer carries a **provenance object** (rule 15). Pointer arithmetic `%p ± n` is UB if the resulting address falls outside `[base_provenance, base_provenance + size_provenance]`. The one-past-the-end address is valid for arithmetic and equality, UB to `load`/`store` (rule 11).
+`symiri` checks the pointer before any dereference, the emitted load or store traps under UBSan's null sanitiser, and `symirsolve` adds `(distinct %p (_ bv0 64))` at every dereference.
 
-- **symiri:** every `ptr` runtime value tags its `ObjectInfo` (base address + size in bytes). Arithmetic updates the offset; if `new_off ∉ [0, size]` the runtime aborts.
-- **symirc:** in v0.2.1, `addr` of an aggregate / `ptrindex` / `ptrfield` lowers to GCC `__builtin_object_size`-instrumented arithmetic; UBSan `-fsanitize=pointer-overflow` catches the wrap; an explicit emitted range check covers the in-bounds path.
-- **symirsolve:** path condition gets `(bvule new_off size)` (one-past-end allowed). Each `addr` operand records its provenance's base and size for downstream propagation.
+### Rule 10, out-of-bounds pointer arithmetic
 
-### Rule 11 — Out-of-bounds load/store
-`load %p` / `store %p, v` is UB if `%p` lies outside `[base, base + size)` (one-past-the-end is included as "outside" for the purpose of deref).
+Every pointer carries a provenance object (rule 15). `%p ± n` is UB when the resulting address falls outside `[base, base + size]` of that object. The one-past-the-end address is valid for arithmetic and equality, and UB to dereference (rule 11).
 
-- **symiri:** combines rule 10's `ObjectInfo` with a strict `< size` check at deref.
-- **symirc:** UBSan + the emitted bound check.
-- **symirsolve:** `(bvult offset size)` on every `load`/`store`.
+`symiri` tags every `ptr` runtime value with its `ObjectInfo`, a base address and a size in bytes, updates the offset on arithmetic, and aborts when the new offset leaves `[0, size]`. `symirc` lowers `addr` of an aggregate, `ptrindex` and `ptrfield` to arithmetic instrumented with `__builtin_object_size`, catching the wrap through UBSan's `pointer-overflow` and the in-bounds path through an emitted range check. `symirsolve` adds `(bvule new_off size)`, one-past-end included, and records each `addr` operand's provenance base and size for downstream propagation.
 
-### Rule 12 — Cross-object pointer arithmetic
-Forming a pointer by arithmetic that crosses from one local's storage into another's is UB.
+### Rule 11, out-of-bounds load or store
 
-- **symiri:** rule 10's `ObjectInfo` won't cross objects — the offset would exit the known allocation, triggering UB before any cross-object value is produced.
-- **symirc:** UBSan catches the boundary cross via `-fsanitize=pointer-overflow`.
-- **symirsolve:** non-overlap axioms (§9.4.2) make cross-object arithmetic infeasible by construction.
+`load %p` or `store %p, v` where `%p` lies outside `[base, base + size)`. One-past-the-end counts as outside for the purpose of dereference.
 
-### Rule 13 — Uninitialised pointer dereference
-`load %p` or `store %p, v` where `%p == undef` is UB (a consequence of rule 3 specialised to pointer values, kept as a separate rule for clarity).
+`symiri` combines rule 10's `ObjectInfo` with a strict `< size` check at the dereference, `symirc` uses UBSan plus the emitted bound check, and `symirsolve` adds `(bvult offset size)`.
 
-- **symiri:** per-leaf `undef` flag, checked before deref.
-- **symirc:** emitted code initialises pointer leaves to `null`, so the deref then triggers rule 9.
-- **symirsolve:** `is_defined(%p)` conjoined to `PC` at deref.
+### Rule 12, cross-object pointer arithmetic
 
-### Rule 14 — Cross-object pointer comparison
-`<`, `<=`, `>`, `>=` between pointers of different originating objects is UB. `==`/`!=` are always defined (distinct objects → distinct addresses → `false`/`true`).
+Forming a pointer by arithmetic that crosses out of one local's storage into another's.
 
-- **symiri:** relational compare on pointers checks both operands share the same `ObjectInfo`.
-- **symirc:** UBSan-free territory — the emitted code adds an explicit object-id check before the compare; cross-object compare aborts.
-- **symirsolve:** the path condition for a relational compare requires both operands to share a base.
+`symiri` never produces such a value, since the offset would leave the known allocation and trigger rule 10 first. `symirc` catches the boundary crossing through UBSan's `pointer-overflow`. In `symirsolve` the non-overlap axioms of spec §9.4 make it infeasible by construction.
 
-### Rule 15 — Aggregate-derived pointer provenance [revised in v0.2.1]
-Every pointer derivation carries a **provenance object**. The rule is uniform between arrays and structs and depends on the *final access*:
+### Rule 13, uninitialised pointer dereference
 
-- `addr %lv` (top-level local): provenance = `%lv` (the whole local).
-- `addr lv.f` / `ptrfield <ptr>, f`: provenance = the **immediate containing struct** of `f`.
-- `addr lv[i]` / `ptrindex <ptr>, i`: provenance = the **immediate containing array**.
-- `<ptr> ± n`: provenance unchanged from `<ptr>`.
+`load %p` or `store %p, v` where `%p == undef`. This is rule 3 specialised to pointer values, kept separate for clarity.
 
-Pointer arithmetic that walks outside the provenance object is UB (rule 10). Type discipline at deref is preserved by rule 15b.
+`symiri` checks the per-leaf `undef` flag before the dereference. `symirc` initialises pointer leaves to `null`, so the dereference falls to rule 9. `symirsolve` conjoins `is_defined(%p)` at the dereference.
 
-This **relaxes the v0.2.0 rule** ("one-element provenance per scalar struct field"). In v0.2.1, arithmetic within a struct or array is allowed; UB is moved to the deref site where the typed-access check kicks in.
+### Rule 14, cross-object pointer comparison
 
-- **symiri:** the `ObjectInfo` for a derived pointer is the *immediate containing aggregate*, not the field/element alone. Arithmetic checks against that aggregate's bounds.
-- **symirc:** the emitted code uses the aggregate's `sizeof` for the range check; UBSan `-fsanitize=pointer-overflow` does the boundary trap.
-- **symirsolve:** each `addr`/`ptrindex`/`ptrfield` records the provenance (a base address constant + a static byte size); rule 10's path condition uses that pair.
+`<`, `<=`, `>` or `>=` between pointers into different originating objects. `==` and `!=` are always defined, since distinct objects have distinct addresses.
 
-### Rule 15b — Typed-access mismatch [new in v0.2.1]
-`load %p` / `store %p, v` through `%p : ptr T` is UB if the runtime address does **not** coincide with the start of a `T`-typed cell within the provenance object. Concretely:
+`symiri` checks that both operands share one `ObjectInfo`. `symirc` emits an explicit object-id check before the comparison and aborts on a cross-object compare, which UBSan does not cover. `symirsolve` requires both operands to share a base in the path condition.
 
-- For a `[N] U` originating object: every address `base + k*sizeof(U)` for `0 ≤ k < N` is a valid `U` cell. (Because the pointer's type necessarily matches the array element type, in-bounds + element-aligned ⇒ valid.)
-- For an `@S` originating object: only the offsets of fields with **declared type `T`** are valid cells. A `ptr i32` landing on the offset of an `i64` field — even though arithmetic stayed in `@S`'s bounds — is UB.
-- Mid-cell, on a cell of a different type, or straddling cells: all UB.
+### Rule 15, aggregate-derived pointer provenance
 
-This is what makes the revised rule 15 type-safe: arithmetic is permissive, but the deref must respect the field types.
+Every pointer derivation carries a provenance object, uniformly for arrays and structs, decided by the final access:
 
-- **symiri:** every `load`/`store` walks the provenance object's layout, computes the cell start nearest to the runtime offset, and aborts if the cell's declared type doesn't match the pointer's static type (or the offset isn't aligned to a cell start).
-- **symirc:** the emitted load/store is preceded by a layout check generated from the struct's field table (a constant-folded disjunction over valid offsets). UBSan catches the trap path.
-- **symirsolve:** at each `load`/`store`, the path condition becomes a disjunction over the valid `T`-typed cell offsets of the provenance object. Symbolic offsets are constrained to one of those values; off-set offsets force `PC := false`.
+* `addr %lv` on a top-level local: provenance is `%lv`, the whole local.
+* `addr lv.f` or `ptrfield <ptr>, f`: provenance is the immediate containing struct of `f`.
+* `addr lv[i]` or `ptrindex <ptr>, i`: provenance is the immediate containing array.
+* `<ptr> ± n`: provenance is unchanged.
 
-### Rule 16 — `ptrindex` out-of-bounds [v0.2.1]
-`ptrindex <ptr>, <i>` with `<ptr> : ptr [N] T` is UB if `i < 0` or `i > N`. `i == N` produces a valid non-dereferenceable address (good for arithmetic and equality, UB to deref).
+Arithmetic that walks outside the provenance object is UB under rule 10. Arithmetic *within* a struct or array is allowed, and type discipline is preserved instead at the dereference, by rule 15b.
 
-- **symiri:** index range check.
-- **symirc:** UBSan + emitted range check.
-- **symirsolve:** `(bvsle 0 i)` ∧ `(bvsle i N)`.
+`symiri` gives a derived pointer the `ObjectInfo` of the immediate containing aggregate and checks arithmetic against that aggregate's bounds. `symirc` uses the aggregate's `sizeof` for the range check, with UBSan's `pointer-overflow` doing the boundary trap. `symirsolve` records a base address constant and a static byte size at each `addr` / `ptrindex` / `ptrfield`, which rule 10's path condition then uses.
 
-### Rule 17 — Navigation through `null` [v0.2.1]
-`ptrindex <ptr>, <i>` or `ptrfield <ptr>, <f>` is UB if `<ptr>` evaluates to `null`. Caught at navigation, not at later deref, so the path prunes immediately.
+### Rule 15b, typed-access mismatch
 
-- **symiri:** pointer null check at the navigation site.
-- **symirc:** emitted pre-navigation null guard; UBSan-trapped on failure.
-- **symirsolve:** `(distinct <ptr> (_ bv0 64))` on every navigation.
+`load %p` or `store %p, v` through `%p : ptr T` is UB when the runtime address is not the start of a `T`-typed cell within the provenance object:
 
-### Rule 18 — Navigation through `undef` [v0.2.1]
-`ptrindex`/`ptrfield` count as reads of their pointer operand; an `undef` operand is UB at the navigation site (consequence of rule 3).
+* In a `[N] U` object, every address `base + k*sizeof(U)` for `0 <= k < N` is a valid `U` cell. The pointer's type necessarily matches the element type, so in-bounds and element-aligned implies valid.
+* In an `@S` object, only the offsets of fields whose declared type is `T` are valid cells. A `ptr i32` landing on the offset of an `i64` field is UB, even though the arithmetic stayed inside `@S`.
+* Mid-cell, on a cell of another type, or straddling two cells: UB.
 
-- **symiri:** `is_defined` check on the pointer operand before computing the offset.
-- **symirc:** emitted code rejects `undef` pointer values upstream (initialised to `null`, then null-guarded by rule 17).
-- **symirsolve:** `is_defined(<ptr>)` conjoined to `PC` at navigation.
+This is what makes rule 15 type-safe. Arithmetic is permissive, and the dereference respects the field types.
 
-### Rule 19 — Navigation from a one-past-the-end pointer [v0.2.1]
-`ptrindex <ptr>, <i>` or `ptrfield <ptr>, <f>` is UB if `<ptr>` is exactly the one-past-the-end address of its provenance object — that address is valid for arithmetic and equality, but doesn't point to an element to navigate into.
+`symiri` walks the provenance object's layout at every `load` and `store`, finds the cell start nearest the runtime offset, and aborts when that cell's declared type does not match the pointer's static type or the offset is not a cell start. `symirc` precedes the load or store with a layout check generated from the struct's field table, a constant-folded disjunction over the valid offsets, with UBSan catching the trap path. `symirsolve` turns the path condition into a disjunction over the valid `T`-typed cell offsets, so a symbolic offset is constrained to one of them and any other offset forces the path condition false.
 
-- **symiri:** runtime check `offset != size_provenance` before each navigation.
-- **symirc:** emitted guard alongside the rule-17 null check.
-- **symirsolve:** `(distinct offset size_provenance)` conjoined to `PC` at every navigation.
+### Rule 16, `ptrindex` out of bounds
 
----
+`ptrindex <ptr>, <i>` with `<ptr> : ptr [N] T` is UB when `i < 0` or `i > N`. `i == N` gives a valid non-dereferenceable address, good for arithmetic and equality.
 
-## Vector UB (§7.6) [v0.2.1]
+`symiri` range-checks the index, `symirc` uses UBSan plus an emitted range check, and `symirsolve` adds `(bvsle 0 i)` and `(bvsle i N)`.
 
-### Rule 20 — Out-of-bounds vector lane access
-`lv[i]` (read or write) where `lv : <N> T` is UB if `i < 0 ∨ i >= N`.
+### Rule 17, navigation through `null`
 
-- **symiri:** lane-index bounds check.
-- **symirc:** the emitted code lowers `v[i]` to a subscript on the GCC vector-extension type with an explicit pre-check; UBSan traps on failure.
-- **symirsolve:** `(bvult i N)` at each lane access; for symbolic `i` the `ite` chain encoding (§9.5.4) only defines lanes in range, so out-of-range indices force `PC := false`.
+`ptrindex <ptr>, <i>` or `ptrfield <ptr>, <f>` where `<ptr>` is `null`. This is caught at the navigation rather than at a later dereference, so the path prunes immediately.
 
-### Rule 21 — Lane-wise scalar UB
-All scalar UB rules (1–8) apply **per-lane** to vector operations. UB in any single lane prunes the whole path. Examples:
+`symiri` null-checks at the navigation site, `symirc` emits a pre-navigation null guard trapped by UBSan, and `symirsolve` adds `(distinct <ptr> (_ bv0 64))` at every navigation.
 
-- `%a / %b` where `%a, %b : <4> i32` — UB if any lane of `%b` is 0.
-- `%a + %b` where `%a, %b : <4> i32` — UB if any lane overflows.
-- `%v as <4> f32` where `%v : <4> f64` — UB if any lane would overflow to ±∞.
+### Rule 18, navigation through `undef`
 
-- **symiri:** lane-iterates each vector op and checks each scalar rule per lane.
-- **symirc:** the emitted SIMD operation is preceded by per-lane checks (extracted via `__builtin_shufflevector` or equivalent), each gated by UBSan.
-- **symirsolve:** each lane has its own scalar UB conjunct in `PC`; the entire path is feasible only if every lane's check passes.
+`ptrindex` and `ptrfield` read their pointer operand, so an `undef` operand is UB at the navigation site. This follows from rule 3.
 
-### Rule 22 — Reading an `undef` vector lane
-Reading a lane whose value is `undef` is UB — either from a vector initialised with `undef`, or from a vector where the read lane has not yet been written by a lane-write or whole-vector copy.
+`symiri` checks `is_defined` on the operand before computing the offset. `symirc` initialises pointer values to `null` upstream, so rule 17's guard catches it. `symirsolve` conjoins `is_defined(<ptr>)` at the navigation.
 
-- **symiri:** per-lane `undef` flag tracked alongside lane values.
-- **symirc:** emitted vector locals are initialised lane-by-lane to defined values (`0`) where the source uses `undef`; subsequent reads hit defined storage. UBSan handles edge cases.
-- **symirsolve:** every lane carries an `is_defined` flag; lane reads conjoin it to `PC`.
+### Rule 19, navigation from a one-past-the-end pointer
 
----
+`ptrindex <ptr>, <i>` or `ptrfield <ptr>, <f>` where `<ptr>` is exactly the one-past-the-end address of its provenance object. That address is valid for arithmetic and equality, but there is no element there to navigate into.
 
-## Function call UB (§7.7) **[New in v0.2.2]**
+`symiri` checks `offset != size` before each navigation, `symirc` emits the guard alongside the rule-17 null check, and `symirsolve` adds `(distinct offset size)` at every navigation.
 
-### Rule 23 — Contract precondition violation
-`call @f(...)` where `@f` is a contract-form `decl`, and any `pre` clause evaluates to `false` at the call site, is UB. The path becomes infeasible.
+## Vector UB (§7.6)
 
-- **symiri:** contract-form `decl` calls are rejected before execution begins (see "not UB" below), so this rule is never reached.
-- **symirc:** the emitted C/WASM checks each `pre` clause before the call; a failed precondition calls `abort()` / `unreachable`.
-- **symirsolve:** each `pre` clause is evaluated with arguments bound to parameters. A clause evaluating to `false` conjoins `false` to `PC`, pruning the path.
+### Rule 20, out-of-bounds vector lane access
 
-### Rule 24 — Callee UB propagation
-UB encountered during symbolic execution of a `fun` callee makes the **caller's** path infeasible. UB is not sandboxed by call boundaries — if any statement, condition, or nested `call` inside the callee triggers any other UB rule (1–23, 25), the calling path is pruned.
+`lv[i]`, read or write, where `lv : <N> T` and `i < 0` or `i >= N`.
 
-- **symiri:** UB in a callee is a C++ exception that unwinds through the interpreter's call stack; the top-level catches it and terminates.
-- **symirc:** the emitted code is monomorphised into a single C/WASM function, so UB in the inlined callee body is caught by the usual UBSan instrumentation. No special cross-function handling needed.
-- **symirsolve:** the callee's `PC` is conjoined to the caller's `PC`. If the callee's `PC` becomes `false`, the caller's `PC` also becomes `false`.
+`symiri` bounds-checks the lane index. `symirc` lowers `v[i]` to a subscript on the vector-extension type with an explicit pre-check, trapped by UBSan. `symirsolve` adds `(bvult i N)`, and for a symbolic `i` the `ite` chain of spec §9.5.4 defines only the in-range lanes, so an out-of-range index forces the path condition false.
 
-### Rule 25 — Intrinsic UB preconditions
-Any intrinsic whose declared semantics requires a precondition treats violations of that precondition as UB. This umbrella covers two patterns:
+### Rule 21, lane-wise scalar UB
 
-- **Result not representable**: the computed result would overflow the intrinsic's declared return type (e.g., `@abs(INT_MIN_N)`, `@abs_diff(INT_MIN_N, INT_MAX_N)`).
-- **Operand-domain restriction**: an operand falls outside the domain the intrinsic is defined on (e.g., `@ctz`/`@clz` require non-zero input; `@ilog2` requires strictly positive input; `@div_euclid` requires non-zero divisor).
+Rules 1 to 8 apply per lane to vector operations, and UB in any one lane prunes the whole path. For `%a, %b : <4> i32`, `%a / %b` is UB when any lane of `%b` is zero and `%a + %b` is UB when any lane overflows; `%v as <4> f32` for `%v : <4> f64` is UB when any lane would overflow to `±∞`.
 
-The table below enumerates every UB precondition shipped in v0.2.2 batches A through D. Adding a new intrinsic requires (i) declaring its UB preconditions in §12 of `intrinsics.md`, (ii) raising a UB exception in `symiri` when violated, (iii) emitting a guard in `symirc` (C and WASM), and (iv) conjoining the precondition to `PC` in `symirsolve`.
+`symiri` iterates the lanes and applies each scalar rule per lane. `symirc` precedes the SIMD operation with per-lane checks, each gated by UBSan. `symirsolve` gives each lane its own conjunct, so the path is feasible only when every lane's check passes.
 
-| Intrinsic | UB precondition(s) | Spec |
+### Rule 22, reading an `undef` vector lane
+
+Reading a lane whose value is `undef`, whether from a vector initialised with `undef` or from a lane not yet written by a lane-write or a whole-vector copy.
+
+`symiri` tracks an `undef` flag per lane alongside the lane values. `symirc` initialises emitted vector locals lane by lane to `0` where the source says `undef`, so later reads hit defined storage. `symirsolve` carries an `is_defined` flag per lane and conjoins it at each lane read.
+
+## Function call UB (§7.7)
+
+### Rule 23, contract precondition violation
+
+`call @f(...)` where `@f` is a contract-form `decl` and any `pre` clause is false at the call site. The path becomes infeasible.
+
+`symiri` never reaches this rule, because it rejects a contract-form `decl` call before execution begins. `symirc` emits a check of each `pre` clause before the call, and a failed precondition calls `abort()` or `unreachable`. `symirsolve` evaluates each clause with the arguments bound to the parameters, and a false clause conjoins false to the path condition.
+
+### Rule 24, callee UB propagation
+
+UB inside a `fun` callee makes the caller's path infeasible. Call boundaries do not sandbox UB: any statement, condition or nested `call` in the callee that triggers any other rule prunes the calling path.
+
+`symiri` propagates it as an exception that unwinds the interpreter's call stack to the top level. `symirc` monomorphises the callee into a single function, so the usual UBSan instrumentation catches it with no cross-function handling. `symirsolve` conjoins the callee's path condition to the caller's.
+
+### Rule 25, intrinsic UB preconditions
+
+An intrinsic whose declared semantics carries a precondition treats a violation as UB. Two patterns account for all of them: a result the declared return type cannot represent, as in `@abs(INT_MIN_N)`, and an operand outside the intrinsic's domain, as in `@clz(0)` or `@div_euclid(a, 0)`.
+
+Each intrinsic's preconditions are stated with the intrinsic itself, in [intrinsics.md](./intrinsics.md) §12, alongside its per-tool behaviour. An intrinsic that carries no precondition is defined for every input in its signature.
+
+Adding an intrinsic means declaring its preconditions in [intrinsics.md](./intrinsics.md), raising a UB exception in [src/interp/intrinsics.cpp](../src/interp/intrinsics.cpp), emitting a guard in each of [src/backend/c_intrinsics.cpp](../src/backend/c_intrinsics.cpp), [src/backend/wasm_intrinsics.cpp](../src/backend/wasm_intrinsics.cpp) and [src/backend/py_intrinsics.cpp](../src/backend/py_intrinsics.cpp), and conjoining the precondition to the path condition in [src/solver/intrinsics.cpp](../src/solver/intrinsics.cpp).
+
+## What is not UB
+
+A few things RefractIR deliberately defines where other languages do not.
+
+Equality across objects. `==` and `!=` between pointers into different objects are always well-defined, and always false and true respectively. Only relational comparison is UB (rule 14).
+
+The one-past-the-end address. Valid for arithmetic and equality, UB only when dereferenced (rule 11) or navigated through (rule 19).
+
+Whole-vector copy. `%v = %w` for `%v, %w : <N> T` is a lane-by-lane copy with no overflow or aliasing concern.
+
+`fmod` semantics for FP `%`. Aligned with integer `%`, truncating toward zero, rather than IEEE `fp.rem`. It adds no UB case beyond rule 7.
+
+Signed `<<` of a non-negative `x` whose result fits. Well-defined arithmetic shift; only `x < 0` or overflow is UB (rule 4).
+
+Static call-site errors. A call to an undeclared function, an argument count or type mismatch, a recursion cycle in the call graph, and a contract-form `decl` call under `symiri` are all semantic errors caught before execution, so they never reach the UB machinery.
+
+Argument evaluation. UB in an argument expression, as in `call @f(load %null_ptr)`, fires during left-to-right argument evaluation, before the call transfers control. The existing scalar, pointer and vector rules cover it, and no call-specific rule is needed.
+
+Literal range checks. Every integer literal, decimal, hex, octal or binary, is checked at type-check time against the signed two's-complement range of its inferred type, `[-2^(N-1), 2^(N-1)-1]`, and an out-of-range literal is a static error rather than a silent narrowing (spec §6.4, §6.12). Both `let %x: i8 = 200;` and `let %y: i32 = 0x80000000;` are rejected, and an author who meant the bit pattern with the high bit set writes `-128` or `-0x80000000`. The check applies to every `iN` including `i1`, whose representable values are `{0, -1}`, so the literal `1` in `i1` context is rejected. All three tools share the typechecker pass, so all three reject before any execution begins.
+
+## Rule index
+
+| # | Name | Spec |
 |---|---|---|
-| `@abs(x)` | `x == INT_MIN_N` | §12.1 |
-| `@clz(x)`, `@ctz(x)` | `x == 0` | §12.2 |
-| `@popcount(x)` | result `> INT_MAX_N` (only triggers for narrow `N`) | §12.2 |
-| `@abs_diff(a, b)` | `\|a − b\|` not representable in iN | §12.3 |
-| `@clamp(v, lo, hi)` | `lo > hi` (signed) | §12.3 |
-| `@rotl(x, n)`, `@rotr(x, n)` | `n < 0` or `n >= N` | §12.4 |
-| `@ilog2(x)` | `x <= 0` (signed) | §12.4 |
-| `@bswap(x)` | declaration-time: `N % 8 != 0` (rejected at check time, not runtime UB) | §12.4 |
-| `@wrapping_shl(x, n)`, `@wrapping_shr(x, n)` | `n < 0` or `n >= N` | §12.5 |
-| `@div_euclid(a, b)`, `@rem_euclid(a, b)` | `b == 0` or `(a == INT_MIN_N ∧ b == -1)` | §12.5 |
-| `@sqrt(x)` | `x < 0` (NaN result; `@sqrt(-0.0)` is **not** UB) | §12.6 |
-| `@from_bits(x)` | bit pattern decodes to a non-finite value (`±∞` or NaN) | §12.6 |
-| `@recip(x)` | result non-finite (`x == ±0.0`, or `\|x\|` so small the reciprocal overflows) | §12.6 |
-
-Intrinsics not listed (e.g., `@min`, `@max`, `@signum`, `@midpoint`, `@parity`, `@bitreverse`, `@is_pow2`, the six `@wrapping_*` arithmetic ops, the four `@saturating_*` ops, and the no-UB floating-point intrinsics `@fabs`, `@fneg`, `@copysign`, `@signbit`, `@to_bits`, `@is_normal`, `@is_subnormal`, `@fmin`, `@fmax`, `@floor`, `@ceil`, `@trunc`, `@fract`) have **no UB precondition** — their result is defined for every input in their declared signature.
-
-- **symiri:** every intrinsic implementation in `src/interp/intrinsics.cpp` checks its precondition and throws `UndefinedBehaviorError` on violation.
-- **symirc:** the C-backend helper (`src/backend/intrinsics_c.cpp`) emits an `if (cond) __builtin_trap();` guard ahead of the computation; the WASM-backend helper (`src/backend/intrinsics_wasm.cpp`) emits an `if … unreachable end` sequence.
-- **symirsolve:** the solver lowering in `src/solver/intrinsics.cpp` pushes the precondition to `pc` so unsatisfying inputs are pruned from the model search.
-
----
-
-## What's *not* UB in RefractIR
-
-For completeness, a few choices RefractIR deliberately makes well-defined where other languages don't:
-
-- **Equality across objects.** `==`/`!=` between pointers of different originating objects is always well-defined (and always `false`/`true`). Only relational compare is UB (rule 14).
-- **One-past-the-end address.** Valid for arithmetic and equality. UB only when dereferenced (rule 11) or navigated through (rule 19).
-- **Whole-vector copy.** `%v = %w` for `%v, %w : <N> T` is always well-defined (lane-by-lane copy; no overflow or aliasing concerns).
-- **`fmod` semantics for FP `%`.** Aligned with integer `%` (truncate toward zero), not IEEE `fp.rem` (round to nearest even). No UB cases beyond rule 7 (divisor zero → NaN result).
-- **Signed `<<` of `x >= 0` whose result fits.** Well-defined arithmetic shift; only `x < 0` or overflow is UB (rule 4).
-- **Static call-site checks [v0.2.2].** The following are semantic errors caught before execution, not runtime UB: call to an undeclared function, argument-parameter count/type mismatch, recursion cycle in the call graph, and contract-form `decl` call in `symiri` (which rejects it before execution). These never reach the UB machinery.
-- **Argument evaluation UB [v0.2.2].** If an argument expression itself triggers UB (e.g., `call @f(load %null_ptr)`), the UB fires during left-to-right argument evaluation before the call transfers control. This is covered by the existing scalar/pointer/vector UB rules; no new call-specific UB rule is needed.
-- **Literal range-check [v0.2.2, SPEC §6.4 + §6.12].** Every integer literal — whether decimal, hex, octal, or binary — is range-checked against the signed two's-complement range `[-2^(N-1), 2^(N-1)-1]` of its inferred type at type-check time. Out-of-range literals are rejected as `StaticError`, not narrowed silently. Examples: `let %x: i8 = 200;` and `let %y: i32 = 0x80000000;` both fail (the values `200` and `2147483648` exceed `INT_MAX_8` and `INT_MAX_32` respectively); authors who intended the bit pattern with the high bit set must write `-128` / `-0x80000000` (or any equivalent signed form). The check applies uniformly to *every* `iN`, including `i1` — the literal `1` in `i1` context is rejected since the representable values of `i1` are `{0, -1}`. This is a static error, not runtime UB, so it does not interact with the UB machinery; symiri / symirc / symirsolve all share the same typechecker pass and reject before any execution begins.
-
----
-
-## Cross-reference summary
-
-| # | Name | Section in spec |
-|---|------|----------------|
-| 1 | Integer div/mod by zero | §7.1 |
-| 2 | OOB array access | §7.1 |
+| 1 | Integer division or modulo by zero | §7.1 |
+| 2 | Out-of-bounds array access | §7.1 |
 | 3 | Reading `undef` | §7.1 |
 | 4 | Signed overflow | §7.1 |
 | 5 | Overshift | §7.1 |
-| 6 | FP overflow (±∞) | §7.4 |
+| 6 | FP overflow | §7.4 |
 | 7 | FP invalid (NaN) | §7.4 |
-| 8 | Float→int out-of-range | §7.4 |
-| 9 | Null pointer deref | §7.5 |
-| 10 | OOB pointer arithmetic | §7.5 |
-| 11 | OOB load/store | §7.5 |
-| 12 | Cross-object pointer arith | §7.5 |
-| 13 | Uninitialised pointer deref | §7.5 |
-| 14 | Cross-object pointer compare | §7.5 |
-| 15 | Aggregate-derived pointer provenance **[revised v0.2.1]** | §7.5 |
-| 15b | Typed-access mismatch **[v0.2.1]** | §7.5 |
-| 16 | `ptrindex` OOB **[v0.2.1]** | §7.5 |
-| 17 | Navigation through `null` **[v0.2.1]** | §7.5 |
-| 18 | Navigation through `undef` **[v0.2.1]** | §7.5 |
-| 19 | Navigation from one-past-end **[v0.2.1]** | §7.5 |
-| 20 | OOB vector lane access **[v0.2.1]** | §7.6 |
-| 21 | Lane-wise scalar UB **[v0.2.1]** | §7.6 |
-| 22 | Reading `undef` vector lane **[v0.2.1]** | §7.6 |
-| 23 | Contract precondition violation **[v0.2.2]** | §7.7 |
-| 24 | Callee UB propagation **[v0.2.2]** | §7.7 |
-| 25 | Intrinsic UB preconditions **[v0.2.2]** | §7.7 |
+| 8 | Float-to-int out of range | §7.4 |
+| 9 | Null pointer dereference | §7.5 |
+| 10 | Out-of-bounds pointer arithmetic | §7.5 |
+| 11 | Out-of-bounds load or store | §7.5 |
+| 12 | Cross-object pointer arithmetic | §7.5 |
+| 13 | Uninitialised pointer dereference | §7.5 |
+| 14 | Cross-object pointer comparison | §7.5 |
+| 15 | Aggregate-derived pointer provenance | §7.5 |
+| 15b | Typed-access mismatch | §7.5 |
+| 16 | `ptrindex` out of bounds | §7.5 |
+| 17 | Navigation through `null` | §7.5 |
+| 18 | Navigation through `undef` | §7.5 |
+| 19 | Navigation from one-past-the-end | §7.5 |
+| 20 | Out-of-bounds vector lane access | §7.6 |
+| 21 | Lane-wise scalar UB | §7.6 |
+| 22 | Reading an `undef` vector lane | §7.6 |
+| 23 | Contract precondition violation | §7.7 |
+| 24 | Callee UB propagation | §7.7 |
+| 25 | Intrinsic UB preconditions | §7.7 |

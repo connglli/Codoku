@@ -27,7 +27,7 @@ The key design goals are:
 
 RefractIR deliberately restricts expressions (flat, left-to-right, no parentheses) and uses **LLVM-style syntax** (`@`, `%`, `br`, basic blocks) while remaining language-agnostic.
 
-The current formal specification is **[./docs/SPEC_v0.2.3.md](./docs/SPEC_v0.2.3.md)** (v0.2.3, **in progress** — the spec doubles as the release roadmap, with per-feature **[Shipped]**/**[Planned]** status). The v0.2.2 spec (function calls (`call`) and interprocedural execution; external declarations (`decl`) with `-I` link resolution and behavioral contracts (`pre`/`post`/`ret`); standard intrinsics) is preserved at [./docs/SPEC_v0.2.2.md](./docs/SPEC_v0.2.2.md), the v0.2.1 spec (aggregate pointers `ptr [N] T`, `ptr @S`, `ptrindex`, `ptrfield`; SIMD vector types `<N> T` with lane-wise arithmetic and `cmp`; floating-point value model; mask-based `select`) at [./docs/SPEC_v0.2.1.md](./docs/SPEC_v0.2.1.md), the v0.2.0 pointer baseline at [./docs/SPEC_v0.2.0.md](./docs/SPEC_v0.2.0.md), and the pre-pointer baseline at [./docs/SPEC_v0.1.0.md](./docs/SPEC_v0.1.0.md) for reference. The release history from v0.0.1 onward is summarized in [./CHANGELOG.md](./CHANGELOG.md).
+The normative specification is **[./docs/SPEC_v0.2.3.md](./docs/SPEC_v0.2.3.md)**, which doubles as the release roadmap and marks each feature **[Shipped]** or **[Planned]**. Earlier specs are kept as they shipped; [./README.md](./README.md) indexes them, and [./CHANGELOG.md](./CHANGELOG.md) records what each release added.
 
 ## Language at a Glance
 
@@ -272,11 +272,12 @@ Always follow good practices:
 
 1. Use git frequently and meaningfully
 2. Follow **Conventional Commits**
-3. Keep `README.md`, `SPEC.md`, `AGENT.md`, and `TODO.md` up to date
+3. Keep `README.md`, the current `docs/SPEC_v*.md`, and this file up to date
 4. Fix **all compiler warnings**
 5. Keep a clean, layered project structure
 6. Write high-quality comments that explain *why*, not *what*
-7, Keep CHANGELOG concise (multiple related entries can be summarized in one line)
+7. Keep CHANGELOG concise (multiple related entries can be summarized in one line)
+8. Follow [./docs/AGENTS.md](./docs/AGENTS.md) when writing documents, header comments, or anything else durable in prose
 
 Always check whether a design/implementation is *elegant*:
 
@@ -293,63 +294,14 @@ Always keep in mind the following principles to make it elegant before designing
 
 ## Floating-point serialization invariant (MANDATORY)
 
-RefractIR carries `f32`/`f64` values bit-exactly across **every** boundary
-that involves text — `.sir` source, descriptor JSON, SOLVED/PARAMS/RETURN
-headers, model-dump files, and CLI positional args. The invariant is:
+RefractIR carries `f32`/`f64` values bit-exactly across **every** text boundary. One canonical format, one canonical parser, used everywhere RefractIR text crosses a process or file boundary:
 
-> **One canonical bit-exact format. One canonical parser. Used everywhere
-> RefractIR text crosses a process or file boundary.**
+- **`refractir::formatDouble(double)`** to emit.
+- **`refractir::parseFloatLiteral(std::string)`** to parse. **Never `std::stod`**: libstdc++ throws `out_of_range` on any `ERANGE`, valid subnormals included, so a representable denormal would abort the interpreter.
 
-### The two canonical entry points
+Before writing `std::stod`, `std::stof`, `std::atof`, `std::to_string(double)`, `std::cout << double_value`, an `std::ostringstream` with `precision(17)`, or `printf("%f"/"%g", …)` anywhere in RefractIR, stop and use the canonical pair.
 
-- **`refractir::formatDouble(double)`** (`include/ast/ast.hpp`) — emits the
-  shortest decimal string that round-trips via `std::to_chars(…,
-  std::chars_format::shortest)`, with `.0` appended if neither `.` nor
-  exponent is present so int/float dispatch on the resulting string is
-  unambiguous and signed zero survives.
-- **`refractir::parseFloatLiteral(std::string)`** (`include/ast/ast.hpp`) —
-  uses `std::strtod` directly. Subnormals (returned values < `DBL_MIN`)
-  are accepted; only true overflow to `±HUGE_VAL` raises. **Never call
-  `std::stod`** anywhere in RefractIR — libstdc++ throws `out_of_range` on
-  any `ERANGE`, including valid subnormals, and a perfectly representable
-  denormal would abort the interpreter.
-
-### Where the invariant must hold
-
-All of these MUST go through the canonical pair:
-
-- `SIRPrinter::printDouble` — `.sir` source emission.
-- `rysmith` `fmtModelVal` — descriptor JSON + SOLVED header.
-- `symirsolve` `fmtVal` — SOLVED header on solved programs.
-- `symirsolve` model-dump JSON output.
-- `reify::rewrite` `parseF64` — descriptor JSON read-back.
-- Parser/Lexer float tokens — already routed through `parseFloatLiteral`.
-- The interpreter's CLI positional-arg parser.
-
-### Where it intentionally diverges
-
-- `src/backend/c_backend.cpp` and `src/backend/wasm_backend.cpp` emit
-  literals in **C** and **WAT** grammar respectively (suffixes, infinity
-  syntax, etc.), so each backend has its own bit-exact formatter. Each
-  carries a comment pointing back to `refractir::formatDouble` to flag the
-  divergence as intentional.
-
-### When you add a new producer or consumer
-
-If you are about to write any of these patterns, **stop and use the
-canonical pair instead**:
-
-- `std::stod`, `std::stof`, `std::atof`
-- `std::cout << double_value` with default precision
-- `std::to_string(double)`
-- `std::ostringstream` with explicit `precision(17)` or `max_digits10`
-- `printf("%f", …)` or `printf("%g", …)` for FP output
-
-`printf("%a", …)` is acceptable for **bit-exact xval output** (the
-interpreter's `Result:` line uses this so the C-side `printf("Result:
-%a\n", …)` can be compared byte-equal in the diff test). Hex-float form
-is parseable by `strtod` and lossless by construction; it just isn't the
-canonical *decimal* form.
+[./docs/float.md](./docs/float.md) §9 owns this invariant: which sites it covers, where the backends intentionally diverge (C and WAT float grammar), why `printf("%a", …)` is the one accepted exception, and how it extends to the SMT boundary.
 
 ## Before Starting Work
 
