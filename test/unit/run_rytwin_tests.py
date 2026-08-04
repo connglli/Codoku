@@ -2421,6 +2421,57 @@ def test_a_root_initialized_on_one_path_is_not(rytwin):
       )
 
 
+# %q is multiplied by 100000 before the sum, so a step of its own costs the
+# sum a hundred thousand times what a step of %p0 costs. Lockstep advances
+# them together and a refusal freezes everything that failure depended on, so
+# %q hitting its limit takes %p0 with it — at a fraction of the width %p0
+# could have had on its own.
+LOCKSTEP_FIXTURE = """// SOLVED: %p0=3,%q=2
+fun @lockstep(%p0: i32, %q: i32) : i32 {
+  let mut %k: i32 = 0;
+  let mut %big: i32 = 0;
+  let mut %r: i32 = 0;
+^entry:
+  %k = 100000;
+  br ^work;
+^work:
+  %big = %q * %k;
+  %r = %big + %p0;
+  br ^done;
+^done:
+  ret %r;
+}
+"""
+
+
+def test_a_leaf_is_not_held_back_by_another(rytwin, symiri):
+  """A leaf frozen for someone else's refusal keeps whatever width the
+  lockstep had reached, which can be orders of magnitude short of what it can
+  prove alone. Growing each leaf on its own afterwards recovers that, and
+  every step of it is proved rather than argued."""
+  with tempfile.TemporaryDirectory() as d:
+    r, lines, p1, p2 = graft_log(
+      rytwin, d, LOCKSTEP_FIXTURE, "lockstep", ["--validate"]
+    )
+    check("lockstep fixture twinned", r.returncode == 0 and lines, r.stderr[:200])
+    if not lines:
+      return
+    widest = box_widest(lines[0])
+    check(
+      "the independent leaf is the widest", widest and widest[0] == "%p0", str(widest)
+    )
+    check(
+      "and it reaches what it can prove alone",
+      widest and widest[1] > 100000000,
+      str(widest),
+    )
+    check("the guard still validates", "validated: OK" in r.stdout, r.stdout[:200])
+    for arg in ("3", "-2000000"):
+      r1 = symiri_result(symiri, p1, "@lockstep", [arg, "2"])
+      r2 = symiri_result(symiri, p2, "@lockstep", [arg, "2"])
+      check(f"same answer for {arg}", r1[1:] == r2[1:], f"{r1} vs {r2}")
+
+
 def test_box_is_deterministic_for_a_seed(rytwin):
   """The search is seeded, so two runs agree — the trim that keeps guards
   from being identical is drawn from the same stream, not from chance."""
@@ -4014,6 +4065,10 @@ def main():
     (
       "guard: a root initialized on one path is not",
       lambda: test_a_root_initialized_on_one_path_is_not(rytwin),
+    ),
+    (
+      "box: a leaf is not held back by another",
+      lambda: test_a_leaf_is_not_held_back_by_another(rytwin, symiri),
     ),
     (
       "box: the search is seeded, not chancy",

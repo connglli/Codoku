@@ -1802,6 +1802,36 @@ namespace refractir::reify {
           o.frozen = true;
     }
 
+    // Step 3b — grow each leaf alone. Lockstep moves every open leaf together
+    // and a refusal freezes all the leaves that failure depended on, so a leaf
+    // stops for a failure that was really about another one: where a leaf is
+    // multiplied by a hundred thousand before a sum, it reaches its own limit
+    // and takes every other leaf down with it, at a fraction of the width they
+    // could have had. Blame cannot tell them apart — both operands of that sum
+    // genuinely feed it — so this does not argue about fault. It re-opens each
+    // leaf on its own, with the others held where lockstep left them, and every
+    // step is proved like any other.
+    auto twice = [](std::int64_t r, std::int64_t cap) {
+      if (r <= 0)
+        return std::min<std::int64_t>(1, cap);
+      return r > cap / 2 ? cap : r * 2;
+    };
+    for (auto &o: open) {
+      std::int64_t next = twice(o.good, o.cap);
+      for (std::size_t step = 0; step < rytwin::hp::kTwinBisectMaxRounds && next > o.good; ++step) {
+        std::vector<std::int64_t> radii;
+        radii.reserve(open.size());
+        for (auto &p: open)
+          radii.push_back(&p == &o ? next : p.good);
+        if (!judge(widen(radii)).ok)
+          break;
+        o.good = next;
+        next = twice(o.good, o.cap);
+      }
+      // Whatever it stopped at is the bracket step 4 settles inside.
+      o.next = next;
+    }
+
     // Step 4 — settle each frozen leaf between its last proven radius and the
     // one that failed, so a run does not stop at whatever power of two it
     // happened to reach.
