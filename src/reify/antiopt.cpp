@@ -106,10 +106,15 @@ namespace refractir::reify {
       const AntiOptAccept &accept
   ) {
     AntiOptReport rep;
-    // Without a body the caller already accepts there is nothing to judge a
-    // rewrite against, so such a body is left as it is.
-    if (!accept(stmts))
-      return rep;
+    // A body the caller refuses from the start cannot judge anything: every
+    // rewrite would be measured against a body that already fails. That is not
+    // a reason to leave it alone, though — it is the worst case for a caller
+    // like rytwin, whose unjudged body is its region's own statements and so a
+    // copy of it. What a proof buys is permission to introduce operations that
+    // can trap; rules that introduce none are identities whatever the state,
+    // and so is any composition of them. Those still apply, and the rest stand
+    // down.
+    rep.trapFreeOnly = !accept(stmts);
 
     struct Cand {
       const AntiOptRule *rule;
@@ -130,10 +135,13 @@ namespace refractir::reify {
         ctx.facts->refresh(stmts);
 
       std::vector<Cand> cands;
-      for (const auto &rule: catalog())
+      for (const auto &rule: catalog()) {
+        if (rep.trapFreeOnly && rule->tier() != TrapTier::Tier0)
+          continue;
         for (std::size_t i = 0; i < stmts.size(); ++i)
           if (rule->matches(stmts, RulePos{i}, ctx))
             cands.push_back({rule.get(), RulePos{i}});
+      }
       if (cands.empty())
         break;
       shuffleAndCap(cands, ctx.rng, 1);
@@ -168,8 +176,9 @@ namespace refractir::reify {
               chk.afterStmt = chk.afterStmt + added - width;
 
         // R3: each rule is sound on its own, and that says nothing about the
-        // two of them together. `accept` has the last word.
-        if (accept(stmts)) {
+        // two of them together. `accept` has the last word — except where it
+        // had nothing to say to begin with, and only trap-free rules ran.
+        if (rep.trapFreeOnly || accept(stmts)) {
           ++rep.applied;
           auto it = std::find_if(rep.byRule.begin(), rep.byRule.end(), [&](const auto &e) {
             return e.first == c.rule->name();

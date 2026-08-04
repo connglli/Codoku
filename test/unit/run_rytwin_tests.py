@@ -1920,6 +1920,49 @@ def test_an_intrinsic_is_written_out(rytwin, symiri):
   check("and the twins validate", ok)
 
 
+# An intrinsic's result is not a value the interval pass follows, so the sum
+# that reads it cannot be proven and neither can the trace. The body is still
+# the region's own statements, and rules that introduce no trapping operation
+# are still identities.
+UNPROVEN_FIXTURE = """// SOLVED: %p0=3
+intrinsic @min(%a: i32, %b: i32) : i32;
+
+fun @unproven(%p0: i32) : i32 {
+  let mut %b: i32 = 0;
+  let mut %r: i32 = 0;
+^entry:
+  %b = 20;
+  br ^work;
+^work:
+  %r = call @min(%p0, %b);
+  %r = %r + %p0;
+  br ^done;
+^done:
+  ret %r;
+}
+"""
+
+
+def test_an_unproven_body_still_gets_trap_free_rewrites(rytwin):
+  """A body the interval pass cannot prove used to be left exactly as the
+  region wrote it — the worst case for a twin, since it is then a copy. The
+  rules that introduce no trapping operation need no proof, so those still
+  apply and the rest stand down."""
+  with tempfile.TemporaryDirectory() as d:
+    r, lines, _, _ = graft_log(rytwin, d, UNPROVEN_FIXTURE, "unproven", ["--validate"])
+    check("unproven fixture twinned", r.returncode == 0 and lines, r.stderr[:200])
+    if not lines:
+      return
+    check("the pass declines the trace", interval_note(lines[0]) != "ok", lines[0])
+    m = re.search(r"(\d+) rewrites \((\d+) undone", lines[0])
+    check("it is still rewritten", m and int(m.group(1)) > 0, lines[0])
+    check("the log says why the choice was limited", "trap-free" in lines[0], lines[0])
+    # Nothing that could introduce a trap: no proof exists to clear one.
+    for tier1 in ("memory-routing", "dead-statement", "mba-bit-split", "mul-to-shift"):
+      check(f"{tier1} stands down", tier1 not in lines[0], lines[0])
+    check("and it validates", "validated: OK" in r.stdout, r.stdout[:200])
+
+
 def test_box_is_deterministic_for_a_seed(rytwin):
   """The search is seeded, so two runs agree — the trim that keeps guards
   from being identical is drawn from the same stream, not from chance."""
@@ -2566,7 +2609,10 @@ def test_one_past_end_pointer_region(rytwin, symiri):
     )
     body = "\n".join(twin_block_bodies(open(p2).read()))
     check("the twin replays the store", "store %p," in body, body[:200])
-    check("the twin replays the pointer bump", "%p = %p + %one;" in body, body[:200])
+    # The bump is replayed rather than the address named; which local holds
+    # the 1 is the disguise's business, so only the arithmetic on %p is the
+    # claim here.
+    check("the twin replays the pointer bump", "%p = %p + " in body, body[:200])
     r1 = symiri_result(symiri, p1, "@main", [])
     r2 = symiri_result(symiri, p2, "@main", [])
     check("one-past-end program equivalent", r1[1:] == r2[1:], f"{r1} vs {r2}")
@@ -3442,6 +3488,10 @@ def main():
     (
       "rewrite: a non-negative value splits at a bit",
       lambda: test_value_splits_at_a_bit(rytwin),
+    ),
+    (
+      "rewrite: an unproven body still gets trap-free rewrites",
+      lambda: test_an_unproven_body_still_gets_trap_free_rewrites(rytwin),
     ),
     (
       "box: the search is seeded, not chancy",

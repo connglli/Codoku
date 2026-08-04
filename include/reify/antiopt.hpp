@@ -181,6 +181,9 @@ namespace refractir::reify {
     std::size_t applied = 0;
     std::size_t rolledBack = 0;
     std::vector<std::pair<std::string, std::size_t>> byRule; // kept, first use first
+    // The caller refused the body before any rewriting, so nothing could be
+    // judged and only rules that cannot introduce a trap were offered.
+    bool trapFreeOnly = false;
   };
 
   // The per-rule tally as "xor-twice x3, sub-as-add x1", or empty when nothing

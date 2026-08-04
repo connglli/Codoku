@@ -1360,6 +1360,7 @@ namespace refractir::reify {
                 std::to_string(c.plan.body.checks.size()) + " path cond, interval " + c.interval +
                 ", " + describeBox(c.box) + ", " + std::to_string(c.disguised.applied) +
                 " rewrites (" + std::to_string(c.disguised.rolledBack) + " undone" +
+                (c.disguised.trapFreeOnly ? ", trap-free only" : "") +
                 (c.disguised.byRule.empty() ? "" : "; " + describeRules(c.disguised)) + ")" +
                 (c.fellBack ? " [window fell back to one block]" : "")
             );
