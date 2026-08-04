@@ -411,28 +411,35 @@ namespace refractir::reify {
     // access path (e.g. one-past-the-end).
     bool fillPtrLeaf(
         LeafRef &leaf, const FunDecl &fn, const StructMap &structs, const TypeLayout &layout,
-        const TypePtr &rootType
+        const TypePtr &rootType, const char **why = nullptr
     ) {
+      auto no = [&](const char *reason) {
+        if (why)
+          *why = reason;
+        return false;
+      };
       // Static type of the cell: walk the root type along the leaf path.
       TypePtr t = rootType;
       for (const auto &acc: leaf.path) {
         t = stepType(t, acc, structs);
         if (!t)
-          return false;
+          return no("a leaf whose type does not follow the root's");
       }
       if (!isPtrType(t))
-        return false;
+        return no("a pointer leaf of non-pointer type");
       leaf.ptrType = t;
       if (leaf.val.ptrNull)
         return true;
       if (leaf.val.ptrRoot.empty())
-        return false; // opaque pointer — no way to reproduce it
+        return no("an opaque pointer"); // no provenance, no way to reproduce it
       auto target = findRoot(fn, leaf.val.ptrRoot);
-      if (!target || !target->isMutable)
-        return false; // addr needs a mutable root
+      if (!target)
+        return no("a pointer into something the function does not declare");
+      if (!target->isMutable)
+        return no("a pointer into an immutable root"); // `addr` needs a let mut
       auto path = ptrAccessPath(target->type, leaf.val.ptrOfs, pointeeType(t), layout);
       if (!path)
-        return false;
+        return no("a pointer to an offset no access path reaches");
       leaf.ptrTarget = LValue{LocalId{leaf.val.ptrRoot, {}}, std::move(*path), {}};
       return true;
     }
@@ -527,7 +534,13 @@ namespace refractir::reify {
       std::unordered_set<std::string> guarded;
       for (const auto &[name, val]: sVars) {
         auto decl = findRoot(fn, name);
+        // Why this root cannot cross into the guard, for the rejection
+        // message: the name alone leaves a reader to guess which of half a
+        // dozen reasons applied, and none of them is visible in the program.
+        const char *why = nullptr;
         bool guardable = decl.has_value() && (decl->initialized || entryAssigned.count(name) > 0);
+        if (!guardable)
+          why = decl.has_value() ? "not initialized at region entry" : "no declaration";
         GuardRoot::Kind kind = GuardRoot::Kind::Scalar;
         if (guardable) {
           if (isPtrType(decl->type))
@@ -538,21 +551,33 @@ namespace refractir::reify {
             kind = GuardRoot::Kind::Agg;
             // `addr %root` needs a mutable root; vector lanes inside an
             // aggregate cannot be reached through a pointer at all.
-            guardable = decl->isMutable && !containsVec(decl->type, structs);
+            if (!decl->isMutable) {
+              guardable = false;
+              why = "an immutable aggregate, which `addr` cannot take";
+            } else if (containsVec(decl->type, structs)) {
+              guardable = false;
+              why = "a vector inside an aggregate, which no pointer reaches";
+            }
           }
         }
         std::vector<StateLeaf> leaves;
         if (guardable) {
           bool hasPtr = false, hasUndef = false;
           enumStateLeaves(val, leaves, hasPtr, hasUndef);
-          guardable = !hasUndef && !leaves.empty();
+          if (hasUndef) {
+            guardable = false;
+            why = "an undef leaf, which no guard can state";
+          } else if (leaves.empty()) {
+            guardable = false;
+            why = "no leaves to compare";
+          }
         }
         GuardRoot root;
         if (guardable) {
           root = GuardRoot{name, decl->type, kind, decl->isParam, {}};
           for (auto &lf: leaves) {
             LeafRef ref{name, std::move(lf.path), lf.val, {}, {}};
-            if (ref.isPtr() && !fillPtrLeaf(ref, fn, structs, layout, decl->type)) {
+            if (ref.isPtr() && !fillPtrLeaf(ref, fn, structs, layout, decl->type, &why)) {
               guardable = false;
               break;
             }
@@ -562,7 +587,9 @@ namespace refractir::reify {
         if (!guardable) {
           if (rs.reads.count(name) || rs.mem)
             // the region depends on state we cannot pin in the guard
-            return reject("unguardable state: " + name);
+            return reject(
+                "unguardable state: " + name + " (" + (why ? why : "unknown reason") + ")"
+            );
           continue;
         }
         plan.guardRoots.push_back(std::move(root));

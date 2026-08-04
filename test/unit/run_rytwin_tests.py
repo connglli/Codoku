@@ -1942,6 +1942,23 @@ fun @unproven(%p0: i32) : i32 {
 }
 """
 
+# %a holds an undef leaf, so no guard can state what it is — and the region
+# reads it, so the region cannot be twinned. Saying *that* is the point: the
+# bare name told a reader nothing about which of the several reasons applied.
+UNDEF_LEAF_FIXTURE = """// SOLVED: %p0=3
+fun @undefleaf(%p0: i32) : i32 {
+  let mut %a: [2] i32 = {undef, 7};
+  let mut %r: i32 = 0;
+^entry:
+  br ^work;
+^work:
+  %r = %p0 + %a[1];
+  br ^done;
+^done:
+  ret %r;
+}
+"""
+
 
 def test_an_unproven_body_still_gets_trap_free_rewrites(rytwin):
   """A body the interval pass cannot prove used to be left exactly as the
@@ -1961,6 +1978,23 @@ def test_an_unproven_body_still_gets_trap_free_rewrites(rytwin):
     for tier1 in ("memory-routing", "dead-statement", "mba-bit-split", "mul-to-shift"):
       check(f"{tier1} stands down", tier1 not in lines[0], lines[0])
     check("and it validates", "validated: OK" in r.stdout, r.stdout[:200])
+
+
+def test_a_rejection_says_what_it_could_not_guard(rytwin):
+  """`unguardable state: %a` names the root but not the reason, and there are
+  several — undef leaves, opaque pointers, an immutable aggregate. The reason
+  is the part a reader cannot work out from the program alone."""
+  with tempfile.TemporaryDirectory() as d:
+    p1 = os.path.join(d, "undefleaf.sir")
+    open(p1, "w").write(UNDEF_LEAF_FIXTURE)
+    p2 = os.path.join(d, "undefleaf.p2.sir")
+    r = run([rytwin, p1, "--p-twin", "1.0", "--seed", "3", "-v", "-o", p2])
+    out = r.stderr + r.stdout
+    check("the root is named", "unguardable state: %a" in out, out[:300])
+    m = re.search(r"unguardable state: %a \(([^)]*)\)", out)
+    check("and the reason with it", m is not None, out[:300])
+    if m:
+      check("which is the undef leaf", "undef" in m.group(1), m.group(1))
 
 
 def test_box_is_deterministic_for_a_seed(rytwin):
@@ -3492,6 +3526,10 @@ def main():
     (
       "rewrite: an unproven body still gets trap-free rewrites",
       lambda: test_an_unproven_body_still_gets_trap_free_rewrites(rytwin),
+    ),
+    (
+      "twin: a rejection says what it could not guard",
+      lambda: test_a_rejection_says_what_it_could_not_guard(rytwin),
     ),
     (
       "box: the search is seeded, not chancy",
