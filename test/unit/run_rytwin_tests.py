@@ -2320,6 +2320,107 @@ def test_a_folded_call_agrees_off_the_profile(rytwin, symiri):
       check(f"same answer for {arg}", r1[1:] == r2[1:], f"{r1} vs {r2}")
 
 
+# %p is assigned in ^setup, not in the function's entry block — the shape
+# rysmith emits whenever a pointer is set up where it is used rather than up
+# front. Every path to ^work assigns it, so a guard there may read it; a test
+# that only looks at the entry block cannot tell.
+LATE_INIT_FIXTURE = """// SOLVED: %p0=3
+fun @lateinit(%p0: i32) : i32 {
+  let mut %a: [2] i32 = {5, 7};
+  let mut %p: ptr i32 = undef;
+  let mut %r: i32 = 0;
+^entry:
+  br ^setup;
+^setup:
+  %p = addr %a[1];
+  br ^work;
+^work:
+  %r = load %p;
+  %r = %r + %p0;
+  br ^done;
+^done:
+  ret %r;
+}
+"""
+
+# The same pointer assigned on only one side of a branch: the region below
+# the join is reached with it uninitialized, and a guard reading it there
+# would be a program the checker rejects.
+MAYBE_INIT_FIXTURE = """// SOLVED: %p0=3
+fun @maybeinit(%p0: i32) : i32 {
+  let mut %a: [2] i32 = {5, 7};
+  let mut %p: ptr i32 = undef;
+  let mut %r: i32 = 0;
+^entry:
+  br %p0 > 0, ^setup, ^skip;
+^setup:
+  %p = addr %a[1];
+  br ^work;
+^skip:
+  %r = 1;
+  br ^work;
+^work:
+  %r = %r + %p0;
+  br ^done;
+^done:
+  ret %r;
+}
+"""
+
+
+def test_a_root_initialized_before_the_region_is_guardable(rytwin, symiri):
+  """A root assigned anywhere that dominates the region can be read by the
+  guard — which is what the frontend's own must-init analysis says, and the
+  guard has to agree with it exactly or it emits programs the checker
+  rejects. Testing only the function's entry block turned that into "assigned
+  early or not at all"."""
+  with tempfile.TemporaryDirectory() as d:
+    p1 = os.path.join(d, "lateinit.sir")
+    open(p1, "w").write(LATE_INIT_FIXTURE)
+    p2 = os.path.join(d, "lateinit.p2.sir")
+    r = run(
+      [rytwin, p1, "--p-twin", "1.0", "--seed", "3", "-v", "--validate", "-o", p2]
+    )
+    check("the fixture twins", r.returncode == 0, (r.stderr + r.stdout)[:200])
+    if r.returncode != 0:
+      return
+    check(
+      "the region below the assignment is not rejected",
+      "unguardable state: %p" not in r.stderr,
+      [ln for ln in r.stderr.splitlines() if "unguardable" in ln][:1],
+    )
+    check("and it validates", "validated: OK" in r.stdout, r.stdout[:200])
+    for arg in ("3", "-9"):
+      r1 = symiri_result(symiri, p1, "@lateinit", [arg])
+      r2 = symiri_result(symiri, p2, "@lateinit", [arg])
+      check(f"same answer for {arg}", r1[1:] == r2[1:], f"{r1} vs {r2}")
+
+
+def test_a_root_initialized_on_one_path_is_not(rytwin):
+  """Assigned on one side of a branch is not assigned: below the join the
+  checker cannot prove a read is legal, so neither may the guard."""
+  with tempfile.TemporaryDirectory() as d:
+    p1 = os.path.join(d, "maybeinit.sir")
+    open(p1, "w").write(MAYBE_INIT_FIXTURE)
+    p2 = os.path.join(d, "maybeinit.p2.sir")
+    r = run(
+      [rytwin, p1, "--p-twin", "1.0", "--seed", "3", "-v", "--validate", "-o", p2]
+    )
+    log = r.stderr
+    joined = [ln for ln in log.splitlines() if "^work" in ln]
+    check("the join region is considered", joined, log[:200])
+    if joined:
+      check(
+        "and refused for the root only one path assigns",
+        "unguardable state: %p" in joined[0] or "skipped" in joined[0],
+        joined[0],
+      )
+    if r.returncode == 0:
+      check(
+        "what is emitted still validates", "validated: OK" in r.stdout, r.stdout[:200]
+      )
+
+
 def test_box_is_deterministic_for_a_seed(rytwin):
   """The search is seeded, so two runs agree — the trim that keeps guards
   from being identical is drawn from the same stream, not from chance."""
@@ -3905,6 +4006,14 @@ def main():
     (
       "interval: a folded call agrees off the profile",
       lambda: test_a_folded_call_agrees_off_the_profile(rytwin, symiri),
+    ),
+    (
+      "guard: a root initialized before the region is guardable",
+      lambda: test_a_root_initialized_before_the_region_is_guardable(rytwin, symiri),
+    ),
+    (
+      "guard: a root initialized on one path is not",
+      lambda: test_a_root_initialized_on_one_path_is_not(rytwin),
     ),
     (
       "box: the search is seeded, not chancy",

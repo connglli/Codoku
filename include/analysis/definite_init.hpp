@@ -1,6 +1,7 @@
 #pragma once
 
 #include <unordered_map>
+#include <unordered_set>
 #include "analysis/dataflow.hpp"
 #include "analysis/pass_manager.hpp"
 
@@ -19,6 +20,22 @@ namespace refractir {
      * Executes the analysis on the function.
      */
     refractir::PassResult run(FunDecl &f, DiagBag &diags) override;
+
+    /**
+     * Which locals are definitely initialized on entry to each block, by
+     * block label.
+     *
+     * This is the same must-analysis `run` checks with, exposed because a
+     * consumer that emits a *read* somewhere has to agree with the checker
+     * about where a read is legal — rytwin splices a guard call at a region
+     * entry and passes the live state to it, and a guard reading a local the
+     * checker cannot prove initialized is a program that fails re-analysis.
+     * Approximating it ("declared with an initializer, or assigned in the
+     * function's entry block") is sound but refuses regions the checker would
+     * have accepted.
+     */
+    static std::unordered_map<std::string, std::unordered_set<std::string>>
+    initializedAtBlockEntry(const FunDecl &f);
 
   private:
     using InitSet = std::unordered_map<std::string, bool>;

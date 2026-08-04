@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstring>
 #include "analysis/cfg.hpp"
+#include "analysis/definite_init.hpp"
 #include "analysis/dominators.hpp"
 #include "analysis/type_utils.hpp"
 
@@ -471,12 +472,16 @@ namespace refractir::reify {
     // (region scope, where the twin bypasses them). Fills `plan` with the
     // guard roots (all definitely-initialized state at entry, compared to
     // `s`) and the def leaves (the diff, from `sPrime` at the region exit).
+    // Which locals the checker can see are initialized on entry to each
+    // block: computed once per function, since it is a fixpoint over the CFG.
+    using InitAtEntry = std::unordered_map<std::string, std::unordered_set<std::string>>;
+
     bool planRegion(
         const FunDecl &fn, const std::vector<const Block *> &blocks, bool scanTerms,
         const std::vector<std::pair<std::string, StateValue>> &sVars,
         const std::vector<std::pair<std::string, StateValue>> &sPrimeVars, const StateMap &s,
-        const StructMap &structs, const TypeLayout &layout, TwinPlan &plan,
-        std::string *why = nullptr
+        const StructMap &structs, const TypeLayout &layout, const InitAtEntry &inited,
+        TwinPlan &plan, std::string *why = nullptr
     ) {
       const Block &b = *blocks.front(); // the region entry
       auto reject = [&](std::string r) {
@@ -484,17 +489,17 @@ namespace refractir::reify {
           *why = std::move(r);
         return false;
       };
-      // Roots whose whole value is assigned in the entry block are
-      // definitely initialized in every OTHER block: the entry block is
-      // straight-line and dominates the CFG. This admits the rysmith
-      // pointer pattern (`let mut %p: ptr T = undef;` + `%p = addr ...`
-      // in ^entry) into the guardable state.
-      std::unordered_set<std::string> entryAssigned;
-      if (!fn.blocks.empty() && fn.blocks.front().label.name != b.label.name)
-        for (const auto &ins: fn.blocks.front().instrs)
-          if (auto ai = std::get_if<AssignInstr>(&ins))
-            if (ai->lhs.accesses.empty())
-              entryAssigned.insert(ai->lhs.base.name);
+      // What the guard may read here. The guard call is spliced at the start
+      // of this block and takes the live state as arguments, so a root it
+      // reads has to be one the *checker* can see is initialized at this
+      // point — otherwise the emitted program fails its own re-analysis. That
+      // is a question the frontend's must-init analysis already answers, and
+      // asking it is what admits a root assigned anywhere that dominates the
+      // region rather than only in the function's entry block.
+      auto initedHere = inited.find(b.label.name);
+      auto isInitialized = [&](const std::string &nm) {
+        return initedHere != inited.end() && initedHere->second.count(nm) > 0;
+      };
 
       ReadScan rs;
       for (const Block *bp: blocks) {
@@ -539,7 +544,7 @@ namespace refractir::reify {
         // message: the name alone leaves a reader to guess which of half a
         // dozen reasons applied, and none of them is visible in the program.
         const char *why = nullptr;
-        bool guardable = decl.has_value() && (decl->initialized || entryAssigned.count(name) > 0);
+        bool guardable = decl.has_value() && (decl->initialized || isInitialized(name));
         if (!guardable)
           why = decl.has_value() ? "not initialized at region entry" : "no declaration";
         GuardRoot::Kind kind = GuardRoot::Kind::Scalar;
@@ -1101,7 +1106,7 @@ namespace refractir::reify {
         const CFG &cfg, const DomTree &dt,
         const std::unordered_map<std::string, const Block *> &byLabel,
         const std::unordered_set<std::string> &claims, const StructMap &structs,
-        const TypeLayout &layout, std::string &why
+        const TypeLayout &layout, const InitAtEntry &inited, std::string &why
     ) {
       const std::string &label = pts[t]->block;
       std::size_t tEnd = t + 1;
@@ -1147,7 +1152,7 @@ namespace refractir::reify {
         plan.exitLabel = pts[end]->block;
         if (!planRegion(
                 fn, blocks, /*scanTerms=*/true, pts[t]->vars, pts[end]->vars,
-                toStateMap(pts[t]->vars), structs, layout, plan, &why
+                toStateMap(pts[t]->vars), structs, layout, inited, plan, &why
             ))
           return false;
         // The twin body is the executed trace, so it follows the window and
@@ -1488,6 +1493,8 @@ namespace refractir::reify {
             DiagBag diags;
             const CFG cfg = CFG::build(*fn, diags);
             const DomTree dt = DomTree::build(cfg);
+            // One fixpoint per function, not per candidate region.
+            const InitAtEntry inited = DefiniteInitAnalysis::initializedAtBlockEntry(*fn);
             const auto &pts = byFn[fnName];
             const std::unordered_set<std::string> noClaims;
             std::unordered_set<std::string> enumerated;
@@ -1498,7 +1505,7 @@ namespace refractir::reify {
                 continue;
               std::string why;
               if (auto c = planCandidate(
-                      *fn, pts, t, cfg, dt, byLabel, noClaims, structs, layout, why
+                      *fn, pts, t, cfg, dt, byLabel, noClaims, structs, layout, inited, why
                   )) {
                 CandidateInfo info = candidateInfo(*c, cfg); // features before moving `c`
                 pool.push_back({fnName, std::move(*c), info});

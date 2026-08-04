@@ -13,6 +13,26 @@ namespace refractir {
     return diags.hasErrors() ? refractir::PassResult::Error : refractir::PassResult::Success;
   }
 
+  std::unordered_map<std::string, std::unordered_set<std::string>>
+  DefiniteInitAnalysis::initializedAtBlockEntry(const FunDecl &f) {
+    std::unordered_map<std::string, std::unordered_set<std::string>> out;
+    // The diagnostics this run produces are the caller's own analysis pass's
+    // business, not a consumer's, so they go into a bag nobody reads.
+    DiagBag scratch;
+    CFG cfg = CFG::build(const_cast<FunDecl &>(f), scratch);
+    if (scratch.hasErrors())
+      return out;
+    Problem p(f, scratch);
+    auto res = DataflowSolver<InitSet>::solve(f, cfg, p);
+    for (std::size_t i = 0; i < f.blocks.size() && i < res.in.size(); ++i) {
+      auto &names = out[f.blocks[i].label.name];
+      for (const auto &[name, inited]: res.in[i])
+        if (inited)
+          names.insert(name);
+    }
+    return out;
+  }
+
   DefiniteInitAnalysis::Problem::Problem(const FunDecl &f, DiagBag &diags) : f_(f), diags_(diags) {}
 
   DefiniteInitAnalysis::InitSet DefiniteInitAnalysis::Problem::bottom() {
