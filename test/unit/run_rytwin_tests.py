@@ -1065,6 +1065,33 @@ def test_disguise_rolls_back_what_it_cannot_prove(rytwin):
     check("the result still validates", "validated: OK" in r.stdout, r.stdout[:200])
 
 
+def test_every_attempt_lands_on_a_live_candidate(rytwin):
+  """The engine scans for candidates once per attempt rather than once per
+  round. A list built once goes stale the moment a rewrite splices statements
+  in — every position after it means something else — so half the budget used
+  to be spent skipping positions that no longer matched, and the picks that
+  survived were whatever sat early in the body."""
+  for seed in ("1", "3"):
+    with tempfile.TemporaryDirectory() as d:
+      p1 = os.path.join(d, "chain.sir")
+      open(p1, "w").write(CHAIN_FIXTURE)
+      p2 = os.path.join(d, "chain.p2.sir")
+      r = run([rytwin, p1, "--p-twin", "1.0", "--seed", seed, "-v", "-o", p2])
+      lines = [ln for ln in r.stderr.splitlines() if "grafted" in ln]
+      if not lines:
+        check(f"chain fixture twinned at seed {seed}", False, r.stderr[:200])
+        continue
+      m = re.search(r"(\d+) rewrites \((\d+) undone", lines[0])
+      spent = int(m.group(1)) + int(m.group(2)) if m else 0
+      # The budget is kTwinRewriteRounds * kTwinRewritesPerRound = 24; a rule
+      # that declines after matching is the only thing that should cost less.
+      check(
+        f"the budget is spent on live candidates at seed {seed}",
+        spent >= 23,
+        str(spent),
+      )
+
+
 def test_disguise_varies_with_the_seed(rytwin):
   """The rewriting is seeded, so two seeds give two different bodies for the
   same region — otherwise every twin of a given region would look alike."""
@@ -3168,6 +3195,10 @@ def main():
     (
       "rewrite: what cannot be re-proved is rolled back",
       lambda: test_disguise_rolls_back_what_it_cannot_prove(rytwin),
+    ),
+    (
+      "rewrite: every attempt lands on a live candidate",
+      lambda: test_every_attempt_lands_on_a_live_candidate(rytwin),
     ),
     (
       "rewrite: bodies vary with the seed",

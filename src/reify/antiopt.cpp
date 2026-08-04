@@ -91,6 +91,7 @@ namespace refractir::reify {
         antiopt::registerMbaRules(v);
         antiopt::registerStructureRules(v);
         antiopt::registerLicensedRules(v);
+        antiopt::registerControlRules(v);
         return v;
       }();
       return rules;
@@ -110,35 +111,36 @@ namespace refractir::reify {
     if (!accept(stmts))
       return rep;
 
-    for (std::size_t round = 0; round < rytwin::hp::kTwinRewriteRounds; ++round) {
-      // Re-scanned every round: an application shifts every position after it.
-      struct Cand {
-        const AntiOptRule *rule;
-        RulePos pos;
-      };
+    struct Cand {
+      const AntiOptRule *rule;
+      RulePos pos;
+    };
 
-      std::vector<Cand> cands;
+    // One scan per attempt, not one per round. An application splices
+    // statements in, so every position after it means something else
+    // afterwards — a candidate list outlives its body by one rewrite. Scanning
+    // again is also what makes the draw fair: with a catalog this size, a list
+    // built once and then half-invalidated hands most of its picks to whatever
+    // happened to sit early in the body.
+    const std::size_t attempts = rytwin::hp::kTwinRewriteRounds * rytwin::hp::kTwinRewritesPerRound;
+    for (std::size_t attempt = 0; attempt < attempts; ++attempt) {
       // Facts are about the body as it stands, and every application changes
-      // it — so they are refreshed here and again before each attempt, never
-      // carried across one.
+      // it, so they are never carried across one.
       if (ctx.facts)
         ctx.facts->refresh(stmts);
+
+      std::vector<Cand> cands;
       for (const auto &rule: catalog())
         for (std::size_t i = 0; i < stmts.size(); ++i)
           if (rule->matches(stmts, RulePos{i}, ctx))
             cands.push_back({rule.get(), RulePos{i}});
       if (cands.empty())
         break;
-      shuffleAndCap(cands, ctx.rng, rytwin::hp::kTwinRewritesPerRound);
+      shuffleAndCap(cands, ctx.rng, 1);
 
-      for (const auto &c: cands) {
+      {
+        const Cand &c = cands.front();
         const std::size_t width = c.rule->width();
-        if (c.pos.stmt + width > stmts.size())
-          continue; // an earlier application moved this position
-        if (ctx.facts)
-          ctx.facts->refresh(stmts);
-        if (!c.rule->matches(stmts, c.pos, ctx))
-          continue;
         auto replacement = c.rule->apply(stmts, c.pos, ctx);
         if (replacement.empty())
           continue;
