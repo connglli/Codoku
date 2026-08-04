@@ -15,7 +15,6 @@ seed="$RANDOM$RANDOM"
 NUM_FUNCS=100
 NUM_PROGS=$((NUM_FUNCS * 20))
 STRUCTURED_LOWERING=true # true|false|random
-TWIN_SCOPE=region
 # CFLAGS="-Wunused-variable -Werror=unused-variable -Wincompatible-pointer-types -Werror=incompatible-pointer-types -fsanitize=undefined"
 CFLAGS="-Wincompatible-pointer-types -Werror=incompatible-pointer-types -fsanitize=undefined"
 LDFLAGS="-lm"
@@ -31,7 +30,7 @@ rm -rf rysmith_out
 for f in rysmith_out/*.c; do
     gcc $CFLAGS "$f" $LDFLAGS
     ./a.out
-    ./rytwin --twin-scope "$TWIN_SCOPE" -o twin.sir --target c --emit-main --validate "${f/.c/.sir}" || true
+    ./rytwin -o twin.sir --target c --emit-main --validate "${f/.c/.sir}" || true
     [[ -f twin.sir ]] && ./symiri twin.sir && rm -rf twin.sir
     [[ -f twin.c ]] && gcc $CFLAGS twin.c $LDFLAGS && ./a.out && rm -rf twin.c
 done
@@ -51,7 +50,7 @@ for d in rylink_out/prog_*; do
     pushd $d
     gcc $CFLAGS *.c $LDFLAGS
     ./a.out
-    ../../rytwin --twin-scope "$TWIN_SCOPE" -o twin.sir --target c --emit-main --validate $(ls *.sir) || true
+    ../../rytwin -o twin.sir --target c --emit-main --validate $(ls *.sir) || true
     [[ -f twin.sir ]] && ../../symiri twin.sir && rm -rf twin.sir
     [[ -f twin.c ]] && gcc $CFLAGS twin.c $LDFLAGS && ./a.out && rm -rf twin.c
     popd
@@ -68,7 +67,7 @@ rm -rf rylink_out
 for f in rylink_out/*.c; do
     gcc $CFLAGS "$f" $LDFLAGS
     ./a.out
-    ./rytwin --twin-scope "$TWIN_SCOPE" -o twin.sir --target c --emit-main --validate "${f/.c/.sir}" || true
+    ./rytwin -o twin.sir --target c --emit-main --validate "${f/.c/.sir}" || true
     [[ -f twin.sir ]] && ./symiri twin.sir && rm -rf twin.sir
     [[ -f twin.c ]] && gcc $CFLAGS twin.c $LDFLAGS && ./a.out && rm -rf twin.c
 done
