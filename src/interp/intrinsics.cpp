@@ -1349,17 +1349,18 @@ namespace refractir {
 
   } // namespace
 
+  RuntimeValue evalIntrinsic(const IntrinsicDecl &intr, const std::vector<RuntimeValue> &args) {
+    auto kind = getIntrinsicKind(intr.name.name);
+    if (kind)
+      if (auto impl = IntrinsicRegistry::get().lookup(*kind))
+        return impl->eval(intr, args);
+    throw std::runtime_error("Unknown intrinsic: " + intr.name.name);
+  }
+
   RuntimeValue Interpreter::callIntrinsic(
       const IntrinsicDecl &intr, const std::vector<RuntimeValue> &args, SourceSpan /*callSpan*/
   ) {
-    auto kind = getIntrinsicKind(intr.name.name);
-    if (kind) {
-      if (auto impl = IntrinsicRegistry::get().lookup(*kind)) {
-        return impl->eval(intr, args);
-      }
-    }
-
-    throw std::runtime_error("Unknown intrinsic: " + intr.name.name);
+    return evalIntrinsic(intr, args);
   }
 
 } // namespace refractir

@@ -19,6 +19,14 @@ namespace refractir {
    * Executes RefractIR programs by evaluating expressions and instructions
    * against concrete values for symbolic variables.
    */
+  // Evaluate a built-in intrinsic on concrete arguments, with no program or
+  // interpreter state around it. src/interp/intrinsics.cpp is the single
+  // source of truth for what an intrinsic computes, so an analysis that wants
+  // to fold a call asks here rather than restating the semantics — and gets
+  // the UB conditions with them, as the same UndefinedBehaviorError the
+  // interpreter would raise.
+  RuntimeValue evalIntrinsic(const IntrinsicDecl &intr, const std::vector<RuntimeValue> &args);
+
   class Interpreter {
   public:
     explicit Interpreter(const Program &prog);

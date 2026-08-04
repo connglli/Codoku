@@ -119,10 +119,11 @@ namespace refractir::reify {
     class Checker {
     public:
       Checker(
-          const FunDecl &fn, const StructMap &structs, const EntryState &entry, bool record = false
+          const FunDecl &fn, const StructMap &structs, const EntryState &entry, bool record = false,
+          const IntrinsicFold *fold = nullptr
       ) :
           env_(entry.ints), record_(record), floats_(entry.floats), ptrs_(entry.ptrs),
-          structs_(structs) {
+          structs_(structs), fold_(fold) {
         for (const auto &p: fn.params)
           types_[p.name.name] = p.type;
         for (const auto &l: fn.lets)
@@ -767,12 +768,32 @@ namespace refractir::reify {
                   return std::nullopt;
                 return unknownOf();
               } else if constexpr (std::is_same_v<T, CallAtom>) {
-                // An intrinsic's result is not tracked, but its arguments are
-                // ordinary expressions and can trap on the way in.
-                for (const auto &arg: x.args)
-                  if (arg && !eval(*arg, 0))
+                // The arguments are ordinary expressions and can trap on the
+                // way in. If they all come out as single values, the call has
+                // a single result too — and the caller's fold is asked for it,
+                // since what an intrinsic computes is the interpreter's to
+                // say. Anything else stays unknown.
+                std::vector<I64> args;
+                std::uint64_t deps = 0;
+                bool allConst = true;
+                for (const auto &arg: x.args) {
+                  if (!arg)
+                    return unknownOf();
+                  auto v = eval(*arg, 0);
+                  if (!v)
                     return std::nullopt;
-                return unknownOf();
+                  deps |= v->deps;
+                  if (v->isConst())
+                    args.push_back(v->lo);
+                  else
+                    allConst = false;
+                }
+                if (!fold_ || !allConst)
+                  return unknownOf(deps);
+                auto folded = (*fold_)(x, args);
+                if (!folded)
+                  return unknownOf(deps);
+                return withDeps(constant(*folded), deps);
               } else
                 return unknownOf();
             },
@@ -1377,6 +1398,9 @@ namespace refractir::reify {
       // pointer). A pointer absent from the map points somewhere unknown.
       PtrEnv ptrs_;
       const StructMap &structs_;
+      // What an intrinsic call computes when its arguments are single values,
+      // if the caller can say. See twin_interval.hpp.
+      const IntrinsicFold *fold_ = nullptr;
       std::vector<IntervalEnv> snaps_;
       std::unordered_map<std::string, std::uint64_t> bitOf_;
       std::vector<std::string> leafOfBit_;
@@ -1388,15 +1412,17 @@ namespace refractir::reify {
   } // namespace
 
   IntervalVerdict checkTrace(
-      const FunDecl &fn, const StructMap &structs, const TraceBody &body, const EntryState &entry
+      const FunDecl &fn, const StructMap &structs, const TraceBody &body, const EntryState &entry,
+      const IntrinsicFold *fold
   ) {
-    return Checker(fn, structs, entry).run(body);
+    return Checker(fn, structs, entry, /*record=*/false, fold).run(body);
   }
 
   std::vector<IntervalEnv> traceSnapshots(
-      const FunDecl &fn, const StructMap &structs, const TraceBody &body, const EntryState &entry
+      const FunDecl &fn, const StructMap &structs, const TraceBody &body, const EntryState &entry,
+      const IntrinsicFold *fold
   ) {
-    Checker chk(fn, structs, entry, /*record=*/true);
+    Checker chk(fn, structs, entry, /*record=*/true, fold);
     chk.run(body); // a trace that fails still recorded what it got that far
     return chk.snapshots();
   }
@@ -1467,11 +1493,12 @@ namespace refractir::reify {
   } // namespace
 
   std::unordered_map<std::string, Interval> ceilings(
-      const FunDecl &fn, const StructMap &structs, const TraceBody &body, const EntryState &entry
+      const FunDecl &fn, const StructMap &structs, const TraceBody &body, const EntryState &entry,
+      const IntrinsicFold *fold
   ) {
     // Forward first: a requirement pushed back through `%d = %x + %k` needs to
     // know what %k held there, which is what the forward pass recorded.
-    Checker fwd(fn, structs, entry, /*record=*/true);
+    Checker fwd(fn, structs, entry, /*record=*/true, fold);
     fwd.run(body);
     const std::vector<IntervalEnv> &snaps = fwd.snapshots();
 
@@ -1625,12 +1652,12 @@ namespace refractir::reify {
 
   Box computeBox(
       const FunDecl &fn, const StructMap &structs, const TraceBody &body, const EntryState &entry,
-      std::mt19937 &rng
+      std::mt19937 &rng, const IntrinsicFold *fold
   ) {
     Box box;
     auto judge = [&](const EntryState &st) {
       ++box.passes;
-      return checkTrace(fn, structs, body, st);
+      return checkTrace(fn, structs, body, st, fold);
     };
 
     // Step 1 — the floor. Everything pinned is the guard rytwin already
@@ -1648,7 +1675,7 @@ namespace refractir::reify {
     // leaf before a single trial is run: one that cannot move at all is pinned
     // for free, and the rest have a bound to search under rather than a
     // doubling sequence that has to discover where to stop.
-    const auto ceil = ceilings(fn, structs, body, entry);
+    const auto ceil = ceilings(fn, structs, body, entry, fold);
     for (auto &leaf: box.leaves) {
       auto it = ceil.find(leaf.key);
       if (it != ceil.end() && it->second.lo == it->second.hi)

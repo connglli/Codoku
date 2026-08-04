@@ -1929,27 +1929,12 @@ def test_an_intrinsic_is_written_out(rytwin, symiri):
   check("and the twins validate", ok)
 
 
-# An intrinsic's result is not a value the interval pass follows, so the sum
-# that reads it cannot be proven and neither can the trace. The body is still
-# the region's own statements, and rules that introduce no trapping operation
-# are still identities.
-UNPROVEN_FIXTURE = """// SOLVED: %p0=3
-intrinsic @min(%a: i32, %b: i32) : i32;
+# A pointer read back out of memory has no target the pass can name, so what
+# it addresses is unknown and the division that reads it cannot be proven.
+# The body is still the region's own statements, and rules that introduce no
+# trapping operation are still identities.
+UNPROVEN_FIXTURE = PTR_PTR_FIXTURE.replace("@ptrptr", "@unproven")
 
-fun @unproven(%p0: i32) : i32 {
-  let mut %b: i32 = 0;
-  let mut %r: i32 = 0;
-^entry:
-  %b = 20;
-  br ^work;
-^work:
-  %r = call @min(%p0, %b);
-  %r = %r + %p0;
-  br ^done;
-^done:
-  ret %r;
-}
-"""
 
 # %a holds an undef leaf, so no guard can state what it is — and the region
 # reads it, so the region cannot be twinned. Saying *that* is the point: the
@@ -2265,6 +2250,74 @@ def test_a_signed_disjunction_claims_nothing(rytwin):
   if ranged is None:
     return
   check("nothing is claimed about a signed disjunction", ranged == 0, str(ranged))
+
+
+# An intrinsic result was unknown to the pass, and an unknown poisons every
+# sum that reads it. Its arguments are often pinned, though, and then the
+# result is one value — one the interpreter can say, since it is the authority
+# on what an intrinsic computes.
+INTRINSIC_FOLD_FIXTURE = """// SOLVED: %p0=8
+intrinsic @min(%a: i32, %b: i32) : i32;
+
+fun @foldmin(%p0: i32) : i32 {
+  let mut %k: i32 = 0;
+  let mut %j: i32 = 0;
+  let mut %r: i32 = 0;
+^entry:
+  %k = 20;
+  %j = 30;
+  br ^work;
+^work:
+  %r = call @min(%k, %j);
+  %r = %r + %p0;
+  br ^done;
+^done:
+  ret %r;
+}
+"""
+
+# The same call with an argument the box will widen: no single value to fold
+# to, so the pass must go back to knowing nothing about it.
+INTRINSIC_OPEN_FIXTURE = INTRINSIC_FOLD_FIXTURE.replace("@foldmin", "@openmin").replace(
+  "%r = call @min(%k, %j);", "%r = call @min(%p0, %j);"
+)
+
+
+def test_a_pinned_intrinsic_is_folded(rytwin):
+  """With every argument pinned, an intrinsic call has one result, and the
+  interpreter is asked for it rather than the pass guessing. Without that the
+  sum reading it cannot be proven and the guard cannot open."""
+  ranged, radius = bounded_opens(rytwin, INTRINSIC_FOLD_FIXTURE, "foldmin")
+  if ranged is None:
+    return
+  check("the folded call lets a leaf widen", ranged >= 1, str(ranged))
+  check("and it widens far", radius > 1000, str(radius))
+
+
+def test_an_open_intrinsic_argument_folds_nothing(rytwin):
+  """An argument the box widens has no single value, so neither has the
+  result. Declining is the point."""
+  ranged, _ = bounded_opens(rytwin, INTRINSIC_OPEN_FIXTURE, "openmin")
+  if ranged is None:
+    return
+  check("nothing is claimed about an unpinned call", ranged == 0, str(ranged))
+
+
+def test_a_folded_call_agrees_off_the_profile(rytwin, symiri):
+  """The guard the fold opens admits inputs the profile never saw, and the
+  twin has to agree with the region on those too."""
+  with tempfile.TemporaryDirectory() as d:
+    r, lines, p1, p2 = graft_log(
+      rytwin, d, INTRINSIC_FOLD_FIXTURE, "foldmin", ["--validate"]
+    )
+    check("folding fixture twinned", r.returncode == 0 and lines, r.stderr[:200])
+    if not lines:
+      return
+    check("--validate agrees", "validated: OK" in r.stdout, r.stdout[:200])
+    for arg in ("8", "-4000", "123456"):
+      r1 = symiri_result(symiri, p1, "@foldmin", [arg])
+      r2 = symiri_result(symiri, p2, "@foldmin", [arg])
+      check(f"same answer for {arg}", r1[1:] == r2[1:], f"{r1} vs {r2}")
 
 
 def test_box_is_deterministic_for_a_seed(rytwin):
@@ -3840,6 +3893,18 @@ def main():
     (
       "interval: a signed disjunction claims nothing",
       lambda: test_a_signed_disjunction_claims_nothing(rytwin),
+    ),
+    (
+      "interval: a pinned intrinsic call is folded",
+      lambda: test_a_pinned_intrinsic_is_folded(rytwin),
+    ),
+    (
+      "interval: an open intrinsic argument folds nothing",
+      lambda: test_an_open_intrinsic_argument_folds_nothing(rytwin),
+    ),
+    (
+      "interval: a folded call agrees off the profile",
+      lambda: test_a_folded_call_agrees_off_the_profile(rytwin, symiri),
     ),
     (
       "box: the search is seeded, not chancy",

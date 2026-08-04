@@ -215,6 +215,10 @@ Rule-level soundness says nothing about two rules together — each may be value
 
 The engine itself knows nothing about twins. It takes a statement list, the declarations it may add to, and a predicate deciding whether a rewritten body is still acceptable — rytwin supplies the interval check above, and a generator with no such obligation (rysmith, rylink) can use the same rules to vary the code it emits.
 
+The pass asks the interpreter what an intrinsic computes whenever the box pins every argument to one value — the interpreter is the authority on intrinsic semantics and rytwin already links it, so folding a call needs no second implementation of `@min` or `@crc32_update` and no solver. A call whose arguments are not all pinned stays unknown.
+
+The pass asks the interpreter what an intrinsic computes whenever the box pins every argument to one value — the interpreter is the authority on intrinsic semantics and rytwin already links it, so folding a call needs no second implementation of `@min` or `@crc32_update`, and no solver. A call whose arguments are not all pinned stays unknown.
+
 **Pointers and memory**. The state profile records each pointer leaf's provenance — the originating local and the byte offset of the pointee cell — so memory-op regions (`load`/`store`/`addr`/`ptr`-navigation) are twin candidates like any other. A region's effect is the bit-exact state diff `s -> s'` (store-through-pointer effects surface as diffs of the pointee root), and the guard compares pointer values with `==` against caller-reconstructed expected pointers (equality is defined across objects, so the check is total). Replaying the trace re-derives pointer leaves by running the same `addr` navigation the region ran, rather than rebuilding them positionally. Memory-op regions require the entire frame state to be guardable — a load can observe any root through a pointer.
 
 **Limitations**. Regions containing non-intrinsic calls are not twinned (a callee handed a pointer into an outer frame could mutate state the frame diff does not see).

@@ -47,6 +47,7 @@
 // Solver-free by construction — this is arithmetic on bounds.
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <random>
 #include <string>
@@ -118,11 +119,21 @@ namespace refractir::reify {
     std::vector<std::string> blame;
   };
 
+  // What an intrinsic call computes, when every argument is a single value.
+  // The pass does not know — the interpreter does, and duplicating it here is
+  // exactly the mistake this project keeps having to undo — so a caller that
+  // can answer supplies this, and one that cannot leaves every call unknown.
+  // `nullopt` means "cannot say"; a caller reports UB by throwing, which the
+  // pass turns into a refusal.
+  using IntrinsicFold = std::function<
+      std::optional<std::int64_t>(const CallAtom &, const std::vector<std::int64_t> &)>;
+
   // Check `body` over every state in `entry`. `fn` supplies the declared types
   // of the locals the body touches (widths bound the arithmetic) and `structs`
   // resolves field types.
   IntervalVerdict checkTrace(
-      const FunDecl &fn, const StructMap &structs, const TraceBody &body, const EntryState &entry
+      const FunDecl &fn, const StructMap &structs, const TraceBody &body, const EntryState &entry,
+      const IntrinsicFold *fold = nullptr
   );
 
   // What every local held *before* each statement of `body`, over every state
@@ -132,7 +143,8 @@ namespace refractir::reify {
   // range at the point it fires. A trace the pass cannot finish returns the
   // prefix it managed, so a caller reading past the end simply knows nothing.
   std::vector<IntervalEnv> traceSnapshots(
-      const FunDecl &fn, const StructMap &structs, const TraceBody &body, const EntryState &entry
+      const FunDecl &fn, const StructMap &structs, const TraceBody &body, const EntryState &entry,
+      const IntrinsicFold *fold = nullptr
   );
 
   // What a guard may say about one leaf.
@@ -171,7 +183,8 @@ namespace refractir::reify {
   // ceiling is its whole type is a free candidate, and everything else has a
   // bound to bisect under instead of a doubling sequence to guess at.
   std::unordered_map<std::string, Interval> ceilings(
-      const FunDecl &fn, const StructMap &structs, const TraceBody &body, const EntryState &entry
+      const FunDecl &fn, const StructMap &structs, const TraceBody &body, const EntryState &entry,
+      const IntrinsicFold *fold = nullptr
   );
 
   // Compute the widest box the interval pass can prove for `body`, starting
@@ -182,7 +195,7 @@ namespace refractir::reify {
   // a loop visited it. `rng` settles how the remaining slack is split.
   Box computeBox(
       const FunDecl &fn, const StructMap &structs, const TraceBody &body, const EntryState &entry,
-      std::mt19937 &rng
+      std::mt19937 &rng, const IntrinsicFold *fold = nullptr
   );
 
 } // namespace refractir::reify

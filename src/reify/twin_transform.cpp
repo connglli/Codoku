@@ -21,6 +21,7 @@
 #include "ast/ast.hpp"
 #include "ast/clone.hpp"
 #include "frontend/diagnostics.hpp"
+#include "interp/interpreter.hpp"
 #include "interp/type_layout.hpp"
 #include "reify/antiopt.hpp"
 #include "reify/state_profile.hpp"
@@ -910,6 +911,44 @@ namespace refractir::reify {
       AntiOptReport disguised;
     };
 
+    // What an intrinsic computes when the box pins every argument to one
+    // value. The pass cannot say and must not guess — the interpreter is the
+    // authority on intrinsic semantics, and it is already linked here — so
+    // rytwin answers by asking it. A call whose arguments are not all single
+    // values is left unknown, and one the interpreter reports as UB is not a
+    // value at all: the trace traps for every state the box admits, so the
+    // pass is told nothing and refuses on the arithmetic that reads it.
+    IntrinsicFold intrinsicFold() {
+      return [](const CallAtom &call,
+                const std::vector<std::int64_t> &args) -> std::optional<std::int64_t> {
+        const IntrinsicDecl *decl = call.resolvedIntrinsic;
+        if (!decl || decl->params.size() != args.size())
+          return std::nullopt;
+        std::vector<RuntimeValue> rv;
+        rv.reserve(args.size());
+        for (std::size_t i = 0; i < args.size(); ++i) {
+          auto bits = TypeUtils::getIntBitWidth(decl->params[i].type);
+          if (!bits)
+            return std::nullopt; // a float or aggregate argument: not this pass
+          RuntimeValue v;
+          v.kind = RuntimeValue::Kind::Int;
+          v.intVal = args[i];
+          v.bits = *bits;
+          rv.push_back(std::move(v));
+        }
+        if (!TypeUtils::getIntBitWidth(decl->retType))
+          return std::nullopt;
+        try {
+          RuntimeValue out = evalIntrinsic(*decl, rv);
+          if (out.kind != RuntimeValue::Kind::Int)
+            return std::nullopt;
+          return out.intVal;
+        } catch (...) {
+          return std::nullopt; // UB, or an intrinsic the interpreter declines
+        }
+      };
+    }
+
     // The profiled state, leaf by leaf: every integer pinned to the one value
     // it holds, every float to its exact value, every pointer to the cell its
     // recorded provenance names. This is the narrowest box there is — the point
@@ -1122,7 +1161,8 @@ namespace refractir::reify {
         if (!body)
           return false;
         EntryState es = pointBox(fn, pts[t]->vars, structs, layout);
-        const IntervalVerdict iv = checkTrace(fn, structs, *body, es);
+        const IntrinsicFold fold = intrinsicFold();
+        const IntervalVerdict iv = checkTrace(fn, structs, *body, es, &fold);
         note = iv.ok ? "ok" : iv.reason;
         plan.entry = std::move(es);
         plan.body = std::move(*body);
@@ -1201,6 +1241,7 @@ namespace refractir::reify {
         return st;
       };
 
+      const IntrinsicFold fold = intrinsicFold();
       NameAllocator names(kAntiOptLocalPrefix);
       TraceBody &body = plan.body;
       auto probeOf = [&](const std::vector<Instr> &s) {
@@ -1222,15 +1263,17 @@ namespace refractir::reify {
         BoxFacts(
             const FunDecl &fn, const StructMap &structs, const Box &box,
             std::function<TraceBody(const std::vector<Instr> &)> probe,
-            std::function<EntryState()> state
-        ) : fn_(fn), structs_(structs), probe_(std::move(probe)), state_(std::move(state)) {
+            std::function<EntryState()> state, IntrinsicFold fold
+        ) :
+            fn_(fn), structs_(structs), probe_(std::move(probe)), state_(std::move(state)),
+            fold_(std::move(fold)) {
           for (const auto &leaf: box.leaves)
             if (leaf.cls == LeafClass::Free)
               free_.insert(leaf.key);
         }
 
         void refresh(const std::vector<Instr> &stmts) override {
-          snaps_ = traceSnapshots(fn_, structs_, probe_(stmts), state_());
+          snaps_ = traceSnapshots(fn_, structs_, probe_(stmts), state_(), &fold_);
         }
 
         std::optional<ValueRange>
@@ -1250,16 +1293,17 @@ namespace refractir::reify {
         const StructMap &structs_;
         std::function<TraceBody(const std::vector<Instr> &)> probe_;
         std::function<EntryState()> state_;
+        IntrinsicFold fold_;
         std::unordered_set<std::string> free_;
         std::vector<IntervalEnv> snaps_;
       };
 
-      BoxFacts facts(fn, structs, box, probeOf, [&] { return withConstantCells(guarded); });
+      BoxFacts facts(fn, structs, box, probeOf, [&] { return withConstantCells(guarded); }, fold);
       AntiOptContext ctx{fn, structs, body.checks, names, fn.lets, rng, &facts};
       return antiOptimize(body.stmts, body.checks, ctx, [&](const std::vector<Instr> &s) {
         // Re-read the declarations every time: the engine adds cells as it
         // rewrites, and the body being judged may already use them.
-        return checkTrace(fn, structs, probeOf(s), withConstantCells(guarded)).ok;
+        return checkTrace(fn, structs, probeOf(s), withConstantCells(guarded), &fold).ok;
       });
     }
 
@@ -1377,7 +1421,8 @@ namespace refractir::reify {
             // the rewriting below adds to it, and says by how much itself.
             const std::size_t traced = c.plan.body.stmts.size();
             if (FunDecl *fnp = findFn(fnName)) {
-              c.box = computeBox(*fnp, structs, c.plan.body, c.plan.entry, ctx.rng);
+              const IntrinsicFold fold = intrinsicFold();
+              c.box = computeBox(*fnp, structs, c.plan.body, c.plan.entry, ctx.rng, &fold);
               c.disguised = antiOptimizeBody(*fnp, structs, c.plan, c.box, ctx.rng);
             }
             c.plan.box = c.box;
