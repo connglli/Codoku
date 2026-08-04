@@ -2046,6 +2046,121 @@ def test_comparisons_rewrite_at_any_width(rytwin):
       check(f"an i16 comparison twins at seed {seed}", ok, (r.stderr + r.stdout)[:200])
 
 
+# Vectors were unknown from the start, so a region touching one proved
+# nothing and its guard could not open: every leaf pinned, the twin admitted
+# one state. A vector statement is N scalar statements, one per lane, and
+# that is all the pass needs to follow it.
+VEC_FIXTURE = """// SOLVED: %p0=3
+fun @vecadd(%p0: i32) : i32 {
+  let mut %v: <4> i32 = {1, 2, 3, 4};
+  let mut %w: <4> i32 = {5, 6, 7, 8};
+  let mut %r: i32 = 0;
+^entry:
+  br ^work;
+^work:
+  %v = %v + %w;
+  %r = %v[1];
+  %r = %r + %p0;
+  br ^done;
+^done:
+  ret %r;
+}
+"""
+
+VEC_WRITE_FIXTURE = """// SOLVED: %p0=3
+fun @veclane(%p0: i32) : i32 {
+  let mut %v: <4> i32 = {1, 2, 3, 4};
+  let mut %r: i32 = 0;
+^entry:
+  br ^work;
+^work:
+  %v[2] = %p0;
+  %v = 2 * %v;
+  %r = %v[2];
+  %r = %r + %p0;
+  br ^done;
+^done:
+  ret %r;
+}
+"""
+
+# The lane written is not known here, so the write could have landed on any
+# of them and nothing about the vector survives it.
+VEC_DYN_FIXTURE = """// SOLVED: %p0=3
+intrinsic @min(%a: i32, %b: i32) : i32;
+
+fun @vecdyn(%p0: i32) : i32 {
+  let mut %v: <4> i32 = {1, 2, 3, 4};
+  let mut %i: i32 = 0;
+  let mut %r: i32 = 0;
+^entry:
+  %i = call @min(%p0, 3);
+  br ^work;
+^work:
+  %v[%i] = %p0;
+  %r = %v[0];
+  %r = %r + %p0;
+  br ^done;
+^done:
+  ret %r;
+}
+"""
+
+
+def test_interval_pass_follows_vector_lanes(rytwin):
+  """Lane-wise arithmetic is arithmetic: `%v = %v + %w` is one addition per
+  lane, each with the same overflow question as a scalar one. Following it
+  is what lets a region that touches a vector prove anything at all."""
+  with tempfile.TemporaryDirectory() as d:
+    r, lines, _, _ = graft_log(rytwin, d, VEC_FIXTURE, "vecadd", ["--validate"])
+    check("vector fixture twinned", r.returncode == 0 and lines, r.stderr[:200])
+    if not lines:
+      return
+    check("the vector trace is proven", interval_note(lines[0]) == "ok", lines[0])
+    counts = box_counts(lines[0])
+    check("and the guard opens", counts and counts[0] + counts[1] > 0, str(counts))
+
+
+def test_interval_pass_follows_a_written_lane(rytwin):
+  """A lane written by name is a cell like any other, and the vector it sits
+  in keeps its other lanes."""
+  with tempfile.TemporaryDirectory() as d:
+    r, lines, _, _ = graft_log(rytwin, d, VEC_WRITE_FIXTURE, "veclane", ["--validate"])
+    check("lane fixture twinned", r.returncode == 0 and lines, r.stderr[:200])
+    if not lines:
+      return
+    check("the lane write is followed", interval_note(lines[0]) == "ok", lines[0])
+    counts = box_counts(lines[0])
+    check("and the guard opens", counts and counts[0] + counts[1] > 0, str(counts))
+
+
+def test_an_unknown_lane_index_claims_nothing(rytwin):
+  """A write through a lane index the pass cannot pin could have landed on
+  any lane, so nothing about the vector survives it. Declining is the point:
+  the alternative is a guard that admits states the twin gets wrong."""
+  with tempfile.TemporaryDirectory() as d:
+    r, lines, _, _ = graft_log(rytwin, d, VEC_DYN_FIXTURE, "vecdyn", ["--validate"])
+    check("dynamic-lane fixture twinned", r.returncode == 0 and lines, r.stderr[:200])
+    if not lines:
+      return
+    check("the pass declines", interval_note(lines[0]) != "ok", lines[0])
+
+
+def test_vector_twin_agrees_off_the_profile(rytwin, symiri):
+  """The widened guard admits inputs the profile never saw, and the twin has
+  to agree with the region on those too."""
+  with tempfile.TemporaryDirectory() as d:
+    r, lines, p1, p2 = graft_log(rytwin, d, VEC_FIXTURE, "vecadd", ["--validate"])
+    check("vector fixture twinned", r.returncode == 0 and lines, r.stderr[:200])
+    if not lines:
+      return
+    check("--validate agrees", "validated: OK" in r.stdout, r.stdout[:200])
+    for arg in ("3", "-11", "40000"):
+      r1 = symiri_result(symiri, p1, "@vecadd", [arg])
+      r2 = symiri_result(symiri, p2, "@vecadd", [arg])
+      check(f"same answer for {arg}", r1[1:] == r2[1:], f"{r1} vs {r2}")
+
+
 def test_box_is_deterministic_for_a_seed(rytwin):
   """The search is seeded, so two runs agree — the trim that keeps guards
   from being identical is drawn from the same stream, not from chance."""
@@ -3583,6 +3698,22 @@ def main():
     (
       "rewrite: comparisons rewrite at any width",
       lambda: test_comparisons_rewrite_at_any_width(rytwin),
+    ),
+    (
+      "interval: vector lanes are followed",
+      lambda: test_interval_pass_follows_vector_lanes(rytwin),
+    ),
+    (
+      "interval: a written lane is followed",
+      lambda: test_interval_pass_follows_a_written_lane(rytwin),
+    ),
+    (
+      "interval: an unknown lane index claims nothing",
+      lambda: test_an_unknown_lane_index_claims_nothing(rytwin),
+    ),
+    (
+      "interval: a vector twin agrees off the profile",
+      lambda: test_vector_twin_agrees_off_the_profile(rytwin, symiri),
     ),
     (
       "box: the search is seeded, not chancy",

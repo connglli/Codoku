@@ -26,14 +26,20 @@
 // verdict of "not ok" means *not proven*, never "unsafe" — so a caller may only
 // use it to decline widening, never to conclude a state is bad.
 //
-// Precision is deliberately modest in this first version. Integer scalars are
-// tracked exactly through `+ - * ~ <<` and casts; bitwise and shift results
-// widen to the type's full range unless their operands are known constants;
-// floats, vectors, pointers and anything reached through memory are unknown
-// from the start. Unknown is sound but useless: a check on an unknown value
-// cannot be proven, so such regions simply do not widen and keep the guard they
-// have today. Sharpening any of this is a local change to one transfer
-// function.
+// Precision is deliberately modest. Integer scalars are tracked exactly through
+// `+ - * ~ <<` and casts; shifts by a known amount and `x & m` for a
+// non-negative m are bounded, and the rest of the bitwise results widen to the
+// type's full range unless their operands are known constants; floats,
+// pointers and anything reached through memory are unknown from the start.
+// Unknown is sound but useless: a check on an unknown value cannot be proven,
+// so such regions simply do not widen and keep the guard they have today.
+// Sharpening any of this is a local change to one transfer function.
+//
+// Vectors need no value of their own. A vector statement is N scalar
+// statements, one per lane, so the pass walks it that way and every lane is an
+// ordinary tracked cell — which is also how the profile records them. A lane
+// written through an index the pass cannot pin could have landed anywhere, and
+// the whole vector is forgotten.
 //
 // Solver-free by construction — this is arithmetic on bounds.
 

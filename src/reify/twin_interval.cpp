@@ -252,6 +252,12 @@ namespace refractir::reify {
       // Rewrite an lvalue's indices into literals, so two spellings of one
       // cell (`%a[2]` and `%a[%i]` with `%i` = 2) name the same leaf. Fails
       // when an index is not known.
+      // A vector statement is N scalar statements, one per lane, and the pass
+      // runs it that way: `lane_` says which one is being evaluated, and a
+      // bare vector name read inside it means that lane's cell. Everything
+      // downstream — the arithmetic, the overflow questions, the leaf keys —
+      // is then the scalar machinery it already was, which is why the domain
+      // does not need a vector value at all.
       std::optional<LValue> resolve(const LValue &lv) {
         LValue out;
         out.base = lv.base;
@@ -275,6 +281,10 @@ namespace refractir::reify {
             return std::nullopt;
           out.accesses.push_back(AccessIndex{IntLit{v.lo, {}}, {}});
         }
+        // Inside a lane-wise statement, a vector named as a whole is the lane
+        // being evaluated.
+        if (lane_ && TypeUtils::asVec(typeOf(out)))
+          out.accesses.push_back(AccessIndex{IntLit{(I64) *lane_, {}}, {}});
         return out;
       }
 
@@ -1172,6 +1182,29 @@ namespace refractir::reify {
         return true;
       }
 
+      // `%v = <e>` over a vector of integers: one pass per lane, each reading
+      // the lane's own cells. A vector of floats keeps the old answer — the
+      // domain carries exact float values and nothing lifts that per lane
+      // yet — as does one whose element width the domain cannot represent.
+      bool stepLanes(const AssignInstr &a, const VecType &vt) {
+        auto bits = TypeUtils::getIntBitWidth(vt.elem);
+        if (!bits || *bits == 0 || *bits > 64) {
+          forget(a.lhs.base.name);
+          return true;
+        }
+        for (std::size_t i = 0; i < vt.size; ++i) {
+          lane_ = i;
+          auto v = eval(a.rhs, *bits);
+          if (!v) {
+            lane_.reset();
+            return false;
+          }
+          write(a.lhs, *v);
+          lane_.reset();
+        }
+        return true;
+      }
+
       bool step(const Instr &ins) {
         return std::visit(
             [&](const auto &x) -> bool {
@@ -1191,6 +1224,8 @@ namespace refractir::reify {
                 }
                 if (const std::uint32_t fw = floatWidthOf(x.lhs))
                   return assignFloat(x.lhs, x.rhs, fw);
+                if (const auto *vt = TypeUtils::asVec(typeOf(x.lhs)))
+                  return stepLanes(x, *vt);
                 const std::uint32_t w = widthOf(x.lhs);
                 auto v = eval(x.rhs, w);
                 if (!v)
@@ -1255,6 +1290,8 @@ namespace refractir::reify {
       }
 
       IntervalEnv env_;
+      // Which lane a vector statement is being evaluated for, if any.
+      std::optional<std::size_t> lane_;
       bool record_ = false;
       // Float leaf -> its exact value. Absent means unknown; there is no
       // "range of floats" here by design (see the header).
