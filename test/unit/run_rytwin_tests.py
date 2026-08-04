@@ -1821,6 +1821,105 @@ def test_a_bound_makes_a_constant_out_of_a_range(rytwin):
   check("and the twins validate", ok)
 
 
+# A select whose condition and arms are all spellable as `cmp` operands, so
+# the branchless form has somewhere to put them.
+SELECT_FIXTURE = """// SOLVED: %p0=3
+fun @sel(%p0: i32) : i32 {
+  let mut %a: i32 = 0;
+  let mut %b: i32 = 0;
+  let mut %r: i32 = 0;
+^entry:
+  %a = 10;
+  %b = 20;
+  br ^work;
+^work:
+  %r = select %p0 > 0, %a, %b;
+  %r = %r + %p0;
+  br ^done;
+^done:
+  ret %r;
+}
+"""
+
+INTRINSIC_FIXTURE = """// SOLVED: %p0=3
+intrinsic @min(%a: i32, %b: i32) : i32;
+
+fun @intr(%p0: i32) : i32 {
+  let mut %b: i32 = 0;
+  let mut %r: i32 = 0;
+^entry:
+  %b = 20;
+  br ^work;
+^work:
+  %r = call @min(%p0, %b);
+  %b = %b + %p0;
+  br ^done;
+^done:
+  ret %r;
+}
+"""
+
+
+def test_a_select_becomes_branchless(rytwin):
+  """`select c, a, b` is `b + ((a - b) & (c as iN))` — i1 true is all-ones
+  (spec §6.4), so the cast is a ready-made mask. The choice stops being a
+  choice and becomes arithmetic."""
+  kept, ok = rules_kept(rytwin, SELECT_FIXTURE, "sel")
+  check("select-to-mask fires", "select-to-mask" in kept, str(kept))
+  check("and the twins validate", ok)
+
+
+# Three comparisons, since `swap-compare`, `split-compare` and
+# `compare-to-diff` all want the same statement and only one can have it. The
+# trailing sum is what keeps the operands bounded: comparisons never trap, so
+# a body of nothing but comparisons frees every leaf and licenses nothing.
+CMP3_FIXTURE = """// SOLVED: %p0=3
+fun @cmp3(%p0: i32) : i32 {
+  let mut %b: i32 = 0;
+  let mut %c: i1 = 0;
+  let mut %d: i1 = 0;
+  let mut %e: i1 = 0;
+  let mut %r: i32 = 0;
+^entry:
+  %b = 5;
+  br ^work;
+^work:
+  %c = cmp < %p0, %b;
+  %d = cmp > %p0, %b;
+  %e = cmp != %p0, %b;
+  %r = %p0 + %b;
+  br ^done;
+^done:
+  ret %r;
+}
+"""
+
+
+def test_a_comparison_splits_in_two(rytwin):
+  """`a < b` is `(a <= b) & (a != b)`, and every relation has such a pair.
+  Trap-free, since nothing but `cmp` and a bitwise op is introduced."""
+  kept, ok = rules_kept(rytwin, CMP3_FIXTURE, "cmp3")
+  check("split-compare fires", "split-compare" in kept, str(kept))
+  check("and the twins validate", ok)
+
+
+def test_a_comparison_becomes_a_difference(rytwin):
+  """`a < b` is `a - b < 0` exactly where the subtraction does not overflow,
+  which is a fact about the box rather than about the operands."""
+  kept, ok = rules_kept(rytwin, CMP3_FIXTURE, "cmp3")
+  check("compare-to-diff fires", "compare-to-diff" in kept, str(kept))
+  check("and the twins validate", ok)
+
+
+def test_an_intrinsic_is_written_out(rytwin, symiri):
+  """An intrinsic is a name for something the program could have spelled
+  itself. Spelling it out removes the name the reader was going to match on —
+  and the identity is the intrinsic's own documented one."""
+  kept, ok = rules_kept(rytwin, INTRINSIC_FIXTURE, "intr")
+  check("intrinsic-expand fires", "intrinsic-expand" in kept, str(kept))
+  check("and the twins validate", ok)
+
+
 def test_box_is_deterministic_for_a_seed(rytwin):
   """The search is seeded, so two runs agree — the trim that keeps guards
   from being identical is drawn from the same stream, not from chance."""
@@ -3279,6 +3378,22 @@ def main():
     (
       "rewrite: a bound makes a constant out of a range",
       lambda: test_a_bound_makes_a_constant_out_of_a_range(rytwin),
+    ),
+    (
+      "rewrite: a select becomes branchless",
+      lambda: test_a_select_becomes_branchless(rytwin),
+    ),
+    (
+      "rewrite: a comparison splits in two",
+      lambda: test_a_comparison_splits_in_two(rytwin),
+    ),
+    (
+      "rewrite: a comparison becomes a difference",
+      lambda: test_a_comparison_becomes_a_difference(rytwin),
+    ),
+    (
+      "rewrite: an intrinsic is written out",
+      lambda: test_an_intrinsic_is_written_out(rytwin, symiri),
     ),
     (
       "interval: a leaf the box freed stays unknown",

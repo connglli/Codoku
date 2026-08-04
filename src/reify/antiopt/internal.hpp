@@ -76,5 +76,6 @@ namespace refractir::reify::antiopt {
   void registerMbaRules(RuleList &out);       // family B
   void registerStructureRules(RuleList &out); // family C
   void registerLicensedRules(RuleList &out);  // family D
+  void registerControlRules(RuleList &out);   // family E
 
 } // namespace refractir::reify::antiopt
