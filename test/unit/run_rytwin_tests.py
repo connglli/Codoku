@@ -1997,6 +1997,46 @@ def test_a_rejection_says_what_it_could_not_guard(rytwin):
       check("which is the undef leaf", "undef" in m.group(1), m.group(1))
 
 
+# The same three comparisons at a width that is not i32. A literal written
+# straight into a `cmp` is an i32 literal, so a rule that compares against a
+# bare zero emits a program the checker rejects at every other width — and
+# rytwin aborts on its own output rather than producing anything.
+NARROW_CMP_FIXTURE = """// SOLVED: %p0=3
+fun @cmpnarrow(%p0: i16) : i16 {
+  let mut %b: i16 = 0;
+  let mut %c: i1 = 0;
+  let mut %d: i1 = 0;
+  let mut %e: i1 = 0;
+  let mut %r: i16 = 0;
+^entry:
+  %b = 5;
+  br ^work;
+^work:
+  %c = cmp < %p0, %b;
+  %d = cmp > %p0, %b;
+  %e = cmp != %p0, %b;
+  %r = %p0 + %b;
+  br ^done;
+^done:
+  ret %r;
+}
+"""
+
+
+def test_comparisons_rewrite_at_any_width(rytwin):
+  """Every operand of a `cmp` shares one width (spec §6.5), and a literal
+  written into one is i32 whatever it is compared against. A rule that needs
+  a zero has to give it the compared type."""
+  for seed in ("1", "2", "3", "4", "5", "6"):
+    with tempfile.TemporaryDirectory() as d:
+      p1 = os.path.join(d, "cmpnarrow.sir")
+      open(p1, "w").write(NARROW_CMP_FIXTURE)
+      p2 = os.path.join(d, "cmpnarrow.p2.sir")
+      r = run([rytwin, p1, "--p-twin", "1.0", "--seed", seed, "--validate", "-o", p2])
+      ok = r.returncode == 0 and "validated: OK" in r.stdout
+      check(f"an i16 comparison twins at seed {seed}", ok, (r.stderr + r.stdout)[:200])
+
+
 def test_box_is_deterministic_for_a_seed(rytwin):
   """The search is seeded, so two runs agree — the trim that keeps guards
   from being identical is drawn from the same stream, not from chance."""
@@ -3530,6 +3570,10 @@ def main():
     (
       "twin: a rejection says what it could not guard",
       lambda: test_a_rejection_says_what_it_could_not_guard(rytwin),
+    ),
+    (
+      "rewrite: comparisons rewrite at any width",
+      lambda: test_comparisons_rewrite_at_any_width(rytwin),
     ),
     (
       "box: the search is seeded, not chancy",

@@ -261,10 +261,16 @@ namespace refractir::reify::antiopt {
         addTail(sub, AddOp::Minus, localAtom(y));
         std::vector<Instr> out;
         out.push_back(assignInstr(localLV(diff), std::move(sub)));
+        // A bare `0` in a `cmp` is an i32 literal and nothing else: the
+        // comparison's operands must share a width (spec §6.5), so the zero
+        // gets a cell of the operand's own type rather than being written
+        // inline. It reads the same at i32 and is a type error at every other
+        // width.
+        const std::string zeroCell = ctx.names.literal(0, ty, ctx.lets);
         CmpAtom zero;
         zero.op = cmp->op;
         zero.lhs = SelectVal{RValue{localLV(diff)}};
-        zero.rhs = SelectVal{Coef{IntLit{0, {}}}};
+        zero.rhs = SelectVal{RValue{localLV(zeroCell)}};
         out.push_back(assignInstr(ai.lhs, simpleExpr(Atom{std::move(zero), {}})));
         return out;
       }
@@ -334,7 +340,7 @@ namespace refractir::reify::antiopt {
           return out;
         }
         if (c.callee == "@abs") {
-          const std::string cond = emitCmp(RelOp::LT, arg(0), zero(), ctx, out);
+          const std::string cond = emitCmp(RelOp::LT, arg(0), zeroOf(ty, ctx), ctx, out);
           const std::string neg = ctx.names.fresh(ty, ctx.lets);
           Expr sub = simpleExpr(intAtom(0));
           addTail(sub, AddOp::Minus, localAtom(c.args[0]));
@@ -346,8 +352,8 @@ namespace refractir::reify::antiopt {
         }
         // @signum: -1, 0 or +1. i1 true is all-ones, so the two comparisons
         // cast to iN are already -1/0 and their difference is the sign.
-        const std::string neg = emitCmp(RelOp::LT, arg(0), zero(), ctx, out);
-        const std::string posi = emitCmp(RelOp::GT, arg(0), zero(), ctx, out);
+        const std::string neg = emitCmp(RelOp::LT, arg(0), zeroOf(ty, ctx), ctx, out);
+        const std::string posi = emitCmp(RelOp::GT, arg(0), zeroOf(ty, ctx), ctx, out);
         const std::string a = ctx.names.fresh(ty, ctx.lets);
         const std::string b = ctx.names.fresh(ty, ctx.lets);
         out.push_back(
@@ -368,7 +374,11 @@ namespace refractir::reify::antiopt {
         std::vector<std::string> args;
       };
 
-      static SelectVal zero() { return SelectVal{Coef{IntLit{0, {}}}}; }
+      // As in compare-to-diff: a literal zero in a `cmp` is i32, so it takes
+      // a cell of the compared type instead.
+      static SelectVal zeroOf(const TypePtr &ty, AntiOptContext &ctx) {
+        return SelectVal{RValue{localLV(ctx.names.literal(0, ty, ctx.lets))}};
+      }
 
       static Expr selectOn(const std::string &cond, SelectVal vtrue, SelectVal vfalse) {
         SelectAtom sel;
