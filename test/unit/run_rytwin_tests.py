@@ -1110,16 +1110,25 @@ def test_disguise_varies_with_the_seed(rytwin):
 
 
 def test_rewrite_rules_selftest(rytwin):
-  """Every disguise rule claims an identity. The claim is checked over all
-  i8 operand pairs, so a wrong rule is caught at the rule rather than showing
-  up later as a body that mysteriously fails to re-check."""
-  r = run([rytwin, "--selftest-rewrites"])
-  check("rewrite selftest passes", r.returncode == 0, (r.stderr + r.stdout)[:300])
-  m = re.search(r"(\d+) value rule", r.stdout)
+  """Every disguise rule claims that two spellings compute the same thing.
+  The claim is settled by *running* both through the interpreter, since the
+  authority on what a RefractIR statement does is the interpreter and not a
+  restatement of it in the checking code — and a restatement could not cover
+  a rule with no closed form at all, which was half the catalog."""
+  r = run([rytwin, "--selftest-rewrites", "-v"])
+  check("rewrite selftest passes", r.returncode == 0, (r.stderr + r.stdout)[:400])
+  check("the interpreter is the oracle", "interpreter" in r.stdout, r.stdout[:200])
+  m = re.search(r"(\d+) rule", r.stdout)
   check(
-    "it checked at least one value rule", m and int(m.group(1)) >= 1, r.stdout[:200]
+    "it checked the catalog, not a corner of it",
+    m and int(m.group(1)) >= 25,
+    r.stdout[:200],
   )
-  check("and said so on all i8 pairs", "all i8 pairs" in r.stdout, r.stdout[:200])
+  checked = set(re.findall(r"checked ([a-z0-9-]+)", r.stdout))
+  for structural in ("swap-adjacent", "memory-routing", "un-cse", "select-to-mask"):
+    check(
+      f"{structural} is checked too", structural in checked, str(sorted(checked))[:300]
+    )
 
 
 # Each family-A fixture puts one shape in front of the rules and bounds the
@@ -3424,7 +3433,7 @@ def main():
       lambda: test_disguise_varies_with_the_seed(rytwin),
     ),
     (
-      "rewrite: every rule's identity holds on all i8 pairs",
+      "rewrite: every rule's identity holds, per the interpreter",
       lambda: test_rewrite_rules_selftest(rytwin),
     ),
     (

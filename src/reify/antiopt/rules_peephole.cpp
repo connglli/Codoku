@@ -64,10 +64,7 @@ namespace refractir::reify::antiopt {
 
       std::optional<SelfTest> selfTest() const override {
         SelfTest t;
-        t.original = [](std::int64_t v, std::int64_t) { return std::optional<std::int64_t>(v); };
-        t.rewritten = [](std::int64_t v, std::int64_t k) {
-          return std::optional<std::int64_t>((v ^ k) ^ k);
-        };
+        t.body = "  %d = %x;";
         return t;
       }
     };
@@ -140,15 +137,7 @@ namespace refractir::reify::antiopt {
 
       std::optional<SelfTest> selfTest() const override {
         SelfTest t;
-        // The claim is k == a + (k - a), which holds whenever every part is
-        // representable — the split must not put a half outside the type.
-        t.original = [](std::int64_t k, std::int64_t) { return std::optional<std::int64_t>(k); };
-        t.rewritten = [](std::int64_t k, std::int64_t a) -> std::optional<std::int64_t> {
-          std::int64_t b = 0;
-          if (__builtin_sub_overflow(k, a, &b) || b < -128 || b > 127)
-            return std::nullopt;
-          return a + b;
-        };
+        t.body = "  %d = %x + 100;";
         return t;
       }
     };
@@ -206,16 +195,7 @@ namespace refractir::reify::antiopt {
 
       std::optional<SelfTest> selfTest() const override {
         SelfTest t;
-        t.original = [](std::int64_t a, std::int64_t k) -> std::optional<std::int64_t> {
-          if (k <= 0 || !fitsI8(a - k))
-            return std::nullopt;
-          return a - k;
-        };
-        t.rewritten = [](std::int64_t a, std::int64_t k) -> std::optional<std::int64_t> {
-          if (k <= 0 || !fitsI8(a + -k))
-            return std::nullopt;
-          return a + -k;
-        };
+        t.body = "  %d = %x - 100;";
         return t;
       }
     };
@@ -278,31 +258,8 @@ namespace refractir::reify::antiopt {
       }
 
       std::optional<SelfTest> selfTest() const override {
-        const bool plusOne = plusOne_;
-        // The operands are the multiplicand and the exponent, since that is
-        // what the two sides disagree about; anything that is not a shift this
-        // rule would emit is skipped.
-        auto multiplier = [plusOne](std::int64_t e) -> std::optional<std::int64_t> {
-          if (e < 1 || e > 6)
-            return std::nullopt;
-          return (std::int64_t{1} << e) + (plusOne ? 1 : 0);
-        };
         SelfTest t;
-        t.original = [multiplier](std::int64_t x, std::int64_t e) -> std::optional<std::int64_t> {
-          auto m = multiplier(e);
-          if (!m || !fitsI8(*m * x))
-            return std::nullopt;
-          return *m * x;
-        };
-        t.rewritten = [multiplier,
-                       plusOne](std::int64_t x, std::int64_t e) -> std::optional<std::int64_t> {
-          if (!multiplier(e) || x < 0) // the license: `<<` traps on a negative
-            return std::nullopt;
-          const std::int64_t shifted = x << e;
-          if (!fitsI8(shifted) || (plusOne && !fitsI8(shifted + x)))
-            return std::nullopt;
-          return plusOne ? shifted + x : shifted;
-        };
+        t.body = plusOne_ ? "  %d = 9 * %x;" : "  %d = 8 * %x;";
         return t;
       }
 
@@ -363,12 +320,7 @@ namespace refractir::reify::antiopt {
 
       std::optional<SelfTest> selfTest() const override {
         SelfTest t;
-        t.original = [](std::int64_t x, std::int64_t) { return std::optional<std::int64_t>(~x); };
-        t.rewritten = [](std::int64_t x, std::int64_t) -> std::optional<std::int64_t> {
-          if (!fitsI8(0 - x) || !fitsI8(0 - x - 1))
-            return std::nullopt;
-          return 0 - x - 1;
-        };
+        t.body = "  %d = ~%x;";
         return t;
       }
 
@@ -421,15 +373,7 @@ namespace refractir::reify::antiopt {
 
       std::optional<SelfTest> selfTest() const override {
         SelfTest t;
-        t.original = [](std::int64_t x, std::int64_t y) -> std::optional<std::int64_t> {
-          return fitsI8(x - y) ? std::optional<std::int64_t>(x - y) : std::nullopt;
-        };
-        t.rewritten = [](std::int64_t x, std::int64_t y) -> std::optional<std::int64_t> {
-          const std::int64_t c = ~y;
-          if (!fitsI8(x + c) || !fitsI8(x + c + 1))
-            return std::nullopt;
-          return x + c + 1;
-        };
+        t.body = "  %d = %x - %y;";
         return t;
       }
 
@@ -474,12 +418,7 @@ namespace refractir::reify::antiopt {
 
       std::optional<SelfTest> selfTest() const override {
         SelfTest t;
-        t.original = [](std::int64_t x, std::int64_t) -> std::optional<std::int64_t> {
-          return fitsI8(x + x) ? std::optional<std::int64_t>(x + x) : std::nullopt;
-        };
-        t.rewritten = [](std::int64_t x, std::int64_t) -> std::optional<std::int64_t> {
-          return fitsI8(2 * x) ? std::optional<std::int64_t>(2 * x) : std::nullopt;
-        };
+        t.body = "  %d = %x + %x;";
         return t;
       }
 
@@ -526,21 +465,8 @@ namespace refractir::reify::antiopt {
       }
 
       std::optional<SelfTest> selfTest() const override {
-        // One rule, six relations: the claim is checked for all of them at
-        // once by packing each relation's answer into its own bit.
         SelfTest t;
-        t.original = [](std::int64_t a, std::int64_t b) {
-          return std::optional<std::int64_t>(
-              (a == b) | ((a != b) << 1) | ((a < b) << 2) | ((a <= b) << 3) | ((a > b) << 4) |
-              ((a >= b) << 5)
-          );
-        };
-        t.rewritten = [](std::int64_t a, std::int64_t b) {
-          return std::optional<std::int64_t>(
-              (b == a) | ((b != a) << 1) | ((b > a) << 2) | ((b >= a) << 3) | ((b < a) << 4) |
-              ((b <= a) << 5)
-          );
-        };
+        t.body = "  %c = cmp < %x, %y;\n  %d = %c as i8;";
         return t;
       }
 
@@ -607,11 +533,7 @@ namespace refractir::reify::antiopt {
 
       std::optional<SelfTest> selfTest() const override {
         SelfTest t;
-        t.original = [](std::int64_t v, std::int64_t) { return std::optional<std::int64_t>(v); };
-        t.rewritten = [](std::int64_t v, std::int64_t) {
-          // Widen to 64, truncate back: the low 8 bits, sign-extended.
-          return std::optional<std::int64_t>((std::int64_t) (std::int8_t) (std::int64_t) v);
-        };
+        t.body = "  %d = %x;";
         return t;
       }
     };

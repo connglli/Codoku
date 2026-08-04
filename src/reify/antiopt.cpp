@@ -80,24 +80,24 @@ namespace refractir::reify {
 
   // --- the catalog ----------------------------------------------------------
 
-  namespace {
+  namespace antiopt {
 
     // One list, built once, from the per-family files in antiopt/. A family
     // registers its own rules there, so adding one touches exactly one file.
-    const antiopt::RuleList &catalog() {
-      static const antiopt::RuleList rules = [] {
-        antiopt::RuleList v;
-        antiopt::registerPeepholeRules(v);
-        antiopt::registerMbaRules(v);
-        antiopt::registerStructureRules(v);
-        antiopt::registerLicensedRules(v);
-        antiopt::registerControlRules(v);
+    const RuleList &catalog() {
+      static const RuleList rules = [] {
+        RuleList v;
+        registerPeepholeRules(v);
+        registerMbaRules(v);
+        registerStructureRules(v);
+        registerLicensedRules(v);
+        registerControlRules(v);
         return v;
       }();
       return rules;
     }
 
-  } // namespace
+  } // namespace antiopt
 
   // --- the engine -----------------------------------------------------------
 
@@ -135,7 +135,7 @@ namespace refractir::reify {
         ctx.facts->refresh(stmts);
 
       std::vector<Cand> cands;
-      for (const auto &rule: catalog()) {
+      for (const auto &rule: antiopt::catalog()) {
         if (rep.trapFreeOnly && rule->tier() != TrapTier::Tier0)
           continue;
         for (std::size_t i = 0; i < stmts.size(); ++i)
@@ -225,30 +225,6 @@ namespace refractir::reify {
       out += nm + " x" + std::to_string(n);
     }
     return out;
-  }
-
-  std::optional<std::size_t> selfTestRules(std::string &failure) {
-    std::size_t checked = 0;
-    for (const auto &rule: catalog()) {
-      auto t = rule->selfTest();
-      if (!t)
-        continue;
-      ++checked;
-      for (std::int64_t a = -128; a <= 127; ++a)
-        for (std::int64_t b = -128; b <= 127; ++b) {
-          auto want = t->original(a, b);
-          auto got = t->rewritten(a, b);
-          if (!want || !got)
-            continue; // undefined for this pair on one side; nothing to compare
-          if (*want != *got) {
-            failure = std::string(rule->name()) + ": " + std::to_string(a) + ", " +
-                      std::to_string(b) + " gives " + std::to_string(*got) + ", expected " +
-                      std::to_string(*want);
-            return std::nullopt;
-          }
-        }
-    }
-    return checked;
   }
 
 } // namespace refractir::reify

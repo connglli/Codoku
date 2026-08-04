@@ -159,15 +159,33 @@ namespace refractir::reify {
     virtual std::vector<Instr>
     apply(const std::vector<Instr> &stmts, RulePos pos, AntiOptContext &ctx) const = 0;
 
-    // The arithmetic a value rule claims, as the two sides of its identity —
-    // checked exhaustively at i8 so a wrong identity is caught once, at the
-    // rule, rather than as a mysterious rollback later. `nullopt` from either
-    // side means the operation is undefined for those operands and the pair is
-    // skipped; `nullopt` from the rule means it has no closed form (a
-    // structural rule), and the body-level re-check covers it instead.
+    // How this rule's claim is checked. `body` is RefractIR source for the
+    // statements the rule fires on, written over the check's own locals:
+    //
+    //   %x %y   the operands the check sweeps over every i8 value
+    //   %d %e   destinations
+    //   %c      an i1, for the rules over comparisons
+    //   %k      a cell to pin with `assume`
+    //
+    // The check parses it, applies the rule at `at`, and runs both versions
+    // through the *interpreter*, comparing the resulting state and the UB
+    // outcome. The interpreter is the authority on what a statement does;
+    // restating the arithmetic in C++ here only ever checked the restatement,
+    // and could not check a rule with no closed form at all.
+    //
+    // A rule licensed by facts says what it needs known in `assume`: each
+    // entry both answers the fact and confines the sweep, so a rule that pins
+    // %k to 7 is checked with %k held at 7 and the facts saying so. `free`
+    // names locals the check reports as free — swept over every value all the
+    // same, since that is what the claim comes to.
     struct SelfTest {
-      std::function<std::optional<std::int64_t>(std::int64_t, std::int64_t)> original;
-      std::function<std::optional<std::int64_t>(std::int64_t, std::int64_t)> rewritten;
+      std::string body;
+      // Anything the example needs declared above the function — an
+      // `intrinsic` line, for a rule that rewrites a call.
+      std::string decls;
+      std::size_t at = 0;
+      std::vector<std::pair<std::string, ValueRange>> assume;
+      std::vector<std::string> free;
     };
 
     virtual std::optional<SelfTest> selfTest() const { return std::nullopt; }
@@ -204,10 +222,13 @@ namespace refractir::reify {
       const AntiOptAccept &accept
   );
 
-  // Exhaustive self-check of every value rule at i8: for all 2^16 operand
-  // pairs, the rewritten form computes what the original did. Returns the
-  // number of rules checked, or nullopt on the first disagreement (described
-  // in `failure`).
-  std::optional<std::size_t> selfTestRules(std::string &failure);
+  // Self-check of the catalog: every rule that declares a `SelfTest` is
+  // applied to its own example and both versions are run through the
+  // interpreter over every i8 value of the operands the example sweeps. A
+  // Tier0 rule must never turn a UB-free run into a trapping one; a Tier1
+  // rule may, and is compared only where both runs are UB-free — that is the
+  // permission the caller's proof buys it. Returns the names of the rules
+  // checked, or nullopt on the first disagreement (described in `failure`).
+  std::optional<std::vector<std::string>> selfTestRules(std::string &failure);
 
 } // namespace refractir::reify

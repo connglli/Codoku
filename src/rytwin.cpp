@@ -192,7 +192,11 @@ int main(int argc, char **argv) {
       std::cerr << "rytwin: rewrite selftest FAILED: " << failure << "\n";
       return 1;
     }
-    std::cout << "rytwin: rewrite selftest OK (" << *checked << " value rule(s), all i8 pairs)\n";
+    if (result.count("verbose"))
+      for (const auto &nm: *checked)
+        std::cout << "  checked " << nm << "\n";
+    std::cout << "rytwin: rewrite selftest OK (" << checked->size()
+              << " rule(s) run through the interpreter, every i8 operand value)\n";
     return 0;
   }
 

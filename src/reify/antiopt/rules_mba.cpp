@@ -14,7 +14,6 @@ namespace refractir::reify::antiopt {
 
     using namespace refractir::pat;
     using I64 = std::int64_t;
-    using Val = std::optional<I64>;
 
     // Family B — arithmetic <-> bitwise crossings.
     //
@@ -61,8 +60,9 @@ namespace refractir::reify::antiopt {
       Shape from;
       TrapTier tier;
       Emit emit;
-      Val (*lhs)(I64, I64); // what the statement computed
-      Val (*rhs)(I64, I64); // what the rewrite computes, undefined where it traps
+      // The statement the self-check fires this crossing on. What it computes,
+      // and what the rewrite computes, is the interpreter's business.
+      const char *example;
     };
 
     // --- emitter helpers ------------------------------------------------------
@@ -229,76 +229,22 @@ namespace refractir::reify::antiopt {
       );
     }
 
-    // --- the identities, as arithmetic ---------------------------------------
-
-    // Every `rhs` below evaluates the rewrite the way the interpreter would,
-    // returning nullopt where an intermediate leaves the type — that is the
-    // rewrite trapping, not the identity failing, and the self-test skips it.
+    // --- the catalog ----------------------------------------------------------
 
     const Crossing kCrossings[] = {
-        {"mba-xor", Shape::Xor, TrapTier::Tier1, emitXorAsOrSubAnd,
-         [](I64 a, I64 b) { return Val(a ^ b); },
-         [](I64 a, I64 b) { return fitsI8((a | b) - (a & b)) ? Val((a | b) - (a & b)) : Val{}; }},
-
-        {"mba-or", Shape::Or, TrapTier::Tier1, emitOrAsXorAddAnd,
-         [](I64 a, I64 b) { return Val(a | b); },
-         [](I64 a, I64 b) { return fitsI8((a ^ b) + (a & b)) ? Val((a ^ b) + (a & b)) : Val{}; }},
-
-        {"mba-add", Shape::Add, TrapTier::Tier1, emitAddAsXorCarry,
-         [](I64 a, I64 b) { return fitsI8(a + b) ? Val(a + b) : Val{}; },
-         [](I64 a, I64 b) -> Val {
-           const I64 carry = 2 * (a & b);
-           if (!fitsI8(carry) || !fitsI8((a ^ b) + carry))
-             return {};
-           return (a ^ b) + carry;
-         }},
-
-        {"mba-and-sub", Shape::And, TrapTier::Tier1, emitAndAsSub,
-         [](I64 a, I64 b) { return Val(a & b); },
-         [](I64 a, I64 b) { return fitsI8(a - (a & ~b)) ? Val(a - (a & ~b)) : Val{}; }},
-
-        {"mba-and-diff", Shape::And, TrapTier::Tier1, emitAndAsOrSubXor,
-         [](I64 a, I64 b) { return Val(a & b); },
-         [](I64 a, I64 b) { return fitsI8((a | b) - (a ^ b)) ? Val((a | b) - (a ^ b)) : Val{}; }},
-
-        {"mba-or-add", Shape::Or, TrapTier::Tier1, emitOrAsAddSubAnd,
-         [](I64 a, I64 b) { return Val(a | b); },
-         [](I64 a, I64 b) -> Val {
-           // The chain runs left to right, so the sum has to fit on its own.
-           if (!fitsI8(a + b) || !fitsI8(a + b - (a & b)))
-             return {};
-           return a + b - (a & b);
-         }},
-
-        {"mba-sub", Shape::Sub, TrapTier::Tier1, emitSubAsXorBorrow,
-         [](I64 a, I64 b) { return fitsI8(a - b) ? Val(a - b) : Val{}; },
-         [](I64 a, I64 b) -> Val {
-           const I64 borrow = 2 * (~a & b);
-           if (!fitsI8(borrow) || !fitsI8((a ^ b) - borrow))
-             return {};
-           return (a ^ b) - borrow;
-         }},
-
-        {"mba-xor-nand", Shape::Xor, TrapTier::Tier0, emitXorAsNand,
-         [](I64 a, I64 b) { return Val(a ^ b); },
-         [](I64 a, I64 b) { return Val((a | b) & ~(a & b)); }},
-
+        {"mba-xor", Shape::Xor, TrapTier::Tier1, emitXorAsOrSubAnd, "  %d = %x ^ %y;"},
+        {"mba-or", Shape::Or, TrapTier::Tier1, emitOrAsXorAddAnd, "  %d = %x | %y;"},
+        {"mba-add", Shape::Add, TrapTier::Tier1, emitAddAsXorCarry, "  %d = %x + %y;"},
+        {"mba-and-sub", Shape::And, TrapTier::Tier1, emitAndAsSub, "  %d = %x & %y;"},
+        {"mba-and-diff", Shape::And, TrapTier::Tier1, emitAndAsOrSubXor, "  %d = %x & %y;"},
+        {"mba-or-add", Shape::Or, TrapTier::Tier1, emitOrAsAddSubAnd, "  %d = %x | %y;"},
+        {"mba-sub", Shape::Sub, TrapTier::Tier1, emitSubAsXorBorrow, "  %d = %x - %y;"},
+        {"mba-xor-nand", Shape::Xor, TrapTier::Tier0, emitXorAsNand, "  %d = %x ^ %y;"},
         {"mba-demorgan-and", Shape::And, TrapTier::Tier0, emitDeMorgan<AtomOpKind::Or>,
-         [](I64 a, I64 b) { return Val(a & b); }, [](I64 a, I64 b) { return Val(~(~a | ~b)); }},
-
+         "  %d = %x & %y;"},
         {"mba-demorgan-or", Shape::Or, TrapTier::Tier0, emitDeMorgan<AtomOpKind::And>,
-         [](I64 a, I64 b) { return Val(a | b); }, [](I64 a, I64 b) { return Val(~(~a & ~b)); }},
-
-        {"mba-bit-split", Shape::Value, TrapTier::Tier1, emitBitSplit,
-         [](I64 v, I64 k) { return k >= 1 && k <= 6 ? Val(v) : Val{}; },
-         [](I64 v, I64 k) -> Val {
-           if (k < 1 || k > 6 || v < 0) // the license: `<<` traps on a negative
-             return {};
-           const I64 high = (v >> k) << k;
-           if (!fitsI8(high) || !fitsI8(high + (v & ((I64(1) << k) - 1))))
-             return {};
-           return high + (v & ((I64(1) << k) - 1));
-         }},
+         "  %d = %x | %y;"},
+        {"mba-bit-split", Shape::Value, TrapTier::Tier1, emitBitSplit, "  %d = %x;"},
     };
 
     class CrossingRule : public AntiOptRule {
@@ -328,8 +274,12 @@ namespace refractir::reify::antiopt {
 
       std::optional<SelfTest> selfTest() const override {
         SelfTest t;
-        t.original = c_.lhs;
-        t.rewritten = c_.rhs;
+        t.body = c_.example;
+        // A crossing keyed on a value rather than an operator re-expresses
+        // whatever the statement produced, and only a non-negative one: the
+        // shift it splits at traps on the sign bit.
+        if (c_.from == Shape::Value)
+          t.assume.push_back({"%x", ValueRange{0, 127}});
         return t;
       }
 

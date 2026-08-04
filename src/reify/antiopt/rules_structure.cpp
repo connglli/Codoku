@@ -56,6 +56,12 @@ namespace refractir::reify::antiopt {
         out.push_back(assignInstr(ai.lhs, std::move(tail)));
         return out;
       }
+
+      std::optional<SelfTest> selfTest() const override {
+        SelfTest t;
+        t.body = "  %d = %x + %y + 1;";
+        return t;
+      }
     };
 
     // Rule:  S1; S2
@@ -102,6 +108,12 @@ namespace refractir::reify::antiopt {
         out.push_back(cloneInstr(stmts[pos.stmt]));
         return out;
       }
+
+      std::optional<SelfTest> selfTest() const override {
+        SelfTest t;
+        t.body = "  %d = %x;\n  %e = %y;";
+        return t;
+      }
     };
 
     // Rule:  %t = <e>;  ...;  %d = f(%t)
@@ -147,6 +159,13 @@ namespace refractir::reify::antiopt {
         out.push_back(assignInstr(localLV(copy), cloneExpr(def.rhs)));
         out.push_back(std::move(user));
         return out;
+      }
+
+      std::optional<SelfTest> selfTest() const override {
+        SelfTest t;
+        t.body = "  %k = %x;\n  %d = %k + %y;";
+        t.at = 1;
+        return t;
       }
 
     private:
@@ -235,6 +254,12 @@ namespace refractir::reify::antiopt {
         return out;
       }
 
+      std::optional<SelfTest> selfTest() const override {
+        SelfTest t;
+        t.body = "  %d = %x;";
+        return t;
+      }
+
     private:
       // The scalar integers in scope, as the generator wants them. Pointers,
       // aggregates and vectors are left out: a generated load is a memory
@@ -305,6 +330,12 @@ namespace refractir::reify::antiopt {
         out.push_back(Instr{std::move(st)});
         out.push_back(assignInstr(localLV(d), simpleExpr(Atom{LoadAtom{localLV(ptr), {}}, {}})));
         return out;
+      }
+
+      std::optional<SelfTest> selfTest() const override {
+        SelfTest t;
+        t.body = "  %d = %x;";
+        return t;
       }
     };
 

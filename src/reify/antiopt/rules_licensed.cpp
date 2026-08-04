@@ -121,6 +121,13 @@ namespace refractir::reify::antiopt {
         return res;
       }
 
+      std::optional<SelfTest> selfTest() const override {
+        SelfTest t;
+        t.body = "  %d = %x + 7;";
+        t.assume.push_back({"%k", ValueRange{7, 7}});
+        return t;
+      }
+
     private:
       struct Hit {
         LiteralSite site;
@@ -189,6 +196,13 @@ namespace refractir::reify::antiopt {
         out.push_back(assignInstr(localLV(tmp), opExpr(hit->local, AtomOpKind::And, mask)));
         out.push_back(std::move(user));
         return out;
+      }
+
+      std::optional<SelfTest> selfTest() const override {
+        SelfTest t;
+        t.body = "  %d = %x + 1;";
+        t.assume.push_back({"%x", ValueRange{0, 7}});
+        return t;
       }
 
     private:
@@ -283,6 +297,13 @@ namespace refractir::reify::antiopt {
         return out;
       }
 
+      std::optional<SelfTest> selfTest() const override {
+        SelfTest t;
+        t.body = "  %d = %x + 1;";
+        t.assume.push_back({"%x", ValueRange{0, 7}});
+        return t;
+      }
+
     private:
       struct Hit {
         std::string local;
@@ -350,6 +371,13 @@ namespace refractir::reify::antiopt {
         return out;
       }
 
+      std::optional<SelfTest> selfTest() const override {
+        SelfTest t;
+        t.body = "  %d = %x;";
+        t.free.push_back("%y");
+        return t;
+      }
+
     private:
       // A free local of the destination's own width — `^` wants both operands
       // the same width (spec §6.5).
@@ -408,6 +436,13 @@ namespace refractir::reify::antiopt {
         res.push_back(assignInstr(localLV(tmp), opExpr(hit->local, AtomOpKind::LShr, amount)));
         res.push_back(std::move(out));
         return res;
+      }
+
+      std::optional<SelfTest> selfTest() const override {
+        SelfTest t;
+        t.body = "  %d = %y + 7;";
+        t.assume.push_back({"%x", ValueRange{56, 63}});
+        return t;
       }
 
     private:

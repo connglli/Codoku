@@ -139,6 +139,12 @@ namespace refractir::reify::antiopt {
         return out;
       }
 
+      std::optional<SelfTest> selfTest() const override {
+        SelfTest t;
+        t.body = "  %d = select %x > %y, %x, %y;";
+        return t;
+      }
+
     private:
       // `%d = select …, <arm>, <arm>` with everything the rewrite needs to
       // name: whole locals for the destination and the condition, and arms
@@ -190,6 +196,12 @@ namespace refractir::reify::antiopt {
         const std::string c2 = emitCmp(parts.second_, cmp->lhs, cmp->rhs, ctx, out);
         out.push_back(assignInstr(ai.lhs, opExpr(c1, parts.join, c2)));
         return out;
+      }
+
+      std::optional<SelfTest> selfTest() const override {
+        SelfTest t;
+        t.body = "  %c = cmp < %x, %y;\n  %d = %c as i8;";
+        return t;
       }
 
     private:
@@ -273,6 +285,12 @@ namespace refractir::reify::antiopt {
         zero.rhs = SelectVal{RValue{localLV(zeroCell)}};
         out.push_back(assignInstr(ai.lhs, simpleExpr(Atom{std::move(zero), {}})));
         return out;
+      }
+
+      std::optional<SelfTest> selfTest() const override {
+        SelfTest t;
+        t.body = "  %c = cmp < %x, %y;\n  %d = %c as i8;";
+        return t;
       }
 
     private:
@@ -366,6 +384,13 @@ namespace refractir::reify::antiopt {
         addTail(diff, AddOp::Minus, localAtom(b));
         out.push_back(assignInstr(ai.lhs, std::move(diff)));
         return out;
+      }
+
+      std::optional<SelfTest> selfTest() const override {
+        SelfTest t;
+        t.body = "  %d = call @min(%x, %y);";
+        t.decls = "intrinsic @min(%a: i8, %b: i8) : i8;";
+        return t;
       }
 
     private:

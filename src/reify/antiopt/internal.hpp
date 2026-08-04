@@ -78,4 +78,8 @@ namespace refractir::reify::antiopt {
   void registerLicensedRules(RuleList &out);  // family D
   void registerControlRules(RuleList &out);   // family E
 
+  // Every rule, built once. The engine draws its candidates from here and the
+  // self-check walks it.
+  const RuleList &catalog();
+
 } // namespace refractir::reify::antiopt
