@@ -39,6 +39,25 @@ namespace refractir::reify {
       return v;
     }
 
+    // |v|, saturating: the magnitude of the most negative value is not
+    // representable, so it reports the largest one that is.
+    I64 magOf(I64 v) { return v == kI64Min ? kI64Max : (v < 0 ? -v : v); }
+
+    // The smallest all-ones value at least as large as `v`, which is the
+    // ceiling for any bitwise combination of non-negative values bounded by
+    // it. Negative for a `v` no power of two covers.
+    I64 allOnesAbove(I64 v) {
+      if (v < 0)
+        return -1;
+      I64 mask = 0;
+      for (int bits = 1; bits < 63; ++bits) {
+        mask = (I64(1) << bits) - 1;
+        if (mask >= v)
+          return mask;
+      }
+      return -1;
+    }
+
     // The range of an operation that is monotone in each operand separately:
     // whatever it does in between, its extremes are at the corners of the two
     // ranges, so evaluating it four times bounds it.
@@ -805,17 +824,34 @@ namespace refractir::reify {
           return constant((I64) t);
         }
         std::optional<Interval> src;
+        std::uint32_t srcWidth = 0;
         if (auto il = std::get_if<IntLit>(&c.src))
           src = constant(il->value);
-        else if (auto lv = std::get_if<LValue>(&c.src))
+        else if (auto lv = std::get_if<LValue>(&c.src)) {
           src = readChecked(*lv);
-        else
+          srcWidth = widthOf(*lv);
+        } else
           src = unknownOf(); // float literal or sym
         if (!src)
           return std::nullopt;
-        // Widening keeps the value; narrowing truncates, which the domain does
-        // not model, so it is only exact when the value already fits.
-        return fits(*src, *bits) ? *src : unknownOf(src->deps);
+        // Widening keeps the value, so a source that already fits comes
+        // through exactly.
+        if (fits(*src, *bits))
+          return *src;
+        // Otherwise the value is not known, but it is not *unbounded* either:
+        // narrowing truncates and sign-extends (spec §6.4), so the result is
+        // inside the destination's own range whatever the source held, and a
+        // widened value stays inside the source's. Saying so is what keeps the
+        // arithmetic reading a cast provable — casts between widths are
+        // everywhere in generated code, and an unknown poisons every sum it
+        // reaches.
+        I64 lo = 0, hi = 0;
+        if (!rangeOf(*bits, lo, hi))
+          return unknownOf(src->deps);
+        I64 slo = 0, shi = 0;
+        if (srcWidth && srcWidth < *bits && rangeOf(srcWidth, slo, shi))
+          return Interval{slo, shi, false, 0, src->deps};
+        return Interval{lo, hi, false, 0, src->deps};
       }
 
       std::optional<Interval> evalOp(const OpAtom &o, std::uint32_t bits) {
@@ -842,7 +878,31 @@ namespace refractir::reify {
               return withDeps(
                   constant(o.op == AtomOpKind::Div ? l->lo / r->lo : l->lo % r->lo), deps
               );
-            return unknownOf(deps);
+            if (l->unknown)
+              return unknownOf(deps);
+            // Neither operation can grow a value. Dividing scales it down by
+            // at least the smallest divisor in range, and a remainder is
+            // smaller than the divisor and no larger than the dividend — and
+            // it keeps the dividend's sign, since RefractIR rounds toward
+            // zero. Both bounds are coarse and both are enough to keep the
+            // arithmetic that reads them provable, which is the whole point:
+            // one unknown poisons every sum downstream.
+            const I64 mag = std::max(magOf(l->lo), magOf(l->hi));
+            const I64 divLo = std::min(magOf(r->lo), magOf(r->hi)); // divisor is 0-free
+            I64 bound = mag;
+            if (o.op == AtomOpKind::Div) {
+              if (divLo > 1)
+                bound = mag / divLo;
+            } else {
+              const I64 divHi = std::max(magOf(r->lo), magOf(r->hi));
+              bound = std::min(mag, divHi - 1);
+            }
+            if (bound < 0)
+              return unknownOf(deps); // a magnitude that does not fit I64
+            const bool nonNeg = l->lo >= 0, nonPos = l->hi <= 0;
+            return withDeps(
+                Interval{nonNeg ? 0 : -bound, nonPos ? 0 : bound, false, 0, deps}, deps
+            );
           }
           case AtomOpKind::Shl: {
             if (l->unknown || l->lo < 0)
@@ -909,9 +969,9 @@ namespace refractir::reify {
             // operands fold. Everything else widens, which is where a
             // bit-level domain would pay off first.
             if (!l->isConst() || !r->isConst()) {
-              // One exception, because it is how every mask is written: the
-              // bits of `x & m` are a subset of m's, so for a non-negative m
-              // the result is in [0, m] whatever x holds.
+              // The bits of `x & m` are a subset of m's, so for a non-negative
+              // m the result is in [0, m] whatever x holds. This is how every
+              // mask is written, and it needs only one operand bounded.
               const Interval *m = nullptr;
               if (!l->unknown && l->lo >= 0)
                 m = &*l;
@@ -919,6 +979,23 @@ namespace refractir::reify {
                 m = &*r;
               if (o.op == AtomOpKind::And && m)
                 return withDeps(Interval{0, m->hi, false, 0, deps}, deps);
+              // `|` and `^` need *both* operands non-negative: with a sign bit
+              // in play there is no ceiling to claim. Given that, neither can
+              // set a bit above the highest one either operand has, so the
+              // result is below the next power of two — and `|` only ever sets
+              // bits, so it is at least each operand's own floor.
+              if (o.op != AtomOpKind::And && !l->unknown && !r->unknown && l->lo >= 0 &&
+                  r->lo >= 0) {
+                const I64 ceiling = allOnesAbove(std::max(l->hi, r->hi));
+                if (ceiling >= 0)
+                  return withDeps(
+                      Interval{
+                          o.op == AtomOpKind::Or ? std::max(l->lo, r->lo) : 0, ceiling, false, 0,
+                          deps
+                      },
+                      deps
+                  );
+              }
               return unknownOf(deps);
             }
             const I64 a = l->lo, b = r->lo;

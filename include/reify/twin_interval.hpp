@@ -26,11 +26,14 @@
 // verdict of "not ok" means *not proven*, never "unsafe" — so a caller may only
 // use it to decline widening, never to conclude a state is bad.
 //
-// Precision is deliberately modest. Integer scalars are tracked exactly through
-// `+ - * ~ <<` and casts; shifts by a known amount and `x & m` for a
-// non-negative m are bounded, and the rest of the bitwise results widen to the
-// type's full range unless their operands are known constants; floats,
-// pointers and anything reached through memory are unknown from the start.
+// Precision is deliberately modest, but nothing is left *unbounded* that has a
+// bound. Integer scalars are tracked exactly through `+ - * ~ <<` and casts
+// that keep the value; a cast that does not is still inside the destination
+// type's range, since narrowing truncates rather than trapping. Shifts by a
+// known amount, `x & m` for a non-negative m, `x | y` and `x ^ y` over
+// non-negative ranges, and `/` and `%` (which cannot grow a value) all carry
+// bounds. Floats, pointers, intrinsic results and anything reached through
+// memory are unknown from the start.
 // Unknown is sound but useless: a check on an unknown value cannot be proven,
 // so such regions simply do not widen and keep the guard they have today.
 // Sharpening any of this is a local change to one transfer function.

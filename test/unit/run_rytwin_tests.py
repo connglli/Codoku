@@ -2161,6 +2161,112 @@ def test_vector_twin_agrees_off_the_profile(rytwin, symiri):
       check(f"same answer for {arg}", r1[1:] == r2[1:], f"{r1} vs {r2}")
 
 
+# `& | ^ / %` of two values the pass merely bounds used to widen to unknown,
+# and an unknown poisons every addition downstream of it — which is what most
+# pool regions were actually failing on. Each fixture puts one operator
+# between a bounded value and the sum that reads it.
+def scalar_bound_fixture(name, setup, op):
+  return f"""// SOLVED: %p0=8
+fun @{name}(%p0: i32) : i32 {{
+  let mut %m: i32 = 0;
+  let mut %d: i32 = 0;
+  let mut %a: i32 = 0;
+  let mut %r: i32 = 0;
+^entry:
+  %m = 255;
+  %d = 3;
+  br ^work;
+^work:
+{setup}
+  %r = %a {op};
+  %r = %r + %p0;
+  br ^done;
+^done:
+  ret %r;
+}}
+"""
+
+
+# %a is in [0, 255] by the mask, so `%a | %m` and `%a ^ %m` cannot exceed the
+# next power of two and cannot go negative.
+OR_BOUND_FIXTURE = scalar_bound_fixture("orbound", "  %a = %p0 & %m;", "| %m")
+XOR_BOUND_FIXTURE = scalar_bound_fixture("xorbound", "  %a = %p0 & %m;", "^ %m")
+# A quotient is no larger in magnitude than its dividend, and a remainder is
+# smaller than its divisor.
+DIV_BOUND_FIXTURE = scalar_bound_fixture("divbound", "  %a = %p0;", "/ %d")
+MOD_BOUND_FIXTURE = scalar_bound_fixture("modbound", "  %a = %p0;", "% %d")
+
+# The same disjunction on a value the guard would have to admit negative:
+# `x | y` says nothing about magnitude once a sign bit is in play, so the
+# leaf cannot widen at all.
+OPEN_OR_FIXTURE = scalar_bound_fixture("openor", "  %a = %p0;", "| %m").replace(
+  "%p0=8", "%p0=-8"
+)
+
+
+def bounded_opens(rytwin, fixture, name):
+  """(ranged leaves, widest radius) for `fixture`. At the point box every
+  value is a constant and folds, so what a transfer function buys is not a
+  proof *there* — it is whether the leaf can be widened away from it."""
+  with tempfile.TemporaryDirectory() as d:
+    r, lines, _, _ = graft_log(rytwin, d, fixture, name, ["--validate"])
+    if not lines:
+      check(f"{name} twinned", False, r.stderr[:200])
+      return None, None
+    counts = box_counts(lines[0])
+    widest = box_widest(lines[0])
+    return (counts[1] if counts else None), (widest[1] if widest else 0)
+
+
+def test_interval_pass_bounds_a_disjunction(rytwin):
+  """`x | y` only sets bits, so for two non-negative ranges it is at least
+  the larger operand and at most the next power of two."""
+  ranged, radius = bounded_opens(rytwin, OR_BOUND_FIXTURE, "orbound")
+  if ranged is None:
+    return
+  check("the disjunction lets a leaf widen", ranged >= 1, str(ranged))
+  check("and it widens far", radius > 1000, str(radius))
+
+
+def test_interval_pass_bounds_an_exclusive_or(rytwin):
+  """`x ^ y` cannot set a bit neither operand has, so the same ceiling holds
+  and the result stays non-negative."""
+  ranged, radius = bounded_opens(rytwin, XOR_BOUND_FIXTURE, "xorbound")
+  if ranged is None:
+    return
+  check("the exclusive or lets a leaf widen", ranged >= 1, str(ranged))
+  check("and it widens far", radius > 1000, str(radius))
+
+
+def test_interval_pass_bounds_a_quotient(rytwin):
+  """Dividing cannot grow a value: with the divisor away from zero, the
+  quotient is bounded by the dividend over the smallest divisor there is."""
+  ranged, radius = bounded_opens(rytwin, DIV_BOUND_FIXTURE, "divbound")
+  if ranged is None:
+    return
+  check("the quotient lets a leaf widen", ranged >= 1, str(ranged))
+  check("and it widens far", radius > 1000, str(radius))
+
+
+def test_interval_pass_bounds_a_remainder(rytwin):
+  """A remainder is smaller than its divisor and no larger than its dividend,
+  and it takes the dividend's sign."""
+  ranged, radius = bounded_opens(rytwin, MOD_BOUND_FIXTURE, "modbound")
+  if ranged is None:
+    return
+  check("the remainder lets a leaf widen", ranged >= 1, str(ranged))
+  check("and it widens far", radius > 1000, str(radius))
+
+
+def test_a_signed_disjunction_claims_nothing(rytwin):
+  """With a sign bit possibly in play there is no ceiling to claim, and the
+  pass must decline rather than invent one."""
+  ranged, _ = bounded_opens(rytwin, OPEN_OR_FIXTURE, "openor")
+  if ranged is None:
+    return
+  check("nothing is claimed about a signed disjunction", ranged == 0, str(ranged))
+
+
 def test_box_is_deterministic_for_a_seed(rytwin):
   """The search is seeded, so two runs agree — the trim that keeps guards
   from being identical is drawn from the same stream, not from chance."""
@@ -3714,6 +3820,26 @@ def main():
     (
       "interval: a vector twin agrees off the profile",
       lambda: test_vector_twin_agrees_off_the_profile(rytwin, symiri),
+    ),
+    (
+      "interval: a disjunction is bounded",
+      lambda: test_interval_pass_bounds_a_disjunction(rytwin),
+    ),
+    (
+      "interval: an exclusive or is bounded",
+      lambda: test_interval_pass_bounds_an_exclusive_or(rytwin),
+    ),
+    (
+      "interval: a quotient is bounded",
+      lambda: test_interval_pass_bounds_a_quotient(rytwin),
+    ),
+    (
+      "interval: a remainder is bounded",
+      lambda: test_interval_pass_bounds_a_remainder(rytwin),
+    ),
+    (
+      "interval: a signed disjunction claims nothing",
+      lambda: test_a_signed_disjunction_claims_nothing(rytwin),
     ),
     (
       "box: the search is seeded, not chancy",
