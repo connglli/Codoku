@@ -1110,12 +1110,13 @@ def test_disguise_varies_with_the_seed(rytwin):
 
 
 def test_rewrite_rules_selftest(rytwin):
-  """Every disguise rule claims that two spellings compute the same thing.
+  """Every anti-optimization rule claims that two spellings compute the same
+  thing.
   The claim is settled by *running* both through the interpreter, since the
   authority on what a RefractIR statement does is the interpreter and not a
   restatement of it in the checking code — and a restatement could not cover
   a rule with no closed form at all, which was half the catalog."""
-  r = run([rytwin, "--selftest-rewrites", "-v"])
+  r = run([rytwin, "--selftest-antiopt", "-v"])
   check("rewrite selftest passes", r.returncode == 0, (r.stderr + r.stdout)[:400])
   check("the interpreter is the oracle", "interpreter" in r.stdout, r.stdout[:200])
   m = re.search(r"(\d+) rule", r.stdout)

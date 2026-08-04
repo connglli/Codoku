@@ -9,7 +9,6 @@
 #include "analysis/type_utils.hpp"
 #include "antiopt/internal.hpp"
 #include "ast/clone.hpp"
-#include "reify/hyperparameters.hpp"
 #include "reify/rewrite.hpp"
 
 namespace refractir::reify {
@@ -103,7 +102,7 @@ namespace refractir::reify {
 
   AntiOptReport antiOptimize(
       std::vector<Instr> &stmts, std::vector<PathCheck> &checks, AntiOptContext &ctx,
-      const AntiOptAccept &accept
+      const AntiOptAccept &accept, std::size_t attempts
   ) {
     AntiOptReport rep;
     // A body the caller refuses from the start cannot judge anything: every
@@ -114,7 +113,10 @@ namespace refractir::reify {
     // can trap; rules that introduce none are identities whatever the state,
     // and so is any composition of them. Those still apply, and the rest stand
     // down.
-    rep.trapFreeOnly = !accept(stmts);
+    // No predicate at all is a caller saying it has no oracle — a generator
+    // rewriting concrete code, where there is no set of states to prove
+    // anything over. It lands in the same place as a body the caller refuses.
+    rep.trapFreeOnly = !accept || !accept(stmts);
 
     struct Cand {
       const AntiOptRule *rule;
@@ -127,7 +129,6 @@ namespace refractir::reify {
     // again is also what makes the draw fair: with a catalog this size, a list
     // built once and then half-invalidated hands most of its picks to whatever
     // happened to sit early in the body.
-    const std::size_t attempts = rytwin::hp::kTwinRewriteRounds * rytwin::hp::kTwinRewritesPerRound;
     for (std::size_t attempt = 0; attempt < attempts; ++attempt) {
       // Facts are about the body as it stands, and every application changes
       // it, so they are never carried across one.

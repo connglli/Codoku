@@ -436,6 +436,19 @@ namespace refractir::reify::rylink::hp {
   inline constexpr int kMaxOutDegree = 3; // hard out-degree cap per node
 
   // ===========================================================================
+  // Anti-optimization
+  //
+  // How many rewrites the catalog may apply per block of a bundled program.
+  // This is not rytwin's budget and should not be: rytwin spends its on one
+  // region's trace, where a body that reads like its region is the one failure
+  // mode that matters, while here every block of every function pays — and the
+  // program that comes out is what a compiler has to chew through. Each kept
+  // rewrite adds a statement or three, so the bundle grows by roughly this
+  // many statements per block.
+  // ===========================================================================
+  inline constexpr std::size_t kAntiOptAttemptsPerBlock = 4;
+
+  // ===========================================================================
   // Rewrite engine
   //
   // Per caller→callee edge, the engine enumerates rewrite *sites* in the

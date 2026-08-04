@@ -112,7 +112,7 @@ REIFY_SRCS = src/reify/cfg_gen.cpp src/reify/path_sampler.cpp \
              src/reify/antiopt/rules_mba.cpp src/reify/antiopt/rules_structure.cpp \
              src/reify/antiopt/rules_licensed.cpp \
              src/reify/antiopt/rules_control.cpp \
-             src/reify/antiopt/selftest.cpp
+             src/reify/antiopt/selftest.cpp src/reify/antiopt_transform.cpp
 RYSMITH_SRCS = src/rysmith.cpp $(SOLVER_CORE_SRCS) $(REIFY_SRCS) $(BACKEND_SRCS) $(INTERP_IMPL_SRCS)
 # [v0.2.2] rylink links the C / WASM backends in-process so the bundle's
 # FunDecl::sourceStem survives all the way to emitSplit. Driving symirc

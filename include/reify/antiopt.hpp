@@ -211,15 +211,20 @@ namespace refractir::reify {
   // Is a rewritten body still acceptable? Consulted after every application;
   // `false` undoes it. A caller with a correctness obligation puts it here —
   // for rytwin, that the interval pass still proves the body over every state
-  // its guard admits.
+  // its guard admits. An empty predicate says the caller has no oracle at all,
+  // and then only the rules that need none are offered.
   using AntiOptAccept = std::function<bool(const std::vector<Instr> &)>;
 
   // Rewrite `stmts` in place, shifting `checks` to follow the statements they
-  // refer to. A body `accept` refuses before any rewriting is left alone —
-  // there would be nothing to judge later applications against.
+  // refer to. `attempts` bounds the work: the engine re-scans and applies at
+  // most one rewrite per attempt, so it is also the most statements a body can
+  // gain. What that should be is the caller's business and not one number for
+  // everyone — a twin body is one region's trace and can take a lot of
+  // rewriting, while a generator applies this to every block of every function
+  // and pays for it in the size of the whole program.
   AntiOptReport antiOptimize(
       std::vector<Instr> &stmts, std::vector<PathCheck> &checks, AntiOptContext &ctx,
-      const AntiOptAccept &accept
+      const AntiOptAccept &accept, std::size_t attempts
   );
 
   // Self-check of the catalog: every rule that declares a `SelfTest` is

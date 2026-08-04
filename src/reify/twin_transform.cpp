@@ -1305,11 +1305,15 @@ namespace refractir::reify {
 
       BoxFacts facts(fn, structs, box, probeOf, [&] { return withConstantCells(guarded); }, fold);
       AntiOptContext ctx{fn, structs, body.checks, names, fn.lets, rng, &facts};
-      return antiOptimize(body.stmts, body.checks, ctx, [&](const std::vector<Instr> &s) {
-        // Re-read the declarations every time: the engine adds cells as it
-        // rewrites, and the body being judged may already use them.
-        return checkTrace(fn, structs, probeOf(s), withConstantCells(guarded), &fold).ok;
-      });
+      return antiOptimize(
+          body.stmts, body.checks, ctx,
+          [&](const std::vector<Instr> &s) {
+            // Re-read the declarations every time: the engine adds cells as it
+            // rewrites, and the body being judged may already use them.
+            return checkTrace(fn, structs, probeOf(s), withConstantCells(guarded), &fold).ok;
+          },
+          rytwin::hp::kTwinRewriteRounds * rytwin::hp::kTwinRewritesPerRound
+      );
     }
 
     std::string describeBox(const Box &b) {

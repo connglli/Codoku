@@ -49,6 +49,7 @@
 #include "frontend/parser.hpp"
 #include "frontend/semchecker.hpp"
 #include "frontend/typechecker.hpp"
+#include "reify/antiopt_transform.hpp"
 #include "reify/call_realize.hpp"
 #include "reify/cg_gen.hpp"
 #include "reify/checksum.hpp"
@@ -275,6 +276,7 @@ struct PerProgConfig {
   // single-file compile loops, or shipping the generated C as one
   // self-contained snippet).
   bool splitBySource = true;
+  bool antiOpt = true;
   // Probabilities that each bundled callee carries the matching
   // backend hint via FunDecl::Attributes. 0.0 (the default) preserves
   // pre-R9 behaviour. The entry function and any `@main` wrapper are
@@ -337,6 +339,11 @@ static bool generateOne(const FuncPool &pool, std::mt19937 &rng, const PerProgCo
 
   TransformPipeline pipe;
   pipe.add(makeCallRealizeTransform(std::move(plan)));
+  // Last, so realization sees the code the generator wrote — its sites are
+  // literals in a caller — and the rewriting only ever reworks the finished
+  // bundle.
+  if (cfg.antiOpt)
+    pipe.add(makeAntiOptTransform());
   pipe.run(bundle, ctx);
 
   // Backend-hint roll for callees. The bits live on
@@ -623,6 +630,11 @@ int main(int argc, char **argv) {
                            "<outRoot>/prog_<id>_<i>/ subdirectory with one "
                            ".c per FunDecl::sourceStem",
         cxxopts::value<bool>()->default_value("false"))
+    ("no-antiopt", "Skip the anti-optimization rewriting of the bundled "
+                   "program (the trap-free identities that stop every "
+                   "generated function reading like the one generator that "
+                   "wrote it)",
+        cxxopts::value<bool>()->default_value("false"))
     // Validate
     ("validate", "Run symiri on each emitted program and check semantics",
         cxxopts::value<bool>()->default_value("false"))
@@ -665,6 +677,7 @@ int main(int argc, char **argv) {
   pc.validate = res["validate"].as<bool>();
   pc.emitMain = res["emit-main"].as<bool>();
   pc.splitBySource = !res["no-split-by-source"].as<bool>();
+  pc.antiOpt = !res["no-antiopt"].as<bool>();
   pc.verbose = res["v"].as<bool>();
   pc.pNoinlineCallees = res["p-noinline-callees"].as<double>();
   pc.pNocloneCallees = res["p-noclone-callees"].as<double>();

@@ -276,6 +276,84 @@ def test_validate(rylink, rysmith, symiri):
       )
 
 
+def test_antiopt_rewrites_the_bundle(rylink, rysmith, symiri):
+  """A bundled program is assembled from one statement generator's output, so
+  its functions read alike. The anti-optimization catalog rewrites them by
+  identities — only the trap-free ones, since a concrete program has no guard
+  to prove anything against — and every local the engine introduces carries
+  the `%__ao` prefix, so the rewriting is visible in the emitted source."""
+  with tempfile.TemporaryDirectory() as pool:
+    seed_pool(rysmith, pool)
+    with tempfile.TemporaryDirectory() as out:
+      r = run(
+        [
+          rylink,
+          "--input-dir",
+          pool,
+          "--n-progs",
+          "2",
+          "--seed",
+          "7",
+          "--validate",
+          "-o",
+          out,
+        ]
+      )
+      check("rylink run exits 0", r.returncode == 0, (r.stderr or r.stdout)[:300])
+      if r.returncode != 0:
+        return
+      srcs = [
+        open(os.path.join(out, d, "program.sir")).read()
+        for d in sorted(os.listdir(out))
+        if d.startswith("prog_")
+      ]
+      check("programs were emitted", srcs, str(os.listdir(out)))
+      check(
+        "the bundle carries engine-introduced locals",
+        any("%__ao" in src for src in srcs),
+        (srcs[0][:300] if srcs else ""),
+      )
+      check(
+        "and it still validates", "validate" not in r.stderr.lower(), r.stderr[:300]
+      )
+
+
+def test_no_antiopt_leaves_the_bundle_alone(rylink, rysmith):
+  """`--no-antiopt` turns the rewriting off, which is how a reader compares a
+  bundle against the code the generator actually wrote."""
+  with tempfile.TemporaryDirectory() as pool:
+    seed_pool(rysmith, pool)
+    with tempfile.TemporaryDirectory() as out:
+      r = run(
+        [
+          rylink,
+          "--input-dir",
+          pool,
+          "--n-progs",
+          "2",
+          "--seed",
+          "7",
+          "--no-antiopt",
+          "-o",
+          out,
+        ]
+      )
+      check("rylink run exits 0", r.returncode == 0, (r.stderr or r.stdout)[:300])
+      if r.returncode != 0:
+        return
+      srcs = [
+        open(os.path.join(out, d, "program.sir")).read()
+        for d in sorted(os.listdir(out))
+        if d.startswith("prog_")
+      ]
+      check("programs were emitted", srcs, str(os.listdir(out)))
+      check(
+        "no engine-introduced locals anywhere",
+        all("%__ao" not in src for src in srcs),
+        "",
+      )
+
+
 def test_rewrite_introduces_call(rylink, rysmith):
   """Default behaviour: at least one prog out of a small batch contains
   a `call @` in program.sir (the rewrite engine actually fired)."""
@@ -930,6 +1008,10 @@ def main():
   test_validate(rylink, rysmith, symiri)
   print("=== rylink peephole rewrite fires ===")
   test_rewrite_introduces_call(rylink, rysmith)
+  print("=== rylink antiopt rewrites the bundle ===")
+  test_antiopt_rewrites_the_bundle(rylink, rysmith, symiri)
+  print("=== rylink --no-antiopt leaves the bundle alone ===")
+  test_no_antiopt_leaves_the_bundle_alone(rylink, rysmith)
   print("=== rylink rewrite offset range check ===")
   # symirc not used directly by this test but kept positional for the
   # CLI signature; passing rysmith is enough since seed_pool wraps it.

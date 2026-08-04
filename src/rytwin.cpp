@@ -170,7 +170,7 @@ int main(int argc, char **argv) {
                 cxxopts::value<std::string>()->default_value("vecext"))
     ("emit-main", "Keep @main un-mangled in compiled output (so p2 is runnable)")
     ("validate", "Run symiri on p1 and p2 with the profiled input and assert they agree")
-    ("selftest-rewrites", "Check every disguise rule's identity exhaustively at i8 and exit")
+    ("selftest-antiopt", "Run every anti-optimization rule's example through the interpreter and exit")
     ("v,verbose", "Log each twin decision (grafted / skipped / rejected, with reason)")
     ("o,output","Output .sir (p2)", cxxopts::value<std::string>())
     ("h,help",  "Print usage");
@@ -185,17 +185,17 @@ int main(int argc, char **argv) {
     std::cerr << "rytwin: " << e.what() << "\n";
     return 2;
   }
-  if (result.count("selftest-rewrites")) {
+  if (result.count("selftest-antiopt")) {
     std::string failure;
     auto checked = selfTestRules(failure);
     if (!checked) {
-      std::cerr << "rytwin: rewrite selftest FAILED: " << failure << "\n";
+      std::cerr << "rytwin: antiopt selftest FAILED: " << failure << "\n";
       return 1;
     }
     if (result.count("verbose"))
       for (const auto &nm: *checked)
         std::cout << "  checked " << nm << "\n";
-    std::cout << "rytwin: rewrite selftest OK (" << checked->size()
+    std::cout << "rytwin: antiopt selftest OK (" << checked->size()
               << " rule(s) run through the interpreter, every i8 operand value)\n";
     return 0;
   }
