@@ -14,7 +14,7 @@ namespace refractir::reify {
 
   struct FuncGenConfig {
     std::string funcName = "func";
-    uint32_t seed = 0;
+    std::uint32_t seed = 0;
     int nStmts = 3;
     // Off-path blocks are never executed at the solved inputs, so their
     // volume costs the solver nothing while widening the compiler-facing
@@ -25,22 +25,22 @@ namespace refractir::reify {
     bool enableInterestCoefs = true;
     bool enableInterestInits = true;
     bool enableIntrinsics = true;
-    // Probability that a new on-path coef sym gets a `|c| > 2^20`
-    // require, replacing the old unconditional `c != 0 ∧ c != 1 ∧ c != -1`
-    // triple. With the triple in place the solver clusters every coef at
-    // ±2 (the smallest values surviving the filter); R5 trades that
-    // floor for a real diversity guarantee.
+    // Probability that a new on-path coef sym gets a `|c| > 2^20` require
+    // rather than the `c != 0 ∧ c != 1 ∧ c != -1` triple. The triple only
+    // rules out the degenerate coefficients, so the solver clusters every
+    // coef at ±2 — the smallest values that survive it. The magnitude
+    // require trades that floor for a spread across the type's range.
     double pLargeCoef = 0.3;
     // Magnitude threshold T for the `|c| > T` interest require, set by
     // --large-coef. Clamped per-coef to the coef's domain ∩ type range, so
     // a value wider than --coef-domain degrades to the largest in-domain
     // magnitude rather than going UNSAT.
-    int64_t largeCoefThreshold = 1 << 20;
+    std::int64_t largeCoefThreshold = std::int64_t{1} << 20;
     ExprGenConfig exprCfg;
     // Sym counter domains
-    int64_t coefLo = -8, coefHi = 8;
-    int64_t valueLo = -128, valueHi = 127;
-    int64_t indexLo = 1, indexHi = 30;
+    std::int64_t coefLo = -8, coefHi = 8;
+    std::int64_t valueLo = -128, valueHi = 127;
+    std::int64_t indexLo = 1, indexHi = 30;
   };
 
   struct FuncGenResult {
@@ -48,12 +48,12 @@ namespace refractir::reify {
     std::vector<std::string> pathLabels; // ["^entry", "^b0", ...]
   };
 
-  FuncGenResult genFunction(
+  [[nodiscard]] FuncGenResult genFunction(
       const RyCFG &cfg, const std::vector<std::string> &path, const VarCatalogue &vars,
       const FuncGenConfig &fcfg
   );
 
-  // [v0.2.3] Cycle-closing corrections for --require-nonterm. For each
+  // Cycle-closing corrections for --require-nonterm. For each
   // scalar-integer mutable let the lasso cycle writes, appends a fresh
   // additive-correction symbol (`sym %?ntK`) and a `%v = %v + %?ntK;`
   // statement to the latch block (before its terminator). This gives the

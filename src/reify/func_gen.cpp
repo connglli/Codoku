@@ -1,4 +1,5 @@
 #include "reify/func_gen.hpp"
+#include "reify/ast_builder.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -14,32 +15,8 @@
 namespace refractir::reify {
 
   // ---------------------------------------------------------------------------
-  // Internal helpers
-  // ---------------------------------------------------------------------------
-
-  static TypePtr makeI32() {
-    return std::make_shared<Type>(Type{IntType{IntType::Kind::I32, {}, {}}, {}});
-  }
-
-  static LValue localLV(const std::string &name) { return LValue{LocalId{name, {}}, {}, {}}; }
-
-  static Atom coefAtom(Coef c) { return Atom{CoefAtom{std::move(c), {}}, {}}; }
-
-  static Atom rvalAtom(RValue rv) { return Atom{RValueAtom{std::move(rv), {}}, {}}; }
-
-  static Expr simpleExpr(Atom a) { return Expr{std::move(a), {}, {}}; }
-
-  // ---------------------------------------------------------------------------
   // let-init value sampling
   // ---------------------------------------------------------------------------
-
-  // Signed [min, max] of an N-bit integer type (N ∈ [2, 64]).
-  static std::pair<int64_t, int64_t> signedIntRange(uint32_t bits) {
-    if (bits >= 64)
-      return {INT64_MIN, INT64_MAX};
-    int64_t hi = (int64_t(1) << (bits - 1)) - 1;
-    return {-hi - 1, hi};
-  }
 
   // Weighted-mixture integer init literal — see hp::kInitInt_* for the
   // three-bucket rationale (small / mid / boundary).
@@ -122,7 +99,7 @@ namespace refractir::reify {
         return iv;
       }
     }
-    // [v0.2.1] VecType: brace-init with N scalar elements.
+    // VecType: brace-init with N scalar elements.
     if (std::holds_alternative<VecType>(t->v)) {
       const auto &vt = std::get<VecType>(t->v);
       std::vector<InitValPtr> children;
@@ -275,7 +252,7 @@ namespace refractir::reify {
     sym.indexLo = fcfg.indexLo;
     sym.indexHi = fcfg.indexHi;
 
-    // [v0.2.2] Track which (intrinsic, bitwidth) pairs are used during
+    // Track which (intrinsic, bitwidth) pairs are used during
     // expression generation so we can emit IntrinsicDecl entries into the
     // Program.  Make a mutable copy of fcfg.exprCfg so we can attach the
     // tracking set without mutating the caller's config.
@@ -412,7 +389,7 @@ namespace refractir::reify {
     Program prog;
     prog.structs = vars.structDecls;
 
-    // [v0.2.2] Emit IntrinsicDecl entries for each (kind, bitwidth) pair
+    // Emit IntrinsicDecl entries for each (kind, bitwidth) pair
     // used during expression generation. The semchecker now supports
     // overloaded intrinsics with different signatures, so the same intrinsic
     // may appear at multiple bitwidths (e.g. @popcount i32 / i64).
@@ -424,7 +401,7 @@ namespace refractir::reify {
     fun.retType = makeI32();
     fun.syms = sym.makeDecls();
 
-    // [v0.2.2] Split VarCatalogue entries: isParam → FunDecl.params,
+    // Split VarCatalogue entries: isParam → FunDecl.params,
     // others → FunDecl.lets. Parameters carry no initializer (the
     // solver synthesises their values and the SOLVED header records
     // them; symiri replays them as positional CLI args).

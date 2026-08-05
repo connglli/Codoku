@@ -1,6 +1,6 @@
 #pragma once
 
-// [v0.2.2] FuncPool — loads rysmith-emitted (.sir + .json) pairs from a
+// FuncPool — loads rysmith-emitted (.sir + .json) pairs from a
 // directory so rylink can pick functions to assemble into whole programs.
 //
 // One PoolEntry represents one parsed rysmith descriptor together with the
@@ -43,6 +43,6 @@ namespace refractir::reify {
   // Why no exception on empty: a degenerate pool is a normal startup-time
   // diagnostic in rylink ("you pointed me at the wrong directory"), not a
   // crash condition. The CLI driver decides what to do with an empty pool.
-  FuncPool loadFuncPool(const std::filesystem::path &dir);
+  [[nodiscard]] FuncPool loadFuncPool(const std::filesystem::path &dir);
 
 } // namespace refractir::reify

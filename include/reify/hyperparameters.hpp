@@ -4,6 +4,7 @@
 #include <climits>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 
 // Central place to manage reify's *code-level* tunable hyperparameters.
 //
@@ -58,7 +59,7 @@ namespace refractir::reify::rysmith::hp {
   inline constexpr int kIntOffPath_SelectEnd = 93;    // select cond, a, b
   inline constexpr int kIntOffPath_IntrinsicEnd = 97; // call @intrinsic(args)
 
-  // [P7] Probability that a drawn integer type is a custom width instead
+  // Probability that a drawn integer type is a custom width instead
   // of the standard i8/i16/i32/i64. The SPEC admits any `iN`; the
   // toolchain implements them via widen-and-mask in the backends — a
   // bug surface (cf. the crc32 sub-byte fix) that standard widths never
@@ -67,16 +68,16 @@ namespace refractir::reify::rysmith::hp {
   // masking) alongside multi-byte customs.
   inline constexpr double kPOddIntWidth = 0.15;
   inline constexpr uint32_t kOddIntWidths[] = {12, 20, 24, 40, 48};
-  inline constexpr std::size_t kOddIntWidthsSize = sizeof(kOddIntWidths) / sizeof(kOddIntWidths[0]);
+  inline constexpr std::size_t kOddIntWidthsSize = std::size(kOddIntWidths);
 
-  // [P7] Probability that an off-path OpAtom coefficient is a same-type
+  // Probability that an off-path OpAtom coefficient is a same-type
   // LocalId (`%a * %b`) instead of a literal. Var-op-var is grammar-legal
   // for every operator, compiler-opaque (both sides are runtime values),
   // and solver-free off-path. On-path ops never use var coefs — var*var
   // is a nonlinear BV term.
   inline constexpr double kPOffPathVarCoef = 0.4;
 
-  // [P7] Off-path FP atom slots. FP `/` and `%` (fmod) are typecheck-legal
+  // Off-path FP atom slots. FP `/` and `%` (fmod) are typecheck-legal
   // (floats admit Mul / Div / Mod) but were never generated; off-path they
   // cost the solver nothing and cannot diverge interpreter-vs-backend
   // because the block never executes.
@@ -132,12 +133,12 @@ namespace refractir::reify::rysmith::hp {
   // when tight path constraints make non-trivial RHSs hard to satisfy.
   inline constexpr double kPAllowAllLiteral = 0.05;
 
-  // [P6] Probability that a single bare-RValueAtom RHS (`%x = %y;`) is
-  // KEPT instead of being reshaped by the R3 anti-copy bump. Copy
+  // Probability that a single bare-RValueAtom RHS (`%x = %y;`) survives
+  // instead of being reshaped into a non-trivial expression. Copy
   // propagation is a distinct dataflow shape the optimizer exercises —
   // forbidding it outright homogenises every def into an arithmetic
-  // join. A low rate reintroduces the shape without re-opening the bulk
-  // SCCP collapse R3 closed; self-assigns stay impossible (the LHS is
+  // join. A low rate reintroduces the shape without letting the body
+  // collapse in bulk under SCCP; self-assigns stay impossible (the LHS is
   // excluded from every RHS pool).
   inline constexpr double kPAllowPlainCopy = 0.05;
 
@@ -225,10 +226,10 @@ namespace refractir::reify::rysmith::hp {
   inline constexpr double kPTypeStruct = 0.15;
   inline constexpr double kPTypePtr = 0.15;
 
-  // [v0.2.1] Vector type probability at depth 0. Zeroed if enableVec=false.
+  // Vector type probability at depth 0. Zeroed if enableVec=false.
   inline constexpr double kPTypeVec = 0.15;
 
-  // [v0.2.1] When generating a pointer, probability the pointee is an
+  // When generating a pointer, probability the pointee is an
   // aggregate (array or struct) rather than a scalar. Zeroed if
   // enableAggPtr=false.
   inline constexpr double kPPtrAgg = 0.30;
@@ -241,13 +242,13 @@ namespace refractir::reify::rysmith::hp {
   inline constexpr double kFracPtr1Vars = 0.20;
   // remainder → ptr-of-ptr vars (~15%)
 
-  // [v0.2.1] Fraction of nVars allocated to vec-typed locals.
+  // Fraction of nVars allocated to vec-typed locals.
   inline constexpr double kFracVecVars = 0.10;
-  // [v0.2.1] Fraction of nVars allocated to aggregate-pointer locals.
+  // Fraction of nVars allocated to aggregate-pointer locals.
   inline constexpr double kFracAggPtrVars = 0.10;
 
   // ===========================================================================
-  // [v0.2.1] Vec atom slot thresholds for genExpr vec-target dispatch.
+  // Vec atom slot thresholds for genExpr vec-target dispatch.
   // Slots: [0, kVecCopyEnd) = whole-vec copy
   //        [kVecCopyEnd, kVecSymMulEnd) = sym * vec (on-path only)
   //        [kVecSymMulEnd, kVecConcMulEnd) = concrete coef * vec
@@ -257,11 +258,11 @@ namespace refractir::reify::rysmith::hp {
   inline constexpr int kVecSymMulEnd = 70;
   inline constexpr int kVecConcMulEnd = 85;
 
-  // [v0.2.1] Vec lane-write probability in genBlockStmts when LHS is vec.
+  // Vec lane-write probability in genBlockStmts when LHS is vec.
   // When canWholeVec is true: probability of lane write vs whole-vec assign.
   inline constexpr int kVecLaneWriteProb = 40; // 40% lane write, 60% whole-vec
 
-  // [v0.2.1] Vec tail-atom dispatch (`genExpr` vec branch, i > 0):
+  // Vec tail-atom dispatch (`genExpr` vec branch, i > 0):
   //   [0, kVecTailCopyEnd) → vec-typed RValueAtom copy
   //   [kVecTailCopyEnd, kVecTailOpEnd) → OpAtom{Mul, concrete-coef, vec var}
   //   [kVecTailOpEnd, 100)  → broadcast scalar literal (drawn from the
@@ -271,7 +272,7 @@ namespace refractir::reify::rysmith::hp {
   inline constexpr int kVecTailCopyEnd = 40;
   inline constexpr int kVecTailOpEnd = 60;
 
-  // [v0.2.1] Range for the concrete int Mul coef on a vec-typed atom
+  // Range for the concrete int Mul coef on a vec-typed atom
   // (`coef * %vec`). Narrow on purpose: large vec multipliers blow up
   // FMA contraction and break differential testing on lane-wise FP.
   inline constexpr std::int64_t kVecConcMulLo = -4;
@@ -369,7 +370,7 @@ namespace refractir::reify::rysmith::hp {
   inline constexpr std::size_t kFloatMulCoefPoolSize =
       sizeof(kFloatMulCoefPool) / sizeof(kFloatMulCoefPool[0]);
 
-  // [P3] Cheap-linear replacement atoms (genCheapLinearAtom). When the
+  // Cheap-linear replacement atoms (genCheapLinearAtom). When the
   // trivial-shape rewrite fires on-path, the replacement is a concrete-coef
   // multiply or a plain read instead of a slot-table reroll (whose
   // non-trivial outcomes are dominated by solver-expensive `sym * var`).
@@ -452,7 +453,7 @@ namespace refractir::reify::rylink::hp {
   // Rewrite engine
   //
   // Per caller→callee edge, the engine enumerates rewrite *sites* in the
-  // caller AST (literal initializers in v1; unchanged-var uses next),
+  // caller AST (literal initializers),
   // filters them to the candidates whose callee matches, and then rolls an
   // acceptance coin per matched candidate. kMaxAttemptsPerEdge bounds the
   // fallible apply() retries; pRewriteForMatches() supplies the per-match
@@ -480,7 +481,7 @@ namespace refractir::reify::rylink::hp {
   //
   // std::bit_floor(n) is the largest power of two not exceeding n (and 0 at
   // n == 0), so 1/bit_floor(n) realizes the curve directly.
-  inline constexpr double pRewriteForMatches(std::size_t n) {
+  [[nodiscard]] inline constexpr double pRewriteForMatches(std::size_t n) noexcept {
     if (n == 0)
       return 0.0;
     return 1.0 / static_cast<double>(std::bit_floor(n));

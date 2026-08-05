@@ -17,8 +17,8 @@ namespace refractir::reify {
    * checksum primitives (the latter are emitted by reify/checksum.cpp
    * through their own path).
    *
-   * All entries are P0 (solver-friendly): they decompose into
-   * quantifier-free BV / QF_FP operations with bounded O(N) ITE chains.
+   * Every entry is solver-friendly: it decomposes into quantifier-free
+   * BV / QF_FP operations with bounded O(N) ITE chains.
    */
   inline const std::vector<IntrinsicKind> &getGeneratableIntrinsics() {
     using K = IntrinsicKind;

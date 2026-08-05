@@ -9,10 +9,11 @@
 // interface, because what a rule matches against differs fundamentally
 // between them:
 //
-//   CallRewriteRule    (reify/call_realize.hpp) matches a site against a
-//                      callee descriptor and a pinned realization index.
-//   IdentityRewriteRule(reify/twin_rewrite.hpp) matches a statement against
-//                      an interval annotation table.
+//   CallRewriteRule (reify/call_realize.hpp) matches a site against a callee
+//                   descriptor and a pinned realization index.
+//   AntiOptRule     (reify/antiopt.hpp) matches a run of statements against
+//                   the declarations it may add to and a predicate that says
+//                   whether the rewritten body is still acceptable.
 //
 // The tier above is reify/transform.hpp: a `Transform` is a whole-program
 // rewrite driven through a `TransformPipeline`. A Transform may own a set of

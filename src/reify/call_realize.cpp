@@ -1084,7 +1084,7 @@ namespace refractir::reify {
 
     const auto &rz = callee.realizations[fixedRealizationIdx];
 
-    // [v0.2.2] Target unexecuted blocks safely. The execution path (block labels)
+    // Target unexecuted blocks safely. The execution path (block labels)
     // is recorded in callerDesc.path. Any block in the caller not found in this
     // path is unexecuted under the solved model, making it safe to populate with
     // additional calls using randomized arguments. We collect all unexecuted blocks,

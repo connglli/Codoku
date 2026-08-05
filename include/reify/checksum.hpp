@@ -1,11 +1,10 @@
 #pragma once
 
-// [v0.2.2] Checksum rewriting and symiri-capture utilities.
+// Checksum rewriting and symiri-capture utilities.
 //
 // Declares the post-solve CRC32 rewrite and minimal-oracle builder
-// (previously declared in func_gen.hpp) plus the shared
-// runSymiriCaptureResult helper that was duplicated across rysmith.cpp
-// and rylink.cpp.  Everything here is consumed by both tools; keeping
+// plus the shared runSymiriCaptureResult helper that was duplicated across
+// rysmith.cpp and rylink.cpp. Everything here is consumed by both tools; keeping
 // it in a dedicated header makes the dependency clear and avoids
 // pulling in the full func_gen machinery just for the runner.
 
@@ -46,7 +45,7 @@ namespace refractir::reify {
   // `targetLocal`. A pointer left at an undef / cross-object value (empty
   // targetLocal) is NOT loaded: dereferencing it is UB the solver could not
   // see, which the strict interpreter would (rightly) trap on.
-  size_t rewriteExitToCrc32Checksum(
+  [[nodiscard]] size_t rewriteExitToCrc32Checksum(
       refractir::Program &prog, const std::string &funcName,
       const std::unordered_map<std::string, refractir::SymbolicExecutor::LetExitValue>
           &letExitValues
@@ -86,7 +85,7 @@ namespace refractir::reify {
   //
   // Returns an empty `Program` (no funcs) when the entry function
   // cannot be located in `full`.
-  refractir::Program buildMiniCrc32Prog(
+  [[nodiscard]] refractir::Program buildMiniCrc32Prog(
       const refractir::Program &full, const std::string &funcName,
       const std::unordered_map<std::string, refractir::SymbolicExecutor::LetExitValue>
           &letExitValues

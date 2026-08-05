@@ -1,8 +1,8 @@
 #pragma once
 
-// [v0.2.2] Function descriptor — sidecar metadata that rysmith writes
+// Function descriptor — sidecar metadata that rysmith writes
 // next to each generated `.sir` file (`func_<id>_<i>.json`) so the
-// future `rylink` driver can wire callers/callees without re-parsing
+// `rylink` driver can wire callers/callees without re-parsing
 // the SIR source. Both the writer (used by rysmith) and the reader
 // (used by rylink) live here so the on-disk schema has a single
 // canonical owner.
@@ -11,6 +11,7 @@
 #include <iosfwd>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 #include "ast/ast.hpp"
 
@@ -25,7 +26,7 @@ namespace refractir::reify {
     // `ptr i32`, `@struct_a3f9c2_0`, `<4> i32`).
     std::string retType;
 
-    // [v0.2.3] Whether the function's CFG is reducible (computed from
+    // Whether the function's CFG is reducible (computed from
     // the emitted program via the canonical DomTree/ReducibilityResult
     // analyses). Structuring consumers (rylink --structured-lowering,
     // the python target) must discard seeds where this is false.
@@ -33,11 +34,11 @@ namespace refractir::reify {
     // conservatively "not known reducible".
     bool reducible = false;
 
-    // [v0.2.3] Runtime outcome of the generated function on its solved
+    // Runtime outcome of the generated function on its solved
     // input, generalizing the old `has_ub` bool:
-    //   Return  — UB-free, terminates, returns a value (default rysmith).
-    //   Trap    — deliberately triggers UB (rysmith --require-ub).
-    //   Diverge — UB-free but never returns (rysmith --require-nonterm).
+    // Return — UB-free, terminates, returns a value (default rysmith).
+    // Trap — deliberately triggers UB (rysmith --require-ub).
+    // Diverge — UB-free but never returns (rysmith --require-nonterm).
     // Consumers use it to drop the backends' dynamic UB guards (Return and
     // Diverge are UB-free), to avoid splicing a callee that never returns a
     // value (rylink discards Diverge — a call to it would hang), and to skip
@@ -49,7 +50,7 @@ namespace refractir::reify {
     Outcome outcome = Outcome::Trap;
 
     // True when the concretized path deliberately hits UB (the old `has_ub`).
-    bool hasUb() const { return outcome == Outcome::Trap; }
+    [[nodiscard]] bool hasUb() const noexcept { return outcome == Outcome::Trap; }
 
     struct Param {
       std::string name; // e.g. `%pa0`
@@ -58,12 +59,8 @@ namespace refractir::reify {
 
     std::vector<Param> params;
 
-    // [v0.2.2] Top-level `syms` was dropped: rysmith re-generates the
-    // statement list (and therefore the sym set) per init, so any
-    // single value here would reflect only the last init and disagree
-    // with the other realizations' actual sym sets. Per-realization
-    // `symValues` carries the canonical, init-specific data; anyone
-    // who needs the kind/type metadata should reach for the .sir
+    // Per-realization symValues carries the canonical, init-specific data;
+    // callers who need the kind/type metadata should reach for the .sir
     // file's `sym` declarations directly.
 
     // Block-label path the solver concretized along (`["^entry", "^b1",
@@ -84,13 +81,13 @@ namespace refractir::reify {
 
     std::vector<Struct> structs;
 
-    // [v0.2.2] One per-init record. Carries the concrete .sir file
+    // One per-init record. Carries the concrete .sir file
     // the solver produced for this realization plus the solver-
     // synthesised values for each parameter and the return
     // expression. Values are stringified in the same format
     // rysmith writes into the SOLVED header (decimal ints / hex
     // floats / std::to_string(double) full-precision), so a
-    // consumer can hand them straight to `symiri ... -- v0 v1`.
+    // consumer can hand them straight to `symiri ... -- val0 val1`.
     struct Realization {
       std::string file; // basename only, relative to descriptor dir
       // Parameter values keyed by the parameter's local-id (e.g.
@@ -129,7 +126,7 @@ namespace refractir::reify {
   // typically log and skip). The JSON shape is intentionally narrow
   // (flat string-valued fields plus a few small arrays) so a tiny
   // hand-written parser is sufficient — no dependency added.
-  std::optional<FuncDescriptor> readFuncDescriptor(const std::filesystem::path &path);
-  std::optional<FuncDescriptor> parseFuncDescriptor(const std::string &json);
+  [[nodiscard]] std::optional<FuncDescriptor> readFuncDescriptor(const std::filesystem::path &path);
+  [[nodiscard]] std::optional<FuncDescriptor> parseFuncDescriptor(std::string_view json);
 
 } // namespace refractir::reify

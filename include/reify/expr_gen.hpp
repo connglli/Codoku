@@ -1,5 +1,6 @@
 #pragma once
 
+#include <compare>
 #include <cstdint>
 #include <optional>
 #include <random>
@@ -22,14 +23,11 @@ namespace refractir::reify {
   // are distinct overloads that each need their own declaration.
   struct IntrinsicUseKey {
     IntrinsicKind kind;
-    uint32_t elemBits; // scalar element width (32 for i32/f32, 64 for i64/f64)
-    bool elemIsFloat;  // element domain: false = iN, true = fN
-    uint32_t lanes;    // 0 = scalar intrinsic; N = reduce over <N> T
+    std::uint32_t elemBits; // scalar element width (32 for i32/f32, 64 for i64/f64)
+    bool elemIsFloat;       // element domain: false = iN, true = fN
+    std::uint32_t lanes;    // 0 = scalar intrinsic; N = reduce over <N> T
 
-    bool operator<(const IntrinsicUseKey &o) const {
-      return std::tie(kind, elemBits, elemIsFloat, lanes) <
-             std::tie(o.kind, o.elemBits, o.elemIsFloat, o.lanes);
-    }
+    auto operator<=>(const IntrinsicUseKey &) const = default;
   };
 
   // ---------------------------------------------------------------------------
@@ -39,8 +37,8 @@ namespace refractir::reify {
   struct SymEntry {
     std::string name; // "%?sN"
     SymKind kind;
-    TypePtr type;   // actual type of this sym (not always i32)
-    int64_t lo, hi; // domain bounds
+    TypePtr type;        // actual type of this sym (not always i32)
+    std::int64_t lo, hi; // domain bounds
   };
 
   struct SymCounter {
@@ -48,12 +46,12 @@ namespace refractir::reify {
     int n = 0;
 
     // Domains
-    int64_t coefLo = -8, coefHi = 8;
-    int64_t valueLo = -128, valueHi = 127;
-    int64_t indexLo = 1, indexHi = 30;
+    std::int64_t coefLo = -8, coefHi = 8;
+    std::int64_t valueLo = -128, valueHi = 127;
+    std::int64_t indexLo = 1, indexHi = 30;
 
     // Generate next sym of given kind and type
-    std::string next(SymKind kind, TypePtr type);
+    std::string next(SymKind kind, const TypePtr &type);
 
     // Convenience: next coef sym of given type (most common)
     std::string nextCoef(const TypePtr &type);
@@ -64,9 +62,9 @@ namespace refractir::reify {
     // Next index sym (i32)
     std::string nextIndex();
 
-    int countOfKind(SymKind kind) const;
-    std::vector<std::string> namesOfKindSince(SymKind kind, int since) const;
-    std::vector<SymDecl> makeDecls() const;
+    [[nodiscard]] int countOfKind(SymKind kind) const;
+    [[nodiscard]] std::vector<std::string> namesOfKindSince(SymKind kind, int since) const;
+    [[nodiscard]] std::vector<SymDecl> makeDecls() const;
   };
 
   // ---------------------------------------------------------------------------
@@ -86,7 +84,7 @@ namespace refractir::reify {
     bool enablePtrArith = true;
     int minAtoms = 1;
     int maxAtoms = 3;
-    // [P3] Set by genCond for its arm expressions: branch/require conditions
+    // Set by genCond for its arm expressions: branch/require conditions
     // are the solver's handles for driving the path, so their trivial-shape
     // replacements keep the sym-minting reroll instead of the cheap linear
     // chain. Body assignments leave this false and get sym-free, solver-
@@ -109,7 +107,7 @@ namespace refractir::reify {
   // RValue on the RHS — this defeats self-assigns (%x = %x) and reductive
   // patterns like %x = %x + 1 that fold flat under SCCP. Plumb through
   // every variable-pool pick.
-  Expr genExpr(
+  [[nodiscard]] Expr genExpr(
       std::mt19937 &rng,
       SymCounter *sym, // nullptr-safe: if nullptr, always concrete
       const VarCatalogue &vars, const TypePtr &targetType, bool onPath, const ExprGenConfig &cfg,
@@ -117,7 +115,7 @@ namespace refractir::reify {
   );
 
   // Generate a branch Cond using random scalar var from available vars.
-  Cond genCond(
+  [[nodiscard]] Cond genCond(
       std::mt19937 &rng, SymCounter *sym, const VarCatalogue &vars, bool onPath,
       const ExprGenConfig &cfg
   );
@@ -131,16 +129,16 @@ namespace refractir::reify {
   // (cannot exceed a narrow `--coef-domain`). The unconditional
   // `c != 0,1,-1` triple from earlier versions clustered the solver at
   // ±2 and starved the literal pool of magnitude diversity.
-  std::vector<Instr> interestCoefRequires(
+  [[nodiscard]] std::vector<Instr> interestCoefRequires(
       std::mt19937 &rng, const SymCounter &sym, int coefCountBefore, double pLargeCoef,
-      int64_t largeCoefThreshold
+      std::int64_t largeCoefThreshold
   );
 
   // Generate N statements (assign + store mix) for a block.
   // onPath=true: uses sym and emits UB-safety requires. onPath=false:
   // concrete only, no requires (off-path blocks are never executed at the
   // solved inputs, so their UB is unreachable).
-  std::vector<Instr> genBlockStmts(
+  [[nodiscard]] std::vector<Instr> genBlockStmts(
       std::mt19937 &rng,
       SymCounter *sym, // null for off-path
       const VarCatalogue &vars, int nStmts, bool onPath, const ExprGenConfig &cfg

@@ -1,14 +1,11 @@
 #include "internal.hpp"
+#include "reify/ast_builder.hpp"
 
 #include <variant>
 
 #include "analysis/type_utils.hpp"
 
 namespace refractir::reify::antiopt {
-
-  LValue localLV(const std::string &n) { return LValue{LocalId{n, {}}, {}, {}}; }
-
-  Expr simpleExpr(Atom a) { return Expr{std::move(a), {}, {}}; }
 
   Instr assignInstr(const LValue &lhs, Expr rhs) {
     return Instr{AssignInstr{lhs, std::move(rhs), {}}};
@@ -59,10 +56,7 @@ namespace refractir::reify::antiopt {
     auto bits = TypeUtils::getIntBitWidth(t);
     if (!bits || *bits == 0 || *bits > 64)
       return std::nullopt;
-    if (*bits >= 64)
-      return std::pair<std::int64_t, std::int64_t>{INT64_MIN, INT64_MAX};
-    const std::int64_t lim = std::int64_t{1} << (*bits - 1);
-    return std::pair<std::int64_t, std::int64_t>{-lim, lim - 1};
+    return signedIntRange(*bits);
   }
 
   namespace {

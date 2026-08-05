@@ -164,7 +164,7 @@ namespace refractir::reify {
     double pArray = (depth >= cfg.maxAggNesting) ? 0.0 : rysmith::hp::kPTypeArray;
     double pStruct = (depth >= cfg.maxAggNesting) ? 0.0 : rysmith::hp::kPTypeStruct;
     double pPtr = (depth >= cfg.maxPtrDepth) ? 0.0 : rysmith::hp::kPTypePtr;
-    // [v0.2.1] Vectors only at depth 0 (no nested vec, no vec in arrays/structs).
+    // Vectors only at depth 0 (no nested vec, no vec in arrays/structs).
     double pVec = (depth == 0 && cfg.enableVec) ? rysmith::hp::kPTypeVec : 0.0;
 
     // Renormalize
@@ -203,8 +203,8 @@ namespace refractir::reify {
     r -= pVec;
     // Pointer
     TypePtr pointee = genRandomType(rng, cfg, depth + 1);
-    // [v0.2.1] If enableAggPtr, allow aggregate pointees (ptr [N] T, ptr @S).
-    // Otherwise fall back to scalar (v0.2.0 behavior).
+    // If enableAggPtr, allow aggregate pointees (ptr [N] T, ptr @S).
+    // Otherwise fall back to scalar.
     // Pointer to vector (ptr <N> T) is always forbidden (§6.8.1).
     if (isVecType(pointee)) {
       pointee = genScalarType(rng, cfg.enableFp);

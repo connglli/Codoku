@@ -1,5 +1,5 @@
 /**
- * rysmith — C++ random RefractIR leaf-function generator (v2).
+ * rysmith — C++ random RefractIR leaf-function generator.
  *
  * Builds RefractIR Programs directly in memory (no text generation/parsing),
  * then calls SymbolicExecutor in-process (no subprocess) to concretize them.
@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -60,7 +61,7 @@ using namespace refractir;
 using namespace refractir::reify;
 
 // Parse "[lo, hi]" domain string
-static std::pair<int64_t, int64_t> parseDomain(const std::string &s) {
+[[nodiscard]] static std::pair<std::int64_t, std::int64_t> parseDomain(const std::string &s) {
   if (s.size() < 5 || s.front() != '[' || s.back() != ']')
     throw std::invalid_argument("invalid domain (expected [lo, hi]): " + s);
   auto inner = s.substr(1, s.size() - 2);
@@ -81,13 +82,13 @@ static std::pair<int64_t, int64_t> parseDomain(const std::string &s) {
 // round-trip — see its comment in ast.hpp for the rationale (signed
 // zero preservation, no int/float dispatch ambiguity, subnormal
 // safety).
-static std::string fmtModelVal(const SymbolicExecutor::Result::ModelVal &v) {
-  if (std::holds_alternative<int64_t>(v))
-    return std::to_string(std::get<int64_t>(v));
+[[nodiscard]] static std::string fmtModelVal(const SymbolicExecutor::Result::ModelVal &v) {
+  if (std::holds_alternative<std::int64_t>(v))
+    return std::to_string(std::get<std::int64_t>(v));
   return formatDouble(std::get<double>(v));
 }
 
-static auto makeSolverFactory() {
+[[nodiscard]] static auto makeSolverFactory() {
   return [](const SymbolicExecutor::Config &cfg) -> std::unique_ptr<smt::ISolver> {
 #if defined(USE_BITWUZLA)
     return std::make_unique<solver::BitwuzlaSolver>(cfg.timeout_ms, cfg.seed, cfg.num_smt_threads);
@@ -100,7 +101,7 @@ static auto makeSolverFactory() {
   };
 }
 
-static bool validateWithSymiri(
+[[nodiscard]] static bool validateWithSymiri(
     const fs::path &sirPath, const std::string &funcName, const std::vector<std::string> &paramArgs,
     bool verbose, SolvingMode solMode = SolvingMode::UBFree
 ) {
@@ -146,7 +147,7 @@ static bool validateWithSymiri(
   }
 }
 
-// [v0.2.2] One per concretized .sir file. Bundles the on-disk path
+// One per concretized .sir file. Bundles the on-disk path
 // with the per-init solved values (parameter args, sym values,
 // return value) so consumers (--validate, --emit-desc) don't need
 // to re-parse the SOLVED header. `rz.paramValues` is in declaration
@@ -155,7 +156,7 @@ static bool validateWithSymiri(
 struct ConcreteFile {
   fs::path path;
   FuncDescriptor::Realization rz;
-  // [v0.2.3] Lasso header (^-prefixed) for --require-nonterm, so the
+  // Lasso header (^-prefixed) for --require-nonterm, so the
   // bounded-replay divergence validation knows which block's state must recur,
   // and after how many laps (the orbit's period).
   std::string nontermHeader;
@@ -166,7 +167,33 @@ struct GenerateResult {
   std::vector<ConcreteFile> produced;
 };
 
-static GenerateResult generateLeaf(
+// Strip the trailing init-letter suffix (`a`..`z`) from a .sir stem
+// to recover the base function name. Stems are either `func_<id>_<i>`
+// (single init) or `func_<id>_<i><a..z>` (multi-init); drop one
+// trailing lowercase letter when the char before it is a digit.
+[[nodiscard]] static std::string getBaseFuncName(const fs::path &p) {
+  std::string stem = p.stem().string();
+  if (stem.size() >= 2) {
+    char last = stem.back();
+    char prev = stem[stem.size() - 2];
+    if (last >= 'a' && last <= 'z' && std::isdigit(static_cast<unsigned char>(prev)))
+      return stem.substr(0, stem.size() - 1);
+  }
+  return stem;
+}
+
+// Flatten a realization's declaration-order (name, value) pairs into
+// the bare value list that `symiri --` expects.
+[[nodiscard]] static std::vector<std::string>
+extractParamArgs(const FuncDescriptor::Realization &rz) {
+  std::vector<std::string> args;
+  args.reserve(rz.paramValues.size());
+  for (const auto &pv: rz.paramValues)
+    args.push_back(pv.second);
+  return args;
+}
+
+[[nodiscard]] static GenerateResult generateLeaf(
     // CFG params
     int nBbls, double pBranch, double pBackedge, bool requireReducible,
     // Path params
@@ -175,23 +202,23 @@ static GenerateResult generateLeaf(
     const VarGenConfig &varCfg,
     // Func params
     const std::string &funcName, int nStmts, double offPathMultiplier, bool enableInterestCoefs,
-    double pLargeCoef, int64_t largeCoefThreshold, int64_t coefLo, int64_t coefHi, int64_t valueLo,
-    int64_t valueHi, int64_t indexLo, int64_t indexHi, const ExprGenConfig &exprCfg,
-    bool enableIntrinsics,
+    double pLargeCoef, std::int64_t largeCoefThreshold, std::int64_t coefLo, std::int64_t coefHi,
+    std::int64_t valueLo, std::int64_t valueHi, std::int64_t indexLo, std::int64_t indexHi,
+    const ExprGenConfig &exprCfg, bool enableIntrinsics,
     // Solver params
-    uint32_t timeoutMs, SolvingMode solMode,
+    std::uint32_t timeoutMs, SolvingMode solMode,
     // Retry params
     int maxRetries, int nInits,
     // IO
     const fs::path &outDir, bool keepSymbolic, bool verbose,
     // RNG (by value — safe to run in a detached thread)
-    std::mt19937 rng, uint32_t baseSeed,
-    // [v0.2.2] 6-char generation ID — used for the per-fn descriptor.
+    std::mt19937 rng, std::uint32_t baseSeed,
+    // 6-char generation ID — used for the per-fn descriptor.
     const std::string &genId,
-    // [v0.2.2] When true, write the rylink-consumable func_<id>_<i>.json
+    // When true, write the rylink-consumable func_<id>_<i>.json
     // sidecar next to each successful concrete .sir.
     bool emitDesc, bool emitMain, bool noCrc32,
-    // [v0.2.3] Non-terminating mode: sample a lasso instead of an entry-to-
+    // Non-terminating mode: sample a lasso instead of an entry-to-
     // exit path and splice cycle-closing corrections before solving.
     // maxLassoPeriod caps the orbit's period k; each attempt draws k from
     // [1, maxLassoPeriod], so a run mixes single-lap and multi-lap orbits.
@@ -240,9 +267,10 @@ static GenerateResult generateLeaf(
       // Draw the period per attempt: a k > 1 orbit is a strictly harder
       // constraint (the state must avoid the header state for k-1 laps), so
       // retrying re-rolls it rather than being stuck on one hard k.
-      lassoParams.period = maxLassoPeriod <= 1
-                               ? 1
-                               : (int) (std::uniform_int_distribution<int>(1, maxLassoPeriod)(rng));
+      lassoParams.period =
+          maxLassoPeriod <= 1
+              ? 1
+              : static_cast<int>(std::uniform_int_distribution<int>(1, maxLassoPeriod)(rng));
       maybePath = sampleLasso(cfg, lassoParams);
     } else {
       SamplePathParams pathParams;
@@ -309,27 +337,27 @@ static GenerateResult generateLeaf(
 
       auto [prog, pathLabels] = genFunction(cfg, path, vars, fcfg);
 
-      // [v0.2.3] Non-terminating mode: splice cycle-closing corrections into
+      // Non-terminating mode: splice cycle-closing corrections into
       // the lasso's latch so the header-state fixed point is solvable. The
       // cycle spans the header (path.back()'s first occurrence) to the end;
       // the latch is the block just before the terminating header revisit.
       if (requireNonterm) {
         const std::string &header = path.back();
-        size_t firstHeaderIdx = 0;
-        for (size_t j = 0; j < path.size(); ++j)
+        std::size_t firstHeaderIdx = 0;
+        for (std::size_t j = 0; j < path.size(); ++j)
           if (path[j] == header) {
             firstHeaderIdx = j;
             break;
           }
         std::vector<std::string> cycleLabels;
         std::unordered_set<std::string> seenCycle;
-        for (size_t j = firstHeaderIdx; j < path.size(); ++j)
+        for (std::size_t j = firstHeaderIdx; j < path.size(); ++j)
           if (seenCycle.insert(path[j]).second)
             cycleLabels.push_back("^" + path[j]);
         std::string latchLabel = "^" + path[path.size() - 2];
         // The orbit's period is read off the path, exactly as the solver
         // reads it: k+1 arrivals at the header means k laps.
-        int lassoPeriod = (int) std::count(path.begin(), path.end(), header) - 1;
+        int lassoPeriod = static_cast<int>(std::count(path.begin(), path.end(), header)) - 1;
         spliceNontermCorrections(prog, funcName, cycleLabels, latchLabel, lassoPeriod);
       }
 
@@ -363,7 +391,7 @@ static GenerateResult generateLeaf(
       // Solve
       SymbolicExecutor::Config solverCfg;
       solverCfg.timeout_ms = timeoutMs;
-      solverCfg.seed = baseSeed + (uint32_t) (attempt * 100 + initIdx);
+      solverCfg.seed = baseSeed + static_cast<std::uint32_t>(attempt * 100 + initIdx);
       solverCfg.num_threads = 1;
       solverCfg.num_smt_threads = 1;
       solverCfg.mode = solMode;
@@ -395,7 +423,7 @@ static GenerateResult generateLeaf(
         // pre-rewrite `res.retModel` (the solver's sum) is now stale
         // and is dropped from the SOLVED header so the post-rewrite
         // symiri value can take its place below.
-        size_t crcUpdates = 0;
+        std::size_t crcUpdates = 0;
         if (!noCrc32) {
           crcUpdates = rewriteExitToCrc32Checksum(prog, funcName, res.letExitValues);
         }
@@ -403,7 +431,7 @@ static GenerateResult generateLeaf(
         if (rewriteApplied)
           res.retModel.reset();
 
-        // [v0.2.2] Init suffix is a lowercase letter a..z so descriptor
+        // Init suffix is a lowercase letter a..z so descriptor
         // consumers (rylink) can address a specific concretization by
         // `<funcName><letter>`. nInits is clamped to [1, 26] at CLI
         // parse time, so initIdx is always in range.
@@ -481,9 +509,8 @@ static GenerateResult generateLeaf(
             }
           }
           auto captured = runSymiriCaptureResult(tempPath, "minimal_" + funcName, paramVals);
-          std::error_code ec;
+          [[maybe_unused]] std::error_code ec;
           fs::remove(tempPath, ec); // best-effort; safe to leave on disk
-          (void) ec;
           if (!captured) {
             if (verbose) {
               std::cerr << "[oracle] init " << initIdx
@@ -505,7 +532,7 @@ static GenerateResult generateLeaf(
         // never returns, so the check is unreachable at runtime and any
         // literal is sound; use a random i32 so the anchor value varies.
         if (requireNonterm && emitMain && expectedRet.empty())
-          expectedRet = std::to_string((int32_t) rng());
+          expectedRet = std::to_string(static_cast<std::int32_t>(rng()));
 
         // Now that we have the expected return value we can build a faithful
         // `@main` wrapper that asserts it via `@check_chksum`. This
@@ -524,7 +551,7 @@ static GenerateResult generateLeaf(
             std::cerr << "error: cannot open " << concretePath << "\n";
             continue;
           }
-          // [v0.2.2] SOLVED header (same format as symirsolve --output).
+          // SOLVED header (same format as symirsolve --output).
           // Records the synthesised param + ret values so symiri can
           // re-run via `--main @f <file> -- <p0> <p1>` deterministically.
           if (!res.paramModel.empty() || !expectedRet.empty()) {
@@ -544,7 +571,7 @@ static GenerateResult generateLeaf(
           printer.print(prog);
         }
 
-        // [v0.2.2] Use the metadata we snapshotted above (entry may now
+        // Use the metadata we snapshotted above (entry may now
         // be dangling thanks to the @main push_back). Param values
         // are in declaration order — symiri positional args need that
         // ordering at validate time. Syms are in declaration order so
@@ -562,7 +589,8 @@ static GenerateResult generateLeaf(
         if (requireNonterm) {
           cf.nontermHeader = pathLabels.back();
           cf.nontermPeriod =
-              (int) std::count(pathLabels.begin(), pathLabels.end(), cf.nontermHeader) - 1;
+              static_cast<int>(std::count(pathLabels.begin(), pathLabels.end(), cf.nontermHeader)) -
+              1;
         }
         produced.push_back(std::move(cf));
         if (emitDesc) {
@@ -643,7 +671,7 @@ int main(int argc, char **argv) {
     ("require-reducible", "Only generate reducible CFGs (irreducible back edges are repaired away)")
     // Solver
     ("timeout",           "SMT solver timeout per attempt in ms",
-                          cxxopts::value<uint32_t>()->default_value("2000"))
+                          cxxopts::value<std::uint32_t>()->default_value("2000"))
     ("require-ub",        "Force at least one UB to be triggered on the chosen path")
     ("require-nonterm",   "Generate UB-free programs that diverge on the sampled input (samples a lasso; implies --require-reducible and --no-crc32)")
     ("max-lasso-period",  "Cap the lasso orbit's period k under --require-nonterm; each attempt draws k from [1, N]. k > 1 means the header state recurs only after k laps",
@@ -666,7 +694,7 @@ int main(int argc, char **argv) {
     ("p-large-coef",      "Fraction of new on-path coefs forced to |c| > --large-coef",
                           cxxopts::value<double>()->default_value("0.3"))
     ("large-coef",        "Magnitude threshold T for the |c| > T interest require (clamped per-coef to --coef-domain)",
-                          cxxopts::value<int64_t>()->default_value("1048576"))
+                          cxxopts::value<std::int64_t>()->default_value("1048576"))
     // Output
     ("o,output-dir",      "Output directory",
                           cxxopts::value<std::string>()->default_value("rysmith_out"))
@@ -687,7 +715,7 @@ int main(int argc, char **argv) {
     ("validate",          "Run symiri on each concrete .sir to validate")
     // Misc
     ("seed",              "Master RNG seed (default: random)",
-                          cxxopts::value<uint32_t>())
+                          cxxopts::value<std::uint32_t>())
     ("v,verbose",         "Verbose output")
     ("h,help",            "Print usage");
   // clang-format on
@@ -706,7 +734,7 @@ int main(int argc, char **argv) {
   }
 
   // ---- Parse domains -------------------------------------------------------
-  int64_t coefLo, coefHi, valueLo, valueHi, indexLo, indexHi;
+  std::int64_t coefLo, coefHi, valueLo, valueHi, indexLo, indexHi;
   try {
     auto [clo, chi] = parseDomain(result["coef-domain"].as<std::string>());
     auto [vlo, vhi] = parseDomain(result["value-domain"].as<std::string>());
@@ -723,12 +751,13 @@ int main(int argc, char **argv) {
   }
 
   // ---- Setup ---------------------------------------------------------------
-  uint32_t masterSeed =
-      result.count("seed") ? result["seed"].as<uint32_t>() : (uint32_t) std::random_device{}();
+  std::uint32_t masterSeed = result.count("seed")
+                                 ? result["seed"].as<std::uint32_t>()
+                                 : static_cast<std::uint32_t>(std::random_device{}());
   std::cout << "rysmith: master seed = " << masterSeed << "\n";
   std::mt19937 rng(masterSeed);
 
-  // [v0.2.2] 6-char hex generation ID — namespaces function and struct
+  // 6-char hex generation ID — namespaces function and struct
   // names so multiple rysmith outputs link without rename. The ID is
   // always derived from the master seed (via genHexId) so two runs with
   // the same --seed reproduce the same ID; there is no CLI override.
@@ -747,7 +776,7 @@ int main(int argc, char **argv) {
   typeCfg.maxAggNesting = result["max-agg-nest"].as<int>();
   typeCfg.maxAggElems = result["max-agg-elems"].as<int>();
 
-  // [v0.2.3] --require-nonterm: generate diverging (⇑) programs. The type
+  // --require-nonterm: generate diverging (⇑) programs. The type
   // lattice is unrestricted — spliceNontermCorrections closes every scalar
   // leaf of a touched let (integer, floating-point, or pointer) with the same
   // additive correction, so the header fixed point stays solvable over the
@@ -807,7 +836,7 @@ int main(int argc, char **argv) {
   int nStmts = result["n-stmts"].as<int>();
   int maxLoopIter = result["max-loop-iter"].as<int>();
   int minLoopIter = result["min-loop-iter"].as<int>();
-  // [v0.2.2] Clamp to [1, 26] — each init's concrete file is named
+  // Clamp to [1, 26] — each init's concrete file is named
   // with a lowercase-letter suffix `func_<id>_<i><a..z>.sir`, so
   // 26 is the natural cap. 0 is meaningless (no concretization).
   int nInits = result["n-inits"].as<int>();
@@ -828,19 +857,21 @@ int main(int argc, char **argv) {
     std::cerr << "error: --p-large-coef must be in [0, 1] (got " << pLargeCoef << ")\n";
     return 2;
   }
-  int64_t largeCoefThreshold = result["large-coef"].as<int64_t>();
+  std::int64_t largeCoefThreshold = result["large-coef"].as<std::int64_t>();
   if (largeCoefThreshold < 0) {
     std::cerr << "error: --large-coef must be >= 0 (got " << largeCoefThreshold << ")\n";
     return 2;
   }
-  uint32_t timeoutMs = result["timeout"].as<uint32_t>();
+  std::uint32_t timeoutMs = result["timeout"].as<std::uint32_t>();
   SolvingMode solMode = result.count("require-ub") ? SolvingMode::RequireUB : SolvingMode::UBFree;
   if (requireNonterm)
     solMode = SolvingMode::RequireNonterm;
   // Wall-clock budget per function: covers all retries × inits plus 50 ms for non-solver overhead
   // (CFG gen, path sampling, formula construction, SIRPrinter). Compilation runs outside the
   // thread.
-  uint32_t funcTimeoutMs = (uint32_t) ((uint64_t) (maxRetries + 1) * nInits * timeoutMs + 50);
+  std::uint32_t funcTimeoutMs = static_cast<std::uint32_t>(
+      static_cast<std::uint64_t>(maxRetries + 1) * nInits * timeoutMs + 50
+  );
   bool keepSymbolic = result.count("keep-symbolic") > 0;
   bool emitDesc = result.count("emit-desc") > 0;
   bool doValidate = result.count("validate") > 0;
@@ -881,7 +912,7 @@ int main(int argc, char **argv) {
                  solMode == SolvingMode::RequireNonterm;
   std::string target = result["target"].as<std::string>();
   bool noRequire = !result.count("keep-require");
-  // [v0.2.3] UB-free generation (the default) produces programs the
+  // UB-free generation (the default) produces programs the
   // solver guarantees never trigger UB on the concretized path, so the
   // backends' dynamic UB guards are dead weight — drop them. --require-ub
   // deliberately triggers UB, so its guards must stay; --keep-ub-guards
@@ -936,7 +967,7 @@ int main(int argc, char **argv) {
   for (int i = 0; i < nFuncs; i++) {
     std::string funcName =
         std::string(reify::rysmith::hp::kFuncPrefix) + "_" + genId + "_" + std::to_string(i);
-    uint32_t funcSeed = rng();
+    std::uint32_t funcSeed = rng();
     std::cout << "[" << (i + 1) << "/" << nFuncs << "] generating " << funcName
               << " (seed=" << funcSeed << ")\n";
 
@@ -950,7 +981,7 @@ int main(int argc, char **argv) {
 
     auto *state = new FuncState{std::mt19937(funcSeed), {}, false};
 
-    // [v0.2.2] Per-function copy so funcIdx makes it into struct names
+    // Per-function copy so funcIdx makes it into struct names
     // (`@struct_<id>_<funcIdx>_<j>`). Without this every sibling fun in
     // the same rysmith run would emit `@struct_<id>_0` etc, breaking
     // rylink's bundle merge on a name vs. content mismatch.
@@ -1028,18 +1059,8 @@ int main(int argc, char **argv) {
       bool allOk = true;
       for (const auto &cf: genRes.produced) {
         const fs::path &p = cf.path;
-        std::string stem = p.stem().string();
-        std::string baseFuncName = stem;
-        if (stem.size() >= 2) {
-          char last = stem.back();
-          char prev = stem[stem.size() - 2];
-          if (last >= 'a' && last <= 'z' && std::isdigit((unsigned char) prev))
-            baseFuncName = stem.substr(0, stem.size() - 1);
-        }
-        std::vector<std::string> paramArgs;
-        paramArgs.reserve(cf.rz.paramValues.size());
-        for (const auto &pv: cf.rz.paramValues)
-          paramArgs.push_back(pv.second);
+        std::string baseFuncName = getBaseFuncName(p);
+        std::vector<std::string> paramArgs = extractParamArgs(cf.rz);
         bool ok =
             validateNontermDiverges(p, baseFuncName, paramArgs, cf.nontermHeader, cf.nontermPeriod);
         std::cout << "  validated: " << (ok ? "OK" : "FAIL") << "(" << p.filename() << ")\n";
@@ -1058,28 +1079,8 @@ int main(int argc, char **argv) {
       bool allOk = true;
       for (const auto &cf: genRes.produced) {
         const fs::path &p = cf.path;
-        // [v0.2.2] Strip the trailing init-letter suffix (`a`..`z`)
-        // from the stem to recover the base function name. Stems are
-        // either `func_<id>_<i>` (single init) or `func_<id>_<i><a..z>`
-        // (multi-init); drop one trailing lowercase letter when the
-        // last char is a letter and the char before it is a digit
-        // (so the trailing `<id>_<i>` digit run is preserved).
-        std::string stem = p.stem().string();
-        std::string baseFuncName = stem;
-        if (stem.size() >= 2) {
-          char last = stem.back();
-          char prev = stem[stem.size() - 2];
-          if (last >= 'a' && last <= 'z' && std::isdigit((unsigned char) prev))
-            baseFuncName = stem.substr(0, stem.size() - 1);
-        }
-        // Param values came straight from the solver's model — no
-        // need to re-parse the SOLVED header. Flatten the
-        // declaration-order (name, value) pairs into the bare
-        // value list `symiri --` expects.
-        std::vector<std::string> paramArgs;
-        paramArgs.reserve(cf.rz.paramValues.size());
-        for (const auto &pv: cf.rz.paramValues)
-          paramArgs.push_back(pv.second);
+        std::string baseFuncName = getBaseFuncName(p);
+        std::vector<std::string> paramArgs = extractParamArgs(cf.rz);
         // Run the on-disk full program through symiri once. When
         // validating, its Result is asserted equal to the descriptor's
         // retValue (captured from the independent minimal oracle at emit
@@ -1144,7 +1145,7 @@ int main(int argc, char **argv) {
     }
   }
 
-  // [v0.2.2] Single end-of-run orphan sweep.  When a per-function wall-clock
+  // Single end-of-run orphan sweep.  When a per-function wall-clock
   // timeout fires, the detached worker may have already written some
   // concrete .sir files into outDir before we abandoned it.  The compile-
   // to-target step then skips that function, leaving the .sir on disk

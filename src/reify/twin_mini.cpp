@@ -1,4 +1,5 @@
 #include "reify/twin_mini.hpp"
+#include "reify/ast_builder.hpp"
 
 namespace refractir::reify {
 
@@ -16,10 +17,12 @@ namespace refractir::reify {
       return std::make_shared<Type>(Type{ft, {}});
     }
     if (v.bits == 32)
-      return std::make_shared<Type>(Type{IntType{IntType::Kind::I32, {}, {}}, {}});
+      return makeI32();
     if (v.bits == 64)
-      return std::make_shared<Type>(Type{IntType{IntType::Kind::I64, {}, {}}, {}});
-    return std::make_shared<Type>(Type{IntType{IntType::Kind::ICustom, (int) v.bits, {}}, {}});
+      return makeI64();
+    return std::make_shared<Type>(
+        Type{IntType{IntType::Kind::ICustom, static_cast<int>(v.bits), {}}, {}}
+    );
   }
 
   std::string leafKey(const std::string &root, const std::vector<Access> &path) {

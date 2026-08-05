@@ -13,15 +13,15 @@
 #include <unordered_set>
 #include <vector>
 
+#include <limits>
 #include "ast/ast.hpp"
 #include "reify/antiopt.hpp"
+#include "reify/ast_builder.hpp"
 
 namespace refractir::reify::antiopt {
 
   // --- builders -------------------------------------------------------------
 
-  LValue localLV(const std::string &n);
-  Expr simpleExpr(Atom a);
   Instr assignInstr(const LValue &lhs, Expr rhs);
 
   Atom localAtom(const std::string &n);
@@ -49,7 +49,10 @@ namespace refractir::reify::antiopt {
 
   // The width the self-test works at, so a rule states its overflow condition
   // once rather than in each of its two arms.
-  inline bool fitsI8(std::int64_t v) { return v >= -128 && v <= 127; }
+  inline constexpr bool fitsI8(std::int64_t v) noexcept {
+    return v >= std::numeric_limits<std::int8_t>::min() &&
+           v <= std::numeric_limits<std::int8_t>::max();
+  }
 
   // --- dependence -----------------------------------------------------------
 

@@ -1,15 +1,14 @@
 #pragma once
 
-// [v0.2.2] Call-realization transform for rylink.
+// Call-realization transform for rylink.
 //
 // CallRealizeTransform is the whole-program Transform that turns rylink's
 // chosen call-graph into real `call @callee(args)` sites. For each planned
 // caller->callee edge it finds semantically-safe rewrite sites in the caller
 // and substitutes them with a call whose solved arguments reproduce the
 // original value. The site-finding is a small peephole engine over pluggable
-// CallRewriteRules; v1 ships LiteralToCallRule, which rewrites scalar-literal
-// `let` initializers. Future rules (unchanged-var-to-call, binop-fold-to-call,
-// etc.) plug in without touching the transform.
+// CallRewriteRules; ships LiteralToCallRule, which rewrites scalar-literal
+// `let` initializers. Additional rules plug in without touching the transform.
 //
 // This is one instance of the peephole tier defined in reify/rewrite.hpp;
 // see that header for the R1-R3 rule contract, and in particular for why
@@ -33,14 +32,14 @@ namespace refractir::reify {
 
   // A candidate location inside a FunDecl where a rewrite could fire.
   // Opaque to the engine — only the rule that produced it knows how to
-  // apply it. Kind discriminates so a future engine can sort/filter by
-  // category, but at v1 there's only one kind.
+  // apply it. Kind discriminates so the engine can sort or filter by
+  // category.
   struct CallRewriteSite {
     enum class Kind { LetInitIntLit, LetInitFloatLit };
     Kind kind;
     // Index into FunDecl::lets. The rule that emitted this site is
     // responsible for re-validating the index before applying (cheap
-    // because v1 only mutates the init value, not the lets vector).
+    // because literal rewriting mutates the init value, not the lets vector).
     int letIdx = 0;
     // The literal's value and its SIR-surface type-string. Used by the
     // engine to filter callees whose retType / ret value match without
@@ -56,8 +55,8 @@ namespace refractir::reify {
   class CallRewriteRule {
   public:
     virtual ~CallRewriteRule() = default;
-    virtual const char *name() const = 0;
-    virtual std::vector<CallRewriteSite> findSites(const FunDecl &caller) = 0;
+    [[nodiscard]] virtual const char *name() const = 0;
+    [[nodiscard]] virtual std::vector<CallRewriteSite> findSites(const FunDecl &caller) = 0;
     // Decide whether the site can be rewritten by calling into
     // `callee` using `fixedRealizationIdx` as the bundled realization
     // (the engine has already locked which realization runs at the
@@ -77,8 +76,8 @@ namespace refractir::reify {
     ) = 0;
   };
 
-  // v1 rule: literal `let` initializers (scalar Int/Float).
-  std::unique_ptr<CallRewriteRule> makeLiteralToCallRule();
+  // Rule for scalar Int/Float literal let initializers.
+  [[nodiscard]] std::unique_ptr<CallRewriteRule> makeLiteralToCallRule();
 
   // One planned call-graph edge: realize a call from `caller` into `callee`,
   // pinned to `calleeRealizationIdx`. Functions are named (canonical "@...")
@@ -101,7 +100,7 @@ namespace refractir::reify {
 
   // Whole-program call-realization transform. Owns the peephole rules and
   // walks `plan.edges` in order, realizing each. Build one with
-  // makeCallRealizeTransform (pre-loaded with the v1 literal rule) and run it
+  // makeCallRealizeTransform (pre-loaded with LiteralToCallRule) and run it
   // through a TransformPipeline like any other Transform.
   class CallRealizeTransform : public Transform {
   public:
@@ -109,7 +108,7 @@ namespace refractir::reify {
 
     void addRule(std::unique_ptr<CallRewriteRule> r) { rules_.push_back(std::move(r)); }
 
-    std::string_view name() const override { return "CallRealizeTransform"; }
+    [[nodiscard]] std::string_view name() const override { return "CallRealizeTransform"; }
 
     // Resolve each planned edge's caller/callee (FunDecl from `prog`,
     // FuncDescriptor from `ctx.descriptors`) and realize it, drawing all
@@ -160,8 +159,8 @@ namespace refractir::reify {
     std::set<std::pair<const FunDecl *, int>> consumed_;
   };
 
-  // Build a CallRealizeTransform pre-loaded with the v1 rule set
-  // (LiteralToCallRule). This is the entry point rylink adds to its pipeline.
-  std::unique_ptr<Transform> makeCallRealizeTransform(CallRealizePlan plan);
+  // Build a CallRealizeTransform pre-loaded with LiteralToCallRule.
+  // This is the entry point rylink adds to its pipeline.
+  [[nodiscard]] std::unique_ptr<Transform> makeCallRealizeTransform(CallRealizePlan plan);
 
 } // namespace refractir::reify

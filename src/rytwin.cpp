@@ -1,5 +1,5 @@
 /**
- * rytwin — equivalence-preserving RefractIR program transformer (v0.2.3).
+ * rytwin — equivalence-preserving RefractIR program transformer.
  *
  * Given a generated program `p1` (a rysmith leaf or a rylink whole
  * program), rytwin produces an equivalent program `p2`. It first obtains
@@ -52,34 +52,28 @@ using namespace refractir;
 static constexpr std::uint64_t kNoDescProfileStepCap = 3200;
 using namespace refractir::reify;
 
-static std::string readFile(const fs::path &p) {
-  std::ifstream ifs(p);
-  std::stringstream ss;
-  ss << ifs.rdbuf();
-  return ss.str();
-}
-
 // Parse p1's `// SOLVED: %p0=…, %p1=…, ret=…` header (written by rysmith
 // and symirsolve --output) into name → canonical value text. Values are
 // emitted by the canonical formatters, so they are safe to pass verbatim as
 // symiri positional args.
-static std::unordered_map<std::string, std::string> parseSolvedHeader(const std::string &src) {
+[[nodiscard]] static std::unordered_map<std::string, std::string>
+parseSolvedHeader(const std::string &src) {
   std::unordered_map<std::string, std::string> kv;
   const std::string tag = "// SOLVED:";
-  size_t pos = src.find(tag);
+  std::size_t pos = src.find(tag);
   if (pos == std::string::npos)
     return kv;
-  size_t eol = src.find('\n', pos);
+  std::size_t eol = src.find('\n', pos);
   std::string line = src.substr(pos + tag.size(), eol - pos - tag.size());
   std::stringstream ss(line);
   std::string part;
   while (std::getline(ss, part, ',')) {
-    size_t eq = part.find('=');
+    std::size_t eq = part.find('=');
     if (eq == std::string::npos)
       continue;
     auto trim = [](std::string s) {
-      size_t b = s.find_first_not_of(" \t");
-      size_t e = s.find_last_not_of(" \t");
+      std::size_t b = s.find_first_not_of(" \t");
+      std::size_t e = s.find_last_not_of(" \t");
       return b == std::string::npos ? std::string{} : s.substr(b, e - b + 1);
     };
     kv[trim(part.substr(0, eq))] = trim(part.substr(eq + 1));
@@ -92,7 +86,7 @@ static std::unordered_map<std::string, std::string> parseSolvedHeader(const std:
 // back to p1's SOLVED header, and default to 0. rytwin profiles p1 at these
 // values, so getting them wrong is loud: rysmith programs `require`
 // interest conditions on their inputs, and a wrong input traps there.
-static std::vector<std::string> resolveParamArgs(
+[[nodiscard]] static std::vector<std::string> resolveParamArgs(
     const FunDecl &fn, const fs::path &sirFile, const std::optional<FuncDescriptor> &desc,
     const std::string &src
 ) {
@@ -125,7 +119,7 @@ static std::vector<std::string> resolveParamArgs(
 // `func_<id>_<i><a..z>.sir` (multi-init); the shared descriptor is
 // `func_<id>_<i>.json`. Recover the descriptor stem by dropping a trailing
 // init letter when it follows a digit (so the `<i>` digit run is kept).
-static std::string descriptorStem(const std::string &sirStem) {
+[[nodiscard]] static std::string descriptorStem(const std::string &sirStem) {
   if (sirStem.size() >= 2) {
     char last = sirStem.back();
     char prev = sirStem[sirStem.size() - 2];
@@ -138,11 +132,12 @@ static std::string descriptorStem(const std::string &sirStem) {
 // The entry function of a rysmith leaf program: the sole `fun` that is not
 // the optional `@main` wrapper or a `@__twg_` guard from an earlier rytwin
 // run. Prefer the descriptor's name when we have one — it is authoritative.
-static std::string findEntry(const Program &prog, const std::optional<FuncDescriptor> &desc) {
+[[nodiscard]] static std::string
+findEntry(const Program &prog, const std::optional<FuncDescriptor> &desc) {
   if (desc && !desc->name.empty())
     return desc->name;
   for (const auto &f: prog.funs)
-    if (f.name.name != "@main" && f.name.name.rfind("@__twg_", 0) != 0)
+    if (f.name.name != "@main" && !f.name.name.starts_with("@__twg_"))
       return f.name.name;
   return prog.funs.empty() ? std::string{} : prog.funs.front().name.name;
 }
@@ -161,7 +156,7 @@ int main(int argc, char **argv) {
     ("twin-select", "Which regions to twin: random (coin per candidate) or "
                 "interesting (per-region softmax probability of interestingness)",
                 cxxopts::value<std::string>()->default_value("random"))
-    ("seed",    "RNG seed (default: random)", cxxopts::value<uint32_t>())
+    ("seed",    "RNG seed (default: random)", cxxopts::value<std::uint32_t>())
     ("target",  "Compile p2 to a target (sir = no compilation)",
                 cxxopts::value<std::string>()->default_value("sir"))
     ("keep-require", "Keep require checks in compiled output")
@@ -208,8 +203,8 @@ int main(int argc, char **argv) {
   fs::path inputPath = result["input"].as<std::string>();
   fs::path outputPath = result["output"].as<std::string>();
   double pTwin = result["p-twin"].as<double>();
-  uint32_t seed =
-      result.count("seed") ? result["seed"].as<uint32_t>() : (uint32_t) std::random_device{}();
+  std::uint32_t seed = result.count("seed") ? result["seed"].as<std::uint32_t>()
+                                            : static_cast<std::uint32_t>(std::random_device{}());
 
   std::string selectStr = result["twin-select"].as<std::string>();
   if (selectStr != "random" && selectStr != "interesting") {
@@ -228,7 +223,7 @@ int main(int argc, char **argv) {
     return 2;
   }
   bool keepRequire = result.count("keep-require") > 0;
-  // [v0.2.3] The twin is assumed UB-free — the interpreter profiling it
+  // The twin is assumed UB-free — the interpreter profiling it
   // rides on would fail on any UB — so drop the backends' dynamic UB
   // guards by default. --keep-ub-guards forces them back on (e.g. to
   // catch a mis-transformed twin trapping instead of misbehaving).
@@ -244,8 +239,9 @@ int main(int argc, char **argv) {
   // 1. Load p1. Keep the source alive: Lexer holds a std::string_view into
   // it, so a temporary would dangle.
   Program prog;
-  std::string src = readFile(inputPath);
+  std::string src;
   try {
+    src = readFile(inputPath);
     Lexer lx(src);
     Parser ps(lx.lexAll());
     prog = ps.parseProgram();
@@ -313,7 +309,13 @@ int main(int argc, char **argv) {
   std::optional<StateProfile> profile;
   fs::path statePath = dir / (stem + ".state.json");
   if (fs::exists(statePath)) {
-    profile = readStateProfileJson(readFile(statePath));
+    try {
+      std::string json = readFile(statePath);
+      profile = readStateProfileJson(json);
+    } catch (const std::exception &e) {
+      std::cerr << "rytwin: warning: could not read state profile " << statePath << ": " << e.what()
+                << " — falling back to in-process profiling\n";
+    }
     if (!profile)
       std::cerr << "rytwin: warning: could not parse state profile " << statePath
                 << " — falling back to in-process profiling\n";
@@ -372,7 +374,7 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  // 6. Emit p2.
+  // 5. Emit p2.
   std::ofstream ofs(outputPath);
   if (!ofs) {
     std::cerr << "rytwin: cannot open " << outputPath << " for writing\n";
@@ -387,7 +389,7 @@ int main(int argc, char **argv) {
   std::cout << "rytwin: wrote " << outputPath << " (" << rep.sites << " twin(s), entry " << entry
             << ")\n";
 
-  // 7. Validate equivalence: run p1 and p2 on the profiled input and assert
+  // 6. Validate equivalence: run p1 and p2 on the profiled input and assert
   // they agree (same Result, or both trap).
   if (doValidate) {
     auto r1 = runSymiriCaptureResult(inputPath, profEntry, args);
@@ -412,7 +414,7 @@ int main(int argc, char **argv) {
       return 1;
   }
 
-  // 8. Optionally compile p2 to C / WASM (in-process, like rysmith / rylink).
+  // 7. Optionally compile p2 to C / WASM (in-process, like rysmith / rylink).
   if (target != "sir") {
     fs::path outCompiled = outputPath;
     outCompiled.replace_extension(target == "c" ? ".c" : ".wat");

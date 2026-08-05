@@ -9,7 +9,7 @@
 namespace refractir::reify {
 
   struct SamplePathParams {
-    uint32_t seed = 0;
+    std::uint32_t seed = 0;
     int maxLoopIter = 1;
     // If > 0, the sampler guarantees that at least one back edge in the
     // returned path is traversed at least this many times. Returns nullopt
@@ -18,11 +18,11 @@ namespace refractir::reify {
     int maxPathLen = 50;
   };
 
-  std::optional<std::vector<std::string>>
+  [[nodiscard]] std::optional<std::vector<std::string>>
   samplePath(const RyCFG &cfg, const SamplePathParams &params);
 
   struct SampleLassoParams {
-    uint32_t seed = 0;
+    std::uint32_t seed = 0;
     int maxPathLen = 50;
     // Number of laps of the cycle to emit (the orbit's period k). 1 is the
     // classic single-lap fixed point; k > 1 asks the solver for an orbit that
@@ -30,10 +30,10 @@ namespace refractir::reify {
     int period = 1;
   };
 
-  // [v0.2.3] Sample a *lasso* path for non-terminating generation:
+  // Sample a *lasso* path for non-terminating generation:
   //
-  //   entry -> ... -> h -> ... -> src -> h
-  //   \___ stem ρ ___/\____ cycle γ ____/
+  // entry -> ... -> h -> ... -> src -> h
+  // \___ stem ρ ___/\____ cycle γ ____/
   //
   // where (src -> h) is a back edge and `h` a genuine loop header (its
   // target dominates its source in a reducible CFG — the mode gates on
@@ -43,7 +43,7 @@ namespace refractir::reify {
   // solver's RequireNonterm mode certifies the ω via header-state recurrence.
   // Returns nullopt if the CFG has no usable back edge or the stem/cycle
   // cannot be connected (caller retries with a fresh CFG).
-  std::optional<std::vector<std::string>>
+  [[nodiscard]] std::optional<std::vector<std::string>>
   sampleLasso(const RyCFG &cfg, const SampleLassoParams &params);
 
 } // namespace refractir::reify

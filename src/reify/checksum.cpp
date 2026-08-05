@@ -1,4 +1,5 @@
 #include "reify/checksum.hpp"
+#include "reify/ast_builder.hpp"
 
 #include "analysis/type_utils.hpp"
 
@@ -91,30 +92,9 @@ namespace refractir::reify {
     // program level. Idempotent: only appends a new IntrinsicDecl when no
     // matching signature is already present.
     void ensureCrc32UpdateDecl(Program &prog) {
-      auto makeI32Decl = []() {
-        return std::make_shared<Type>(Type{IntType{IntType::Kind::I32, {}, {}}, {}});
-      };
-      for (const auto &id: prog.intrinsics) {
-        if (id.name.name != "@crc32_update")
-          continue;
-        if (id.params.size() != 2)
-          continue;
-        auto pb1 = intBitWidth(id.params[1].type);
-        if (pb1 == 32)
-          return; // already declared at i32 val width
-      }
-      IntrinsicDecl id;
-      id.name = GlobalId{"@crc32_update", {}};
-      id.retType = makeI32Decl();
-      ParamDecl state;
-      state.name = LocalId{"%state", {}};
-      state.type = makeI32Decl();
-      ParamDecl val;
-      val.name = LocalId{"%val", {}};
-      val.type = makeI32Decl();
-      id.params.push_back(std::move(state));
-      id.params.push_back(std::move(val));
-      prog.intrinsics.push_back(std::move(id));
+      ensureIntrinsicDecl(
+          prog, "@crc32_update", makeI32(), {{"%state", makeI32()}, {"%val", makeI32()}}
+      );
     }
 
   } // namespace
@@ -224,10 +204,6 @@ namespace refractir::reify {
     // let list for non-i32 pointees (CastAtom cannot wrap a
     // LoadAtom, so the load needs a named scratch to cast from).
     int scratchCounter = 0;
-    auto makeI32Decl = []() {
-      return std::make_shared<Type>(Type{IntType{IntType::Kind::I32, {}, {}}, {}});
-    };
-    auto chkLValue = []() { return LValue{LocalId{"%_chk", {}}, {}, {}}; };
 
     // Collect snapshot of ptr lets up-front; we'll push_back new
     // `%_pld_*` lets and walking the live vector while mutating it
@@ -282,7 +258,7 @@ namespace refractir::reify {
         // valAtom = (%_pld_n as i32)
         CastAtom cast;
         cast.src = LValue{LocalId{slotName, {}}, {}, {}};
-        cast.dstType = makeI32Decl();
+        cast.dstType = makeI32();
         valAtom = Atom{std::move(cast), {}};
       }
       // %_chk = call @crc32_update(%_chk, valAtom);
@@ -291,7 +267,7 @@ namespace refractir::reify {
       call.args.push_back(std::make_shared<Expr>(chkReadExpr()));
       call.args.push_back(std::make_shared<Expr>(atomToExpr(std::move(valAtom))));
       AssignInstr chkUpd;
-      chkUpd.lhs = chkLValue();
+      chkUpd.lhs = localLV("%_chk");
       chkUpd.rhs = atomToExpr(Atom{std::move(call), {}});
       exit->instrs.push_back(Instr{std::move(chkUpd)});
       ++updates;
@@ -307,10 +283,6 @@ namespace refractir::reify {
   // ---------------------------------------------------------------------------
 
   namespace {
-
-    static TypePtr makeI32() {
-      return std::make_shared<Type>(Type{IntType{IntType::Kind::I32, {}, {}}, {}});
-    }
 
     // Convert one solver-extracted LetExitValue into an AST InitVal of
     // the matching shape. `declType` is the let's declared type — used

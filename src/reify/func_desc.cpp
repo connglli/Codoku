@@ -167,10 +167,10 @@ namespace refractir::reify {
   namespace {
 
     struct P {
-      const std::string &s;
+      std::string_view s;
       size_t i = 0;
 
-      explicit P(const std::string &in) : s(in) {}
+      explicit P(std::string_view in) : s(in) {}
 
       void skipWs() {
         while (i < s.size() && std::isspace((unsigned char) s[i]))
@@ -343,7 +343,7 @@ namespace refractir::reify {
 
   } // namespace
 
-  std::optional<FuncDescriptor> parseFuncDescriptor(const std::string &json) {
+  std::optional<FuncDescriptor> parseFuncDescriptor(std::string_view json) {
     P p(json);
     if (!p.match('{'))
       return std::nullopt;

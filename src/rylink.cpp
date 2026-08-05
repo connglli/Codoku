@@ -1,5 +1,5 @@
 /**
- * rylink — whole-program generator over a rysmith function pool (v0.2.2).
+ * rylink — whole-program generator over a rysmith function pool.
  *
  * Pipeline per generated program:
  *   1. Pick K functions from the pool (K from --n-nodes, capped by pool size).
@@ -27,6 +27,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <numeric>
 #include <random>
 #include <sstream>
 #include <string>
@@ -68,19 +69,13 @@ using namespace refractir::reify;
 // Small helpers
 // ---------------------------------------------------------------------------
 
-static std::string readFile(const fs::path &p) {
-  std::ifstream ifs(p);
-  std::stringstream ss;
-  ss << ifs.rdbuf();
-  return ss.str();
-}
 
 // Parse a rysmith-emitted .sir file into a Program. We deliberately skip
 // the heavy analysis passes (sem/type/reachability) — rysmith produced
 // these files itself and they're trusted well-formed.
-static std::optional<Program> parseSir(const fs::path &p) {
-  std::string src = readFile(p);
+[[nodiscard]] static std::optional<Program> parseSir(const fs::path &p) {
   try {
+    std::string src = readFile(p);
     Lexer lx(src);
     auto toks = lx.lexAll();
     Parser ps(std::move(toks));
@@ -96,21 +91,21 @@ static std::optional<Program> parseSir(const fs::path &p) {
 // ---------------------------------------------------------------------------
 
 struct Node {
-  int idx;               // index in the CG
-  size_t poolIdx;        // index into FuncPool::entries
-  size_t realizationIdx; // which realization we picked
-  std::string funcName;  // e.g. "@func_<id>_<i>"
-  std::string stem;      // basename without ".sir" — used for sourceStem
-  FunDecl *fn = nullptr; // points into the merged bundle's funs
+  int idx;                    // index in the CG
+  std::size_t poolIdx;        // index into FuncPool::entries
+  std::size_t realizationIdx; // which realization we picked
+  std::string funcName;       // e.g. "@func_<id>_<i>"
+  std::string stem;           // basename without ".sir" — used for sourceStem
+  FunDecl *fn = nullptr;      // points into the merged bundle's funs
 };
 
 // Pick K entries from the pool without replacement (capped by pool size).
 // Duplicates would require renaming support we don't have yet, so when K
 // exceeds the pool we shrink K rather than reuse entries.
-static std::vector<size_t> pickPoolIndices(std::mt19937 &rng, size_t k, size_t poolSize) {
-  std::vector<size_t> all(poolSize);
-  for (size_t i = 0; i < poolSize; ++i)
-    all[i] = i;
+[[nodiscard]] static std::vector<std::size_t>
+pickPoolIndices(std::mt19937 &rng, std::size_t k, std::size_t poolSize) {
+  std::vector<std::size_t> all(poolSize);
+  std::iota(all.begin(), all.end(), 0);
   std::shuffle(all.begin(), all.end(), rng);
   if (k > poolSize)
     k = poolSize;
@@ -124,7 +119,7 @@ static std::vector<size_t> pickPoolIndices(std::mt19937 &rng, size_t k, size_t p
 // semchecker's notion of "same intrinsic signature" exactly (it keys on
 // name + parameter types only); including the return type here would let
 // rylink stage a bundle that the semchecker then rejects as duplicate.
-static std::string intrinsicKey(const IntrinsicDecl &d) {
+[[nodiscard]] static std::string intrinsicKey(const IntrinsicDecl &d) {
   std::string key = d.name.name;
   for (const auto &p: d.params)
     key += "|" + SIRPrinter::typeToString(p.type);
@@ -140,10 +135,10 @@ static std::string intrinsicKey(const IntrinsicDecl &d) {
 // same run. We compare by field name + SIR-surface type string so a
 // collision is detected up front instead of silently keeping the
 // first decl and miscompiling the second program.
-static bool structsEqual(const StructDecl &a, const StructDecl &b) {
+[[nodiscard]] static bool structsEqual(const StructDecl &a, const StructDecl &b) {
   if (a.fields.size() != b.fields.size())
     return false;
-  for (size_t i = 0; i < a.fields.size(); ++i) {
+  for (std::size_t i = 0; i < a.fields.size(); ++i) {
     if (a.fields[i].name != b.fields[i].name)
       return false;
     if (SIRPrinter::typeToString(a.fields[i].type) != SIRPrinter::typeToString(b.fields[i].type))
@@ -163,7 +158,7 @@ static bool structsEqual(const StructDecl &a, const StructDecl &b) {
 // held by the per-program Node table across subsequent merges; without
 // the reserve a later push_back would reallocate and invalidate every
 // earlier pointer. Assert rather than silently corrupt.
-static FunDecl *mergeInto(
+[[nodiscard]] static FunDecl *mergeInto(
     Program &bundle, Program src, const std::string &sourceStem,
     std::unordered_map<std::string, std::size_t> &haveStructs,
     std::unordered_set<std::string> &haveIntrinsics
@@ -254,15 +249,15 @@ struct PerProgConfig {
                            // (per-program resolution against `random`
                            // happens inside generateOne so each prog
                            // sweeps independently — matching rysmith).
-  // [v0.2.3] "true" | "false" | "random" — structured lowering for the
+  // "true" | "false" | "random" — structured lowering for the
   // C (goto-free) and WASM (dispatch-free) targets, resolved per program
   // like vecLowering. true/random (and the python target) require
   // reducible seeds: the pool is filtered on the descriptors'
   // `reducible` flag before generation.
   std::string structuredLowering = "false";
   bool keepRequire = false;
-  bool keepUbGuards = false; // [v0.2.3] force UB guards on even for UB-free bundles
-  // [v0.2.3] The common outcome of every pool leaf (the pool is required to be
+  bool keepUbGuards = false; // force UB guards on even for UB-free bundles
+  // The common outcome of every pool leaf (the pool is required to be
   // homogeneous). Determines the whole program's behavior and how --validate
   // checks it: Return → assert the solved ret; Trap → assert it traps; Diverge
   // → bounded-replay assert it diverges.
@@ -270,7 +265,7 @@ struct PerProgConfig {
   bool validate = false;
   bool verbose = false;
   bool emitMain = false;
-  // [v0.2.2] When false, emit one `<progDir>/program.c` instead of the
+  // When false, emit one `<progDir>/program.c` instead of the
   // default per-`FunDecl::sourceStem` split + `common.h`. Useful for
   // consumers that prefer a single translation unit (e.g. quick
   // single-file compile loops, or shipping the generated C as one
@@ -279,7 +274,7 @@ struct PerProgConfig {
   bool antiOpt = true;
   // Probabilities that each bundled callee carries the matching
   // backend hint via FunDecl::Attributes. 0.0 (the default) preserves
-  // pre-R9 behaviour. The entry function and any `@main` wrapper are
+  // behaviour. The entry function and any `@main` wrapper are
   // never marked. The C backend translates the bits into
   // `__attribute__((noinline))` / `__attribute__((noclone))`; WASM
   // ignores them.
@@ -290,8 +285,8 @@ struct PerProgConfig {
 static bool generateOne(const FuncPool &pool, std::mt19937 &rng, const PerProgConfig &cfg) {
   if (pool.entries.empty())
     return false;
-  int k = std::min((int) pool.entries.size(), std::max(1, cfg.nNodes));
-  auto pickIdxs = pickPoolIndices(rng, (size_t) k, pool.entries.size());
+  int k = std::min(static_cast<int>(pool.entries.size()), std::max(1, cfg.nNodes));
+  auto pickIdxs = pickPoolIndices(rng, static_cast<std::size_t>(k), pool.entries.size());
 
   CGGenConfig cgCfg{k, cfg.pEdge, cfg.maxOutDeg};
   RyCG cg = genCallGraph(rng, cgCfg);
@@ -310,7 +305,7 @@ static bool generateOne(const FuncPool &pool, std::mt19937 &rng, const PerProgCo
     nodes[i].idx = i;
     nodes[i].poolIdx = pickIdxs[i];
     const auto &entry = pool.entries[pickIdxs[i]];
-    std::uniform_int_distribution<size_t> rd(0, entry.desc.realizations.size() - 1);
+    std::uniform_int_distribution<std::size_t> rd(0, entry.desc.realizations.size() - 1);
     nodes[i].realizationIdx = rd(rng);
     fs::path sirPath = entry.sirPaths[nodes[i].realizationIdx];
     nodes[i].funcName = entry.desc.name;
@@ -382,7 +377,7 @@ static bool generateOne(const FuncPool &pool, std::mt19937 &rng, const PerProgCo
   // params against this body would produce a different CRC32 and
   // trip @check_chksum.
   //
-  // R10 (multiple @check_chksum call sites in main) is intentionally
+  // (multiple @check_chksum call sites in main) is intentionally
   // deferred: it requires bundling multiple realization bodies as
   // distinct FunDecls so main can vary args per-call without
   // mismatching the bundled body. A follow-up can lift this.
@@ -413,13 +408,13 @@ static bool generateOne(const FuncPool &pool, std::mt19937 &rng, const PerProgCo
       // solved ret (a Trap entry traps before reaching the — unreachable — check).
       std::string expected = entryRz.retValue;
       if (cfg.poolKind == FuncDescriptor::Outcome::Diverge && expected.empty())
-        expected = std::to_string((int32_t) rng());
+        expected = std::to_string(static_cast<std::int32_t>(rng()));
       FunDecl mainFn = reify::buildMainFunction(bundle, *entryFn, paramVals, expected);
       bundle.funs.push_back(std::move(mainFn));
     }
   }
 
-  // [v0.2.2] Decide output layout. The default `--split-by-source`
+  // Decide output layout. The default `--split-by-source`
   // mode lands every artefact inside `<outRoot>/<progBase>/` so the
   // multi-`.c` + `common.h` fanout stays self-contained per program.
   // `--no-split-by-source` flattens to `<outRoot>/<progBase>.{sir,c,wasm}`,
@@ -456,7 +451,7 @@ static bool generateOne(const FuncPool &pool, std::mt19937 &rng, const PerProgCo
   // `concrete: <path>` line.
   std::cout << "  bundled: " << programSir << "\n";
 
-  // [v0.2.3] The bundle is UB-free iff every constituent leaf is, so the
+  // The bundle is UB-free iff every constituent leaf is, so the
   // backends' dynamic UB guards can be dropped only then. A leaf
   // generated with rysmith --require-ub (has_ub) may trigger UB, so its
   // presence — or any legacy descriptor conservatively defaulting to
@@ -567,7 +562,9 @@ static bool generateOne(const FuncPool &pool, std::mt19937 &rng, const PerProgCo
         // header means k laps between two identical states.
         const auto &dpath = entryEntry.desc.path;
         std::string header = dpath.empty() ? "" : dpath.back();
-        int period = dpath.empty() ? 1 : (int) std::count(dpath.begin(), dpath.end(), header) - 1;
+        int period = dpath.empty()
+                         ? 1
+                         : static_cast<int>(std::count(dpath.begin(), dpath.end(), header)) - 1;
         ok = validateNontermDiverges(programSir, entryName, args, header, period);
         detail =
             "expected divergence (header=" + header + ", period=" + std::to_string(period) + ")";
@@ -640,7 +637,7 @@ int main(int argc, char **argv) {
         cxxopts::value<bool>()->default_value("false"))
     // Misc
     ("seed", "RNG seed (random if omitted)",
-        cxxopts::value<uint32_t>())
+        cxxopts::value<std::uint32_t>())
     ("v,verbose", "Verbose output", cxxopts::value<bool>()->default_value("false"))
     ("h,help", "Print help");
   // clang-format on
@@ -657,9 +654,9 @@ int main(int argc, char **argv) {
     return 0;
   }
 
-  uint32_t seed = res.count("seed") ? res["seed"].as<uint32_t>() : std::random_device{}();
+  std::uint32_t seed = res.count("seed") ? res["seed"].as<std::uint32_t>() : std::random_device{}();
   std::mt19937 rng(seed);
-  // [v0.2.2] Generation ID is always derived from --seed via the
+  // Generation ID is always derived from --seed via the
   // shared genHexId helper — no CLI override. Two runs with the same
   // seed produce identical prog_<id>_<i> directories.
   std::string genId = genHexId(rng);
@@ -732,14 +729,14 @@ int main(int argc, char **argv) {
     }
   }
 
-  // [v0.2.2] No `--target` sibling-binary discovery any more: the C
+  // No `--target` sibling-binary discovery any more: the C
   // and WASM backends are linked directly into rylink, so all
   // target=c / target=wasm runs work without symirc on disk.
 
   std::cout << "rylink: master seed = " << seed << "\n";
   std::cout << "rylink: generation id = " << genId << "\n";
   FuncPool pool = loadFuncPool(res["input-dir"].as<std::string>());
-  // [v0.2.3] Structuring consumers only handle reducible CFGs, and
+  // Structuring consumers only handle reducible CFGs, and
   // seed programs (older pools, runs without --require-reducible) may
   // not be: discard every seed whose descriptor is not known
   // reducible. Descriptors predating the `reducible` field parse as
@@ -761,7 +758,7 @@ int main(int argc, char **argv) {
     std::cerr << "rylink: empty pool — aborting\n";
     return 1;
   }
-  // [v0.2.3] rylink composes a HOMOGENEOUS pool: every leaf must share the same
+  // rylink composes a HOMOGENEOUS pool: every leaf must share the same
   // runtime outcome (all Return, all Trap, or all Diverge). A mixed pool has no
   // well-defined fused behavior — e.g. a returning caller splicing a call to a
   // trapping or non-terminating callee — so it is rejected. The common outcome

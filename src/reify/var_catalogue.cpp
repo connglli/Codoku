@@ -5,6 +5,8 @@
 #include <functional>
 #include "reify/hyperparameters.hpp"
 
+#include "reify/ast_builder.hpp"
+
 namespace refractir::reify {
 
   // ---------------------------------------------------------------------------
@@ -61,7 +63,7 @@ namespace refractir::reify {
 
   std::vector<const VarEntry *> VarCatalogue::addressable() const {
     std::vector<const VarEntry *> result;
-    // [v0.2.2] Per spec §3.5.2 `addr` requires a `let mut` root, so
+    // Per spec §3.5.2 `addr` requires a `let mut` root, so
     // parameters (immutable) are NOT addressable.
     for (const auto &v: vars)
       if (!v.isParam && !isPtrType(v.type) && !isAggType(v.type))
@@ -71,14 +73,14 @@ namespace refractir::reify {
 
   std::vector<const VarEntry *> VarCatalogue::allAddressable() const {
     std::vector<const VarEntry *> result;
-    // Per spec §3.5.2 `addr` only requires a `let mut` root — any
-    // non-param, non-vec local qualifies (scalars, ptrs, AND aggregates).
-    // Pre-fix this excluded `isAggType`, so `addr %arr` / `addr %struct`
-    // (whole-aggregate addr-of) was never offered here: a `ptr [N] T` /
-    // `ptr @S` LHS reassign in `genPtrAtom` then had to rely on the P7
-    // sub-lvalue walk alone, and starved out the whole-aggregate target
-    // that pointer-arithmetic sources (`ptr [N] T_scalar`) are built on.
-    // Vectors stay excluded — spec §3 forbids `addr` on vector locals.
+    // Per spec §3.5.2 `addr` only requires a `let mut` root, so every
+    // non-param, non-vec local qualifies: scalars, pointers and whole
+    // aggregates alike. The aggregates have to be offered here — a
+    // `ptr [N] T` / `ptr @S` LHS reassign in `genPtrAtom` needs the
+    // whole-aggregate target that pointer-arithmetic sources
+    // (`ptr [N] T_scalar`) are built on, and the sub-lvalue walk alone
+    // never produces one. Vectors stay excluded: spec §3 forbids `addr`
+    // on vector locals.
     for (const auto &v: vars)
       if (!v.isParam && !isVecType(v.type))
         result.push_back(&v);
@@ -133,7 +135,7 @@ namespace refractir::reify {
     // Helper: create a struct declaration. Fields are independently drawn —
     // ~30% chance of an array field ([N] scalar) to produce struct-of-arrays.
     auto makeStructDecl = [&](const TypePtr &) -> std::string {
-      // [v0.2.2] Namespace struct names by `<id>_<funcIdx>_<j>`. The
+      // Namespace struct names by `<id>_<funcIdx>_<j>`. The
       // funcIdx slot is needed because sibling funcs in the same
       // rysmith run share `cfg.genId`: without it two siblings each
       // declare `@struct_<id>_0` with different contents and rylink's
@@ -191,7 +193,7 @@ namespace refractir::reify {
       if (isScalarType(t)) {
         v.name = "%v" + std::to_string(scalarIdx++);
       } else if (isVecType(t)) {
-        // [v0.2.1] Vec var — named %vec0, %vec1, etc.
+        // Vec var — named %vec0, %vec1, etc.
         v.name = "%vec" + std::to_string(vecIdx++);
       } else if (std::holds_alternative<ArrayType>(t->v)) {
         auto at = std::get<ArrayType>(t->v);
@@ -221,12 +223,11 @@ namespace refractir::reify {
     }
 
     // Guarantee at least one i32 scalar (needed as fallback RValue)
-    auto i32scalars =
-        cat.scalarsOf(std::make_shared<Type>(Type{IntType{IntType::Kind::I32, {}, {}}, {}}));
+    auto i32scalars = cat.scalarsOf(makeI32());
     if (i32scalars.empty()) {
       VarEntry v;
       v.name = "%v" + std::to_string(scalarIdx++);
-      v.type = std::make_shared<Type>(Type{IntType{IntType::Kind::I32, {}, {}}, {}});
+      v.type = makeI32();
       cat.vars.push_back(std::move(v));
     }
 
@@ -289,7 +290,7 @@ namespace refractir::reify {
       }
     }
 
-    // [v0.2.1] Phase 4: aggregate-pointer vars (ptr [N] T, ptr @S).
+    // Phase 4: aggregate-pointer vars (ptr [N] T, ptr @S).
     // Each points to an existing array or struct var.
     if (tcfg.enableAggPtr && tcfg.maxPtrDepth >= 1) {
       struct AggTarget {
@@ -318,7 +319,7 @@ namespace refractir::reify {
       }
     }
 
-    // [v0.2.2] Phase 4b: navigation-staging pointers. Chained
+    // Phase 4b: navigation-staging pointers. Chained
     // ptrindex/ptrfield navigation of an aggregate pointer
     // (`ptr [N][M] F -> ptr [M] F -> ptr F`, `ptr [N] @S -> ptr @S -> ...`)
     // stages each intermediate through a `let mut` local of the sub-aggregate
@@ -383,7 +384,7 @@ namespace refractir::reify {
       }
     }
 
-    // [v0.2.2] Phase 5: scalar function parameters. Generated last so
+    // Phase 5: scalar function parameters. Generated last so
     // they sit at known offsets but participate in every later helper's
     // RValue lookup (allScalars / scalarsOf / findAny respect them).
     // Per spec §3.5.2 they're immutable — never targets of `addr` and
@@ -392,7 +393,7 @@ namespace refractir::reify {
     // below already exclude them via the `isParam` flag.
     for (int i = 0; i < cfg.nParams; i++) {
       VarEntry pv;
-      // [v0.2.2] `%pa<i>` for parameters; `%p<i>` is taken by ptr vars,
+      // `%pa<i>` for parameters; `%p<i>` is taken by ptr vars,
       // `%pp<i>` by ptr-ptr, `%ppp<i>` (if ever generated) by ptr-ptr-ptr.
       pv.name = "%pa" + std::to_string(i);
       pv.type = genScalarType(rng, tcfg.enableFp);

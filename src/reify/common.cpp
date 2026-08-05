@@ -5,16 +5,16 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <functional>
+#include <iostream>
+#include <iterator>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
-
-#include <fstream>
-#include <iostream>
-#include <sstream>
 
 #include "analysis/definite_init.hpp"
 #include "analysis/dominators.hpp"
@@ -34,12 +34,141 @@
 #include "frontend/semchecker.hpp"
 #include "frontend/typechecker.hpp"
 #include "interp/interpreter.hpp"
+#include "reify/ast_builder.hpp"
 #include "reify/state_profile.hpp"
 
 namespace fs = std::filesystem;
 using namespace refractir;
 
 namespace refractir::reify {
+
+  std::string readFile(const std::filesystem::path &p) {
+    std::ifstream ifs(p);
+    if (!ifs)
+      throw std::runtime_error("failed to open file: " + p.string());
+    std::stringstream ss;
+    ss << ifs.rdbuf();
+    return ss.str();
+  }
+
+  std::string
+  pickVecLowering(std::mt19937 &rng, const std::string &requested, const std::string &target) {
+    if (requested != "random")
+      return requested;
+
+    // Each backend sweeps only the strategies it implements: python has no
+    // native SIMD value type and so no vecext, and wasm has no struct
+    // lowering. The draw stays a uniform_int_distribution<int> over the
+    // chosen table so a given seed keeps picking the same strategy.
+    static const char *const kC[] = {"vecext", "scalars", "array", "structscalars", "structarray"};
+    static const char *const kPython[] = {"array", "scalars", "structscalars", "structarray"};
+    static const char *const kWasm[] = {"vecext", "array", "scalars"};
+
+    const char *const *pool = kC;
+    int count = static_cast<int>(std::size(kC));
+    if (target == "python") {
+      pool = kPython;
+      count = static_cast<int>(std::size(kPython));
+    } else if (target == "wasm") {
+      pool = kWasm;
+      count = static_cast<int>(std::size(kWasm));
+    }
+    std::uniform_int_distribution<int> d(0, count - 1);
+    return pool[d(rng)];
+  }
+
+  bool pickStructuredLowering(std::mt19937 &rng, const std::string &requested) {
+    if (requested == "true")
+      return true;
+    if (requested != "random")
+      return false;
+    std::uniform_int_distribution<int> d(0, 1);
+    return d(rng) == 1;
+  }
+
+  void ensureCheckChksumDecl(Program &prog) {
+    ensureIntrinsicDecl(
+        prog, "@check_chksum", makeI32(), {{"%expected", makeI32()}, {"%actual", makeI32()}}
+    );
+  }
+
+  FunDecl buildMainFunction(
+      Program &prog, const FunDecl &entryFn, const std::vector<std::string> &paramValues,
+      const std::string &retValue
+  ) {
+    FunDecl mainFn;
+    mainFn.name = GlobalId{"@main", {}};
+    mainFn.retType = makeI32();
+
+    // `%r` holds the entry-function return value. Its declared type matches
+    // entryFn so a float-returning entry doesn't trip the typechecker; the
+    // value is consumed immediately by @check_chksum (when present) or
+    // dropped.
+    LetDecl letR;
+    letR.isMutable = true;
+    letR.name = LocalId{"%r", {}};
+    letR.type = entryFn.retType;
+    letR.init = InitVal{InitVal::Kind::Undef, LocalId{}, {}};
+    mainFn.lets.push_back(std::move(letR));
+
+    Block b;
+    b.label = BlockLabel{"^entry", {}};
+
+    // %r = call @entry(arg0, arg1, ...);
+    CallAtom ca;
+    ca.callee = entryFn.name;
+    for (std::size_t i = 0; i < entryFn.params.size() && i < paramValues.size(); ++i) {
+      const auto &p = entryFn.params[i];
+      const std::string &valStr = paramValues[i];
+      Atom arg = p.type && std::holds_alternative<FloatType>(p.type->v)
+                     ? coefAtom(Coef{FloatLit{parseFloatLiteral(valStr), {}}})
+                     : coefAtom(Coef{IntLit{parseIntegerLiteral(valStr), {}}});
+      ca.args.push_back(std::make_shared<Expr>(simpleExpr(std::move(arg))));
+    }
+    AssignInstr callAssign;
+    callAssign.lhs = localLV("%r");
+    callAssign.rhs = simpleExpr(Atom{std::move(ca), {}});
+    b.instrs.push_back(std::move(callAssign));
+
+    // %r = call @check_chksum(EXPECTED, %r);  (skipped when retValue is
+    // empty — happens for descriptors that the symiri-capture step couldn't
+    // fill in).
+    //
+    // The check is gated on an integer-returning entry: @check_chksum is
+    // i32-typed and RefractIR has no implicit FP↔int cast at call
+    // boundaries. Float-returning entries skip the check; reify's float
+    // oracles already go through the sum/CRC32 path on the RefractIR-side
+    // checksum machinery.
+    if (!retValue.empty() && entryFn.retType &&
+        std::holds_alternative<IntType>(entryFn.retType->v)) {
+      CallAtom check;
+      check.callee = GlobalId{"@check_chksum", {}};
+      check.args.push_back(
+          std::make_shared<Expr>(
+              simpleExpr(coefAtom(Coef{IntLit{parseIntegerLiteral(retValue), {}}}))
+          )
+      );
+      check.args.push_back(
+          std::make_shared<Expr>(simpleExpr(rvalAtom(RValue{LocalId{"%r", {}}, {}, {}})))
+      );
+      AssignInstr checkAssign;
+      checkAssign.lhs = localLV("%r");
+      checkAssign.rhs = simpleExpr(Atom{std::move(check), {}});
+      b.instrs.push_back(std::move(checkAssign));
+      ensureCheckChksumDecl(prog);
+    }
+
+    // Always exit with 0 on the happy path. Any mismatch above unwinds
+    // through @check_chksum's abort() before this terminator is reached.
+    RetTerm ret;
+    ret.value = simpleExpr(coefAtom(Coef{IntLit{0, {}}}));
+    b.term = std::move(ret);
+
+    b.span = {};
+    mainFn.blocks.push_back(std::move(b));
+
+    return mainFn;
+  }
 
   bool runAnalysisPasses(Program &prog, bool verbose) {
     DiagBag diags;
@@ -65,14 +194,10 @@ namespace refractir::reify {
       const fs::path &sirPath, const std::string &funcName,
       const std::vector<std::string> &paramArgs, StateProfile *outProfile, StateGranularity gran
   ) {
-    std::ifstream ifs(sirPath);
-    if (!ifs)
-      return std::nullopt;
-    std::stringstream ss;
-    ss << ifs.rdbuf();
-    std::string src = ss.str();
-
     try {
+      // Keep the source alive for the whole block: Lexer holds a
+      // string_view into it.
+      std::string src = readFile(sirPath);
       Lexer lx(src);
       auto toks = lx.lexAll();
       Parser ps(std::move(toks));
@@ -125,13 +250,10 @@ namespace refractir::reify {
   ) {
     if (headerLabel.empty())
       return false;
-    std::ifstream ifs(sirPath);
-    if (!ifs)
-      return false;
-    std::stringstream ss;
-    ss << ifs.rdbuf();
-    std::string src = ss.str();
     try {
+      // Keep the source alive for the whole block: Lexer holds a
+      // string_view into it.
+      std::string src = readFile(sirPath);
       Lexer lx(src);
       auto toks = lx.lexAll();
       Parser ps(std::move(toks));
@@ -198,13 +320,10 @@ namespace refractir::reify {
       const fs::path &sirPath, const std::string &funcName,
       const std::vector<std::string> &paramArgs
   ) {
-    std::ifstream ifs(sirPath);
-    if (!ifs)
-      return false;
-    std::stringstream ss;
-    ss << ifs.rdbuf();
-    std::string src = ss.str();
     try {
+      // Keep the source alive for the whole block: Lexer holds a
+      // string_view into it.
+      std::string src = readFile(sirPath);
       Lexer lx(src);
       auto toks = lx.lexAll();
       Parser ps(std::move(toks));
@@ -227,7 +346,7 @@ namespace refractir::reify {
     }
   }
 
-  // [v0.2.3] Structured emission (C/WASM --structured-lowering, python)
+  // Structured emission (C/WASM --structured-lowering, python)
   // is only total on reducible CFGs. Callers filter or repair upstream;
   // verify here so a violation is a clean failure instead of
   // malformed backend output.
@@ -372,15 +491,17 @@ namespace refractir::reify {
       bool noUbGuards, const std::string &vecLowering, bool structuredLowering, bool emitMain,
       bool verbose
   ) {
-    std::ifstream ifs(sirPath);
-    if (!ifs) {
+    // Keep the source alive past the try block: Lexer holds a string_view
+    // into it. Read it separately so a missing file keeps its own message
+    // rather than surfacing as a compilation exception.
+    std::string src;
+    try {
+      src = readFile(sirPath);
+    } catch (const std::exception &) {
       if (verbose)
         std::cerr << "compileSirInProcess: Could not open file " << sirPath << "\n";
       return false;
     }
-    std::stringstream ss;
-    ss << ifs.rdbuf();
-    std::string src = ss.str();
 
     try {
       Lexer lx(src);

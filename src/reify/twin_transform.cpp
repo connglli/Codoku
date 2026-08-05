@@ -1,4 +1,5 @@
 #include "reify/twin_transform.hpp"
+#include "reify/ast_builder.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -25,6 +26,8 @@
 #include "interp/interpreter.hpp"
 #include "interp/type_layout.hpp"
 #include "reify/antiopt.hpp"
+#include "reify/expr_gen.hpp"
+#include "reify/hyperparameters.hpp"
 #include "reify/state_profile.hpp"
 #include "reify/twin_interval.hpp"
 #include "reify/twin_mini.hpp"
@@ -38,21 +41,9 @@ namespace refractir::reify {
 
     // --- small AST builders (mirroring func_gen's helpers) ---------------
 
-    TypePtr makeI1() {
-      return std::make_shared<Type>(Type{IntType{IntType::Kind::ICustom, 1, {}}, {}});
-    }
-
     TypePtr makePtr(TypePtr pointee) {
       return std::make_shared<Type>(Type{PtrType{std::move(pointee), {}}, {}});
     }
-
-    LValue localLV(const std::string &name) { return LValue{LocalId{name, {}}, {}, {}}; }
-
-    Atom coefAtom(Coef c) { return Atom{CoefAtom{std::move(c), {}}, {}}; }
-
-    Atom rvalAtom(RValue rv) { return Atom{RValueAtom{std::move(rv), {}}, {}}; }
-
-    Expr simpleExpr(Atom a) { return Expr{std::move(a), {}, {}}; }
 
     Instr assignInstr(const std::string &lhs, Expr rhs) {
       return Instr{AssignInstr{localLV(lhs), std::move(rhs), {}}};

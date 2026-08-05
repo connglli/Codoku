@@ -1,4 +1,5 @@
 #include "reify/expr_gen.hpp"
+#include "reify/ast_builder.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -12,12 +13,6 @@ namespace refractir::reify {
   // ---------------------------------------------------------------------------
   // Internal helpers — AST factories
   // ---------------------------------------------------------------------------
-
-  static TypePtr makeI32() {
-    return std::make_shared<Type>(Type{IntType{IntType::Kind::I32, {}, {}}, {}});
-  }
-
-  static LValue localLV(const std::string &name) { return LValue{LocalId{name, {}}, {}, {}}; }
 
   static LValue arrayLV(const std::string &name, int64_t idx) {
     LValue lv;
@@ -39,42 +34,34 @@ namespace refractir::reify {
 
   static Coef floatCoef(double v) { return FloatLit{v, {}}; }
 
-  static Atom coefAtom(Coef c) { return Atom{CoefAtom{std::move(c), {}}, {}}; }
-
   static Atom opAtom(AtomOpKind op, Coef c, RValue rv) {
     return Atom{OpAtom{op, std::move(c), std::move(rv), {}}, {}};
   }
-
-  static Atom rvalAtom(RValue rv) { return Atom{RValueAtom{std::move(rv), {}}, {}}; }
 
   static Atom unaryAtom(RValue rv) {
     return Atom{UnaryAtom{UnaryOpKind::Not, std::move(rv), {}}, {}};
   }
 
-  static Expr simpleExpr(Atom a) { return Expr{std::move(a), {}, {}}; }
-
   // Pick a random element from a non-empty vector
   template<typename T>
   static const T &pickOne(std::mt19937 &rng, const std::vector<T> &v) {
     assert(!v.empty());
-    std::uniform_int_distribution<int> d(0, (int) v.size() - 1);
+    std::uniform_int_distribution<int> d(0, static_cast<int>(v.size()) - 1);
     return v[d(rng)];
   }
 
-  // Filter a candidate var pool, dropping any entry whose name matches
+  // Filter a vector of var pointers to exclude any entry whose name matches
   // `excludeName`. When `excludeName` is unset the input is returned
   // unchanged. Applied at every variable-pool pick in the body of an RHS
   // expression to make `%x = %x;`, `%x = -4 * %x;`, etc. impossible.
+  //
+  // Takes its pool by value: every caller hands over a freshly built vector
+  // from the catalogue, so the argument moves in, is filtered in place, and
+  // moves out without allocating.
   static std::vector<const VarEntry *>
   excluding(std::vector<const VarEntry *> vec, const std::optional<std::string> &excludeName) {
-    if (!excludeName)
-      return vec;
-    vec.erase(
-        std::remove_if(
-            vec.begin(), vec.end(), [&](const VarEntry *v) { return v->name == *excludeName; }
-        ),
-        vec.end()
-    );
+    if (excludeName)
+      std::erase_if(vec, [&](const VarEntry *v) { return v->name == *excludeName; });
     return vec;
   }
 
@@ -137,7 +124,7 @@ namespace refractir::reify {
   // SymCounter implementation
   // ---------------------------------------------------------------------------
 
-  std::string SymCounter::next(SymKind kind, TypePtr type) {
+  std::string SymCounter::next(SymKind kind, const TypePtr &type) {
     auto name = "%?s" + std::to_string(n++);
     int64_t lo, hi;
     if (kind == SymKind::Coef) {
@@ -150,7 +137,7 @@ namespace refractir::reify {
       lo = indexLo;
       hi = indexHi;
     }
-    entries.push_back({name, kind, std::move(type), lo, hi});
+    entries.push_back({name, kind, type, lo, hi});
     return name;
   }
 
@@ -230,8 +217,7 @@ namespace refractir::reify {
       // solver applies the same clamp when emitting the domain constraint
       // (see solver.cpp), so the require literal must land inside this range
       // — otherwise it is either rejected by the typechecker (literal too
-      // wide for the coef type) or unsatisfiable against the domain (the R5
-      // UNSAT-under-narrow-`--coef-domain` bug).
+      // wide for the coef type) or unsatisfiable against the domain.
       uint32_t bits = intBitWidth(e.type);
       if (bits == 0) // unknown — skip
         continue;
@@ -284,7 +270,7 @@ namespace refractir::reify {
 
   // Return the [lo, hi] inclusive range used for concrete integer literals
   // of the given target type. Centralised so off-path coef draws and bare
-  // literal atoms share a single source of truth (see R6).
+  // literal atoms share a single source of truth.
   static std::pair<int64_t, int64_t> concreteIntRange(const TypePtr &targetType) {
     uint32_t bits = intBitWidth(targetType);
     int64_t lo = rysmith::hp::kConcreteInt_Default_Lo, hi = rysmith::hp::kConcreteInt_Default_Hi;
@@ -306,7 +292,7 @@ namespace refractir::reify {
       lo = -1;
       hi = 0;
     } else if (bits >= 2 && bits < 64) {
-      // [P7] Custom iN widths span the full signed range, mirroring the
+      // Custom iN widths span the full signed range, mirroring the
       // standard widths above. The typechecker's strict literal range
       // check makes anything wider a hard error.
       hi = (int64_t(1) << (bits - 1)) - 1;
@@ -370,7 +356,7 @@ namespace refractir::reify {
       return SelectVal{symCoef(sym->next(SymKind::Value, targetType))};
     }
     // Literal slot draws from the same per-width / FP pool as bare
-    // concrete atoms instead of the hardcoded `1` / `1.0`. Pre-R7 every
+    // concrete atoms instead of the hardcoded `1` / `1.0`. Every
     // select fallback arm was exactly `1`, which collapses any
     // `select cond, 1, 1` (both literal arms) to a constant — the
     // compiler removes the select entirely and the cond evaluation with
@@ -394,7 +380,7 @@ namespace refractir::reify {
       auto *vL = pickOne(rng, allScalars);
       cond.lhs = simpleExpr(rvalAtom(localLV(vL->name)));
       // RHS literal of the lhs var's type. On-path (sym != null) it stays 0
-      // so the path constraint is a simple sign test; off-path [P7] it is
+      // so the path constraint is a simple sign test; off-path it is
       // drawn from the per-width pool — the threshold value is opaque to
       // the compiler either way, but a fixed 0 needlessly homogenises the
       // never-executed arms.
@@ -438,16 +424,22 @@ namespace refractir::reify {
   // (arg is a `<N> targetType` vector). A reduction is callable exactly when
   // a matching vector operand is in scope — that availability is its only
   // gate. The two shapes differ solely in how the argument list is built;
+  struct ExprGenContext {
+    std::mt19937 &rng;
+    SymCounter *sym = nullptr;
+    const VarCatalogue &vars;
+    const ExprGenConfig &cfg;
+    bool onPath = true;
+    std::vector<Instr> &extraRequires;
+    const std::optional<std::string> &excludeName;
+  };
+
   // selection, use-recording and declaration are identical. Scalar-argument
   // generation may add div-by-zero guards to extraRequires; the reduction's
   // vector operand needs none (the solver prunes partial-sum overflow and
   // non-finite intermediates like any other intrinsic UB). Records the used
   // (kind, element type, lanes) in cfg.usedIntrinsics if non-null.
-  static Atom genIntrinsicCallAtom(
-      std::mt19937 &rng, SymCounter *sym, const VarCatalogue &vars, const TypePtr &targetType,
-      bool onPath, const ExprGenConfig &cfg, std::vector<Instr> &extraRequires,
-      const std::optional<std::string> &excludeName = std::nullopt
-  ) {
+  static Atom genIntrinsicCallAtom(const ExprGenContext &ctx, const TypePtr &targetType) {
     const bool isFloat = isFpType(targetType);
     const uint32_t elemBits =
         isFloat ? (std::get<FloatType>(targetType->v).kind == FloatType::Kind::F32 ? 32u : 64u)
@@ -468,19 +460,19 @@ namespace refractir::reify {
     // its element domain fits the target (FP targets need a float-admitting
     // intrinsic) and, for reductions, when a `<N> targetType` vector operand
     // is in scope — one candidate per available operand.
-    auto vecs = excluding(vars.vecsWithElem(targetType), excludeName);
+    auto vecs = excluding(ctx.vars.vecsWithElem(targetType), ctx.excludeName);
     for (IntrinsicKind kind: getGeneratableIntrinsics()) {
       // Skip i1-returning intrinsics — i1 is not a common target type.
       if (intrinsicReturnsI1(kind))
         continue;
       if (isFloat && !intrinsicAllowsFloat(kind))
         continue;
-      int arity = (int) intrinsicArity(kind);
+      int arity = static_cast<int>(intrinsicArity(kind));
       if (isReductionIntrinsic(kind)) {
         for (auto *vv: vecs)
           cands.push_back({kind, arity, vv});
       } else {
-        // [P7] @bswap is width-restricted: the semchecker rejects widths
+        // @bswap is width-restricted: the semchecker rejects widths
         // that are not a multiple of 8.
         if (intrinsicInfo(kind).widthMultipleOf8 && elemBits % 8 != 0)
           continue;
@@ -489,115 +481,107 @@ namespace refractir::reify {
     }
 
     if (cands.empty())
-      return isFloat ? genConcreteFloatAtom(rng) : coefAtom(intCoef(0));
+      return isFloat ? genConcreteFloatAtom(ctx.rng) : coefAtom(intCoef(0));
 
-    const auto &c = cands[std::uniform_int_distribution<int>(0, (int) cands.size() - 1)(rng)];
+    const auto &c =
+        cands[std::uniform_int_distribution<int>(0, static_cast<int>(cands.size()) - 1)(ctx.rng)];
 
     CallAtom ca;
     ca.callee = GlobalId{std::string(intrinsicName(c.kind)), {}};
     if (c.reduceVec) {
       const TypePtr vecTy = c.reduceVec->type;
       ca.args.push_back(
-          std::make_shared<Expr>(genExpr(rng, sym, vars, vecTy, onPath, cfg, excludeName))
+          std::make_shared<Expr>(
+              genExpr(ctx.rng, ctx.sym, ctx.vars, vecTy, ctx.onPath, ctx.cfg, ctx.excludeName)
+          )
       );
-      if (cfg.usedIntrinsics)
-        cfg.usedIntrinsics->insert(
-            {c.kind, elemBits, isFloat, (uint32_t) std::get<VecType>(vecTy->v).size}
+      if (ctx.cfg.usedIntrinsics)
+        ctx.cfg.usedIntrinsics->insert(
+            {c.kind, elemBits, isFloat,
+             static_cast<std::uint32_t>(std::get<VecType>(vecTy->v).size)}
         );
     } else {
       for (int pi = 0; pi < c.paramCount; pi++) {
-        if (onPath && sym) {
-          auto [ae, areqs] =
-              genExprWithRequires(rng, sym, vars, targetType, onPath, cfg, excludeName);
+        if (ctx.onPath && ctx.sym) {
+          auto [ae, areqs] = genExprWithRequires(
+              ctx.rng, ctx.sym, ctx.vars, targetType, ctx.onPath, ctx.cfg, ctx.excludeName
+          );
           for (auto &r: areqs)
-            extraRequires.push_back(std::move(r));
+            ctx.extraRequires.push_back(std::move(r));
           ca.args.push_back(std::make_shared<Expr>(std::move(ae)));
         } else {
           ca.args.push_back(
-              std::make_shared<Expr>(genExpr(rng, sym, vars, targetType, onPath, cfg, excludeName))
+              std::make_shared<Expr>(genExpr(
+                  ctx.rng, ctx.sym, ctx.vars, targetType, ctx.onPath, ctx.cfg, ctx.excludeName
+              ))
           );
         }
       }
-      if (cfg.usedIntrinsics)
-        cfg.usedIntrinsics->insert({c.kind, elemBits, false, 0});
+      if (ctx.cfg.usedIntrinsics)
+        ctx.cfg.usedIntrinsics->insert({c.kind, elemBits, false, 0});
     }
     return Atom{std::move(ca), {}};
   }
 
   // Generate a single Atom of the given integer type (on-path, uses sym)
-  static Atom genIntAtomOnPath(
-      std::mt19937 &rng, SymCounter &sym, const VarCatalogue &vars, const TypePtr &targetType,
-      const ExprGenConfig &cfg, std::vector<Instr> &extraRequires,
-      const std::optional<std::string> &excludeName = std::nullopt
-  ) {
+  static Atom genIntAtomOnPath(const ExprGenContext &ctx, const TypePtr &targetType) {
+    assert(ctx.sym != nullptr);
     // Collect scalars of the target type for use as RValues
-    auto scalarsOfT = excluding(vars.scalarsOf(targetType), excludeName);
+    auto scalarsOfT = excluding(ctx.vars.scalarsOf(targetType), ctx.excludeName);
     bool hasRval = !scalarsOfT.empty();
 
     // Also collect scalars of ANY int type for casts
-    auto allScalars = excluding(vars.allScalars(), excludeName);
+    auto allScalars = excluding(ctx.vars.allScalars(), ctx.excludeName);
     std::vector<const VarEntry *> otherIntScalars;
     for (auto *v: allScalars)
       if (isIntType(v->type) && !typeEquals(v->type, targetType))
         otherIntScalars.push_back(v);
 
     std::uniform_int_distribution<int> slot(0, 99);
-    int s = slot(rng);
+    int s = slot(ctx.rng);
 
     auto pickRval = [&]() -> RValue {
       assert(hasRval);
-      auto *v = pickOne(rng, scalarsOfT);
+      auto *v = pickOne(ctx.rng, scalarsOfT);
       return localLV(v->name);
     };
 
     if (s < rysmith::hp::kIntOnPath_CoefBareEnd) {
       // Standalone coef sym
-      return coefAtom(symCoef(sym.nextCoef(targetType)));
+      return coefAtom(symCoef(ctx.sym->nextCoef(targetType)));
     }
     if (s < rysmith::hp::kIntOnPath_MulEnd && hasRval) {
       // Linear: sym * rval
-      return opAtom(AtomOpKind::Mul, symCoef(sym.nextCoef(targetType)), pickRval());
+      return opAtom(AtomOpKind::Mul, symCoef(ctx.sym->nextCoef(targetType)), pickRval());
     }
-    if (s < rysmith::hp::kIntOnPath_BitwiseEnd && cfg.enableAllOps && hasRval) {
+    if (s < rysmith::hp::kIntOnPath_BitwiseEnd && ctx.cfg.enableAllOps && hasRval) {
       // Bitwise
       static const AtomOpKind bops[] = {AtomOpKind::And, AtomOpKind::Or, AtomOpKind::Xor};
       std::uniform_int_distribution<int> opPick(0, 2);
-      return opAtom(bops[opPick(rng)], symCoef(sym.nextCoef(targetType)), pickRval());
+      return opAtom(bops[opPick(ctx.rng)], symCoef(ctx.sym->nextCoef(targetType)), pickRval());
     }
-    if (s < rysmith::hp::kIntOnPath_ShiftEnd && cfg.enableAllOps && hasRval) {
-      // Shift: index_sym << rval  (coef=index sym, rval=variable being shifted)
-      // Per the existing pattern: index sym is the VALUE being shifted, rval is shift amount
-      // But shift amount must be i32 — we need an i32 rval for the shift amount
-      // Actually in RefractIR: OpAtom{Shl, coef, rval} = coef SHL rval
-      // coef is the value to shift, rval is the shift amount
-      // For proper typing: coef must match targetType, rval (shift amount) must be i32
-      // So we need an i32 var as rval for shift amount, and use an index sym as the coef
-      // The index sym type must also be targetType for type consistency
-      auto i32scalars = excluding(vars.scalarsOf(makeI32()), excludeName);
+    if (s < rysmith::hp::kIntOnPath_ShiftEnd && ctx.cfg.enableAllOps && hasRval) {
+      // Shift: OpAtom{Shl/Shr/LShr, coef, rval} = coef SHIFT rval.
+      // coef must match targetType; rval (shift amount) must be i32.
+      // For i32 targets we use an index sym as the shifted value and
+      // pick an i32 var for the amount; for non-i32 targets we fall
+      // through to a standalone coef sym (no cross-width rval available).
+      auto i32scalars = excluding(ctx.vars.scalarsOf(makeI32()), ctx.excludeName);
       if (!i32scalars.empty() || isIntType(targetType)) {
-        // Use index sym of targetType as the value being shifted
-        // use an i32 var as shift amount if available, else use an int literal
         static const AtomOpKind sops[] = {AtomOpKind::Shl, AtomOpKind::Shr, AtomOpKind::LShr};
         std::uniform_int_distribution<int> opPick(0, 2);
-        auto idxSym = sym.nextIndex(); // always i32
-        // The shift coef should be the same type as targetType for type correctness
-        // but nextIndex always returns i32. For non-i32 targets, we use a coef sym instead
+        auto idxSym = ctx.sym->nextIndex(); // always i32
         if (intBitWidth(targetType) == 32) {
           if (!i32scalars.empty()) {
-            auto *shiftAmt = pickOne(rng, i32scalars);
-            return opAtom(sops[opPick(rng)], symCoef(idxSym), localLV(shiftAmt->name));
+            auto *shiftAmt = pickOne(ctx.rng, i32scalars);
+            return opAtom(sops[opPick(ctx.rng)], symCoef(idxSym), localLV(shiftAmt->name));
           }
         } else {
-          // Non-i32 target: use coef sym of targetType << i32 literal for shift amount
-          // But OpAtom{Shl, coef, rval}: coef must be targetType, rval must be...
-          // In RefractIR, shift amount is the rval. For i64 << i32, the rval should be i32.
-          // Use a concrete integer rval instead:
           (void) idxSym; // index sym was consumed, drop it
-          // Just fall through to coef standalone
-          return coefAtom(symCoef(sym.nextCoef(targetType)));
+          return coefAtom(symCoef(ctx.sym->nextCoef(targetType)));
         }
       }
-      return coefAtom(symCoef(sym.nextCoef(targetType)));
+      return coefAtom(symCoef(ctx.sym->nextCoef(targetType)));
     }
     if (s < rysmith::hp::kIntOnPath_UnaryNotEnd && hasRval) {
       // Unary NOT
@@ -605,49 +589,47 @@ namespace refractir::reify {
     }
     if (s < rysmith::hp::kIntOnPath_CastEnd && !otherIntScalars.empty()) {
       // CastAtom from another int width
-      auto *srcVar = pickOne(rng, otherIntScalars);
+      auto *srcVar = pickOne(ctx.rng, otherIntScalars);
       CastAtom ca;
       ca.src = LValue{LocalId{srcVar->name, {}}, {}, {}};
       ca.dstType = targetType;
       return Atom{std::move(ca), {}};
     }
-    if (s < rysmith::hp::kIntOnPath_DivModEnd && cfg.enableDiv && hasRval) {
+    if (s < rysmith::hp::kIntOnPath_DivModEnd && ctx.cfg.enableDiv && hasRval) {
       // Div/Mod: OpAtom{Div/Mod, sym_coef, rval}  = sym / rval
       // We need a require(rval != 0) guard on-path
       std::uniform_int_distribution<int> dm(0, 1);
-      AtomOpKind op = dm(rng) ? AtomOpKind::Mod : AtomOpKind::Div;
-      auto *rv = pickOne(rng, scalarsOfT);
-      std::string symName = sym.nextCoef(targetType);
+      AtomOpKind op = dm(ctx.rng) ? AtomOpKind::Mod : AtomOpKind::Div;
+      auto *rv = pickOne(ctx.rng, scalarsOfT);
+      std::string symName = ctx.sym->nextCoef(targetType);
       // Add require: rval != 0
       RequireInstr req;
       req.cond.lhs = simpleExpr(rvalAtom(localLV(rv->name)));
       req.cond.op = RelOp::NE;
       req.cond.rhs = simpleExpr(coefAtom(intCoef(0)));
       req.message = "div nonzero";
-      extraRequires.push_back(Instr{std::move(req)});
+      ctx.extraRequires.push_back(Instr{std::move(req)});
       return opAtom(op, symCoef(symName), localLV(rv->name));
     }
     if (s < rysmith::hp::kIntOnPath_LoadEnd) {
       // Load from a ptr T var if any exist
-      auto ptrs = excluding(vars.ptrsOf(targetType), excludeName);
+      auto ptrs = excluding(ctx.vars.ptrsOf(targetType), ctx.excludeName);
       if (!ptrs.empty()) {
-        auto *pv = pickOne(rng, ptrs);
+        auto *pv = pickOne(ctx.rng, ptrs);
         return Atom{LoadAtom{localLV(pv->name), {}}, {}};
       }
     }
-    if (s < rysmith::hp::kIntOnPath_SelectEnd && cfg.enableSelect) {
-      return genSelectAtom(rng, &sym, vars, targetType, excludeName);
+    if (s < rysmith::hp::kIntOnPath_SelectEnd && ctx.cfg.enableSelect) {
+      return genSelectAtom(ctx.rng, ctx.sym, ctx.vars, targetType, ctx.excludeName);
     }
-    if (s < rysmith::hp::kIntOnPath_IntrinsicEnd && cfg.enableIntrinsics) {
-      return genIntrinsicCallAtom(
-          rng, &sym, vars, targetType, true, cfg, extraRequires, excludeName
-      );
+    if (s < rysmith::hp::kIntOnPath_IntrinsicEnd && ctx.cfg.enableIntrinsics) {
+      return genIntrinsicCallAtom(ctx, targetType);
     }
     // Fallback: standalone sym
-    return coefAtom(symCoef(sym.nextCoef(targetType)));
+    return coefAtom(symCoef(ctx.sym->nextCoef(targetType)));
   }
 
-  // [P7] Off-path OpAtom coefficient: a same-type LocalId with probability
+  // Off-path OpAtom coefficient: a same-type LocalId with probability
   // kPOffPathVarCoef (`%a * %b` — every operator admits a LocalId coef per
   // the grammar, both sides are runtime values the compiler can't fold,
   // and the solver never visits off-path blocks), else a per-width
@@ -719,7 +701,7 @@ namespace refractir::reify {
       );
     }
     if (s < rysmith::hp::kIntOffPath_ShiftEnd && cfg.enableAllOps) {
-      // [P7] All three shift ops at any width. The shift amount is a
+      // All three shift ops at any width. The shift amount is a
       // runtime var and may be negative / oversized at runtime — UB the
       // block never reaches; it only has to typecheck (coef width ==
       // rval width) and compile.
@@ -765,9 +747,8 @@ namespace refractir::reify {
     }
     if (s < rysmith::hp::kIntOffPath_IntrinsicEnd && cfg.enableIntrinsics) {
       std::vector<Instr> dummyReqs; // off-path args are concrete-only, no requires expected
-      return genIntrinsicCallAtom(
-          rng, /*sym=*/nullptr, vars, targetType, false, cfg, dummyReqs, excludeName
-      );
+      ExprGenContext ctx{rng, nullptr, vars, cfg, false, dummyReqs, excludeName};
+      return genIntrinsicCallAtom(ctx, targetType);
     }
     return genConcreteIntAtom(rng, targetType);
   }
@@ -816,7 +797,8 @@ namespace refractir::reify {
       // scope. FP args carry no div guards, so a discarded requires sink is
       // safe here.
       std::vector<Instr> reqSink;
-      return genIntrinsicCallAtom(rng, &sym, vars, targetType, true, cfg, reqSink, excludeName);
+      ExprGenContext ctx{rng, &sym, vars, cfg, true, reqSink, excludeName};
+      return genIntrinsicCallAtom(ctx, targetType);
     }
     // Concrete float literal
     return genConcreteFloatAtom(rng);
@@ -842,9 +824,8 @@ namespace refractir::reify {
       // helper itself falls back to a concrete literal).
       if (s < rysmith::hp::kFloatOffPath_IntrinsicEnd && cfg.enableIntrinsics) {
         std::vector<Instr> reqSink;
-        return genIntrinsicCallAtom(
-            rng, /*sym=*/nullptr, vars, targetType, false, cfg, reqSink, excludeName
-        );
+        ExprGenContext ctx{rng, nullptr, vars, cfg, false, reqSink, excludeName};
+        return genIntrinsicCallAtom(ctx, targetType);
       }
       return genConcreteFloatAtom(rng);
     }
@@ -852,7 +833,7 @@ namespace refractir::reify {
       auto *v = pickOne(rng, fpVars);
       return rvalAtom(localLV(v->name));
     }
-    // [P7] Floats admit Mul / Div / Mod (fmod) per the typechecker; the
+    // Floats admit Mul / Div / Mod (fmod) per the typechecker; the
     // div-by-zero / overflow UB these can hit at runtime never fires in an
     // off-path block, and bit-exactness is moot for code that never
     // executes — it only has to compile.
@@ -871,9 +852,8 @@ namespace refractir::reify {
       );
     if (s < rysmith::hp::kFloatOffPath_IntrinsicEnd && cfg.enableIntrinsics) {
       std::vector<Instr> reqSink;
-      return genIntrinsicCallAtom(
-          rng, /*sym=*/nullptr, vars, targetType, false, cfg, reqSink, excludeName
-      );
+      ExprGenContext ctx{rng, nullptr, vars, cfg, false, reqSink, excludeName};
+      return genIntrinsicCallAtom(ctx, targetType);
     }
     return genConcreteFloatAtom(rng);
   }
@@ -900,7 +880,7 @@ namespace refractir::reify {
       }
     }
 
-    // [P7] addr of a SUB-lvalue rooted at a let-mut aggregate local
+    // addr of a SUB-lvalue rooted at a let-mut aggregate local
     // (`addr %t.f0`, `addr %a[1]`, and nested paths). Per SPEC §3.4.2 any
     // sub-lvalue of a `let mut` local is addressable; field/element
     // provenance is exactly the alias-analysis surface (-O3 SROA / TBAA)
@@ -947,7 +927,7 @@ namespace refractir::reify {
       options.push_back(Atom{LoadAtom{localLV(ppv->name), {}}, {}});
     }
 
-    // [v0.2.1] PtrIndexAtom: if ptee is scalar and there exists a
+    // PtrIndexAtom: if ptee is scalar and there exists a
     // ptr [N] ptee var, we can ptrindex it at a safe index.
     if (isScalarType(ptee)) {
       for (const auto &v: vars.vars) {
@@ -969,7 +949,7 @@ namespace refractir::reify {
       }
     }
 
-    // [v0.2.1] PtrFieldAtom: if there exists a ptr @S var where @S has
+    // PtrFieldAtom: if there exists a ptr @S var where @S has
     // a field of type ptee, we can ptrfield it.
     for (const auto &v: vars.vars) {
       if (!isPtrType(v.type))
@@ -1194,12 +1174,14 @@ namespace refractir::reify {
       if (!typeEquals(pointeeType(pty), lhsPtee) || !asg->rhs.rest.empty())
         continue; // pointee must match %p2; the anchor must be a single atom
       const Atom &a = asg->rhs.first;
+      // An anchor needs at least two cells: the offset is drawn as a distinct
+      // index in [0, N-1] \ {i}, which is empty for a one-element array.
       if (auto *pix = std::get_if<PtrIndexAtom>(&a.v)) {
         // %p = ptrindex %ap, <IntLit i>
         auto *il = std::get_if<IntLit>(&pix->index);
         if (il && pix->rval.accesses.empty())
           if (auto n = arrayN(pointeeType(typeOf(pix->rval.base.name))))
-            if (il->value >= 0 && il->value < *n)
+            if (*n >= 2 && il->value >= 0 && il->value < *n)
               anchors.push_back({p, *n, il->value});
       } else if (auto *ad = std::get_if<AddrAtom>(&a.v)) {
         // %p = addr %a[<IntLit i>]
@@ -1207,7 +1189,7 @@ namespace refractir::reify {
           if (auto *aidx = std::get_if<AccessIndex>(&ad->lv.accesses[0]))
             if (auto *il = std::get_if<IntLit>(&aidx->index))
               if (auto n = arrayN(typeOf(ad->lv.base.name)))
-                if (il->value >= 0 && il->value < *n)
+                if (*n >= 2 && il->value >= 0 && il->value < *n)
                   anchors.push_back({p, *n, il->value});
       } else if (auto *pf = std::get_if<PtrFieldAtom>(&a.v)) {
         // %p = ptrfield %sp, <field f>. Treat the maximal run of consecutive
@@ -1417,20 +1399,19 @@ namespace refractir::reify {
   // Thin wrapper around the per-direction × per-class atom dispatch.
   // Threads `extraRequires` so on-path int atoms can publish their
   // div-by-zero guards (the off-path/FP paths don't touch it).
-  static Atom genOneAtomOfType(
-      std::mt19937 &rng, SymCounter *sym, const VarCatalogue &vars, const TypePtr &targetType,
-      bool onPath, const ExprGenConfig &cfg, std::vector<Instr> &extraRequires,
-      const std::optional<std::string> &excludeName
-  ) {
+  static Atom genOneAtomOfType(const ExprGenContext &ctx, const TypePtr &targetType) {
     if (isIntType(targetType))
-      return (onPath && sym)
-                 ? genIntAtomOnPath(rng, *sym, vars, targetType, cfg, extraRequires, excludeName)
-                 : genIntAtomOffPath(rng, vars, targetType, cfg, excludeName);
-    return (onPath && sym) ? genFloatAtomOnPath(rng, *sym, vars, targetType, cfg, excludeName)
-                           : genFloatAtomOffPath(rng, vars, targetType, cfg, excludeName);
+      return (ctx.onPath && ctx.sym)
+                 ? genIntAtomOnPath(ctx, targetType)
+                 : genIntAtomOffPath(ctx.rng, ctx.vars, targetType, ctx.cfg, ctx.excludeName);
+    return (ctx.onPath && ctx.sym)
+               ? genFloatAtomOnPath(
+                     ctx.rng, *ctx.sym, ctx.vars, targetType, ctx.cfg, ctx.excludeName
+                 )
+               : genFloatAtomOffPath(ctx.rng, ctx.vars, targetType, ctx.cfg, ctx.excludeName);
   }
 
-  // [P3] Build a cheap, solver-linear atom that reads a runtime LValue and
+  // Build a cheap, solver-linear atom that reads a runtime LValue and
   // is UB-safe. The chain, each step falling through when its pool is
   // empty:
   //   1. concrete-coef multiply or plain read of a same-type scalar — the
@@ -1507,10 +1488,10 @@ namespace refractir::reify {
 
   // Generate an atom that carries a runtime LValue dependency.
   //
-  // On-path the cheap-linear chain is used DIRECTLY: rerolling the slot
+  // On-path the cheap-linear chain is used directly: rerolling the slot
   // table would converge on `sym * var` — a fresh free variable plus a
   // nonlinear BV multiply, the most solver-expensive replacement possible
-  // for what was a solver-free all-literal RHS (P3).
+  // for what was a solver-free all-literal RHS.
   //
   // Off-path (solver never looks) the standard dispatch is rerolled up to
   // `kAtomRerollMaxAttempts` times for shape diversity before the same
@@ -1520,19 +1501,18 @@ namespace refractir::reify {
   // `allowBareRead=false` additionally rules out a bare RValueAtom result:
   // a caller about to use the atom as a whole single-atom RHS would
   // otherwise manufacture a plain copy, whose rate must stay solely under
-  // kPAllowPlainCopy's control (P6).
+  // kPAllowPlainCopy's control.
   static Atom genNonTrivialAtomOfType(
-      std::mt19937 &rng, SymCounter *sym, const VarCatalogue &vars, const TypePtr &targetType,
-      bool onPath, const ExprGenConfig &cfg, std::vector<Instr> &extraRequires,
-      const std::optional<std::string> &excludeName, bool allowBareRead = true
+      const ExprGenContext &ctx, const TypePtr &targetType, bool allowBareRead = true
   ) {
-    if (onPath && !cfg.condContext) {
-      if (auto cheap = genCheapLinearAtom(rng, vars, targetType, excludeName, allowBareRead))
+    if (ctx.onPath && !ctx.cfg.condContext) {
+      if (auto cheap =
+              genCheapLinearAtom(ctx.rng, ctx.vars, targetType, ctx.excludeName, allowBareRead))
         return std::move(*cheap);
-      return isFpType(targetType) ? genConcreteFloatAtom(rng) : genConcreteIntAtom(rng, targetType);
+      return isFpType(targetType) ? genConcreteFloatAtom(ctx.rng)
+                                  : genConcreteIntAtom(ctx.rng, targetType);
     }
-    Atom last =
-        genOneAtomOfType(rng, sym, vars, targetType, onPath, cfg, extraRequires, excludeName);
+    Atom last = genOneAtomOfType(ctx, targetType);
     auto acceptable = [&](const Atom &a) {
       return !isTriviallyConstantAtom(a) &&
              (allowBareRead || !std::holds_alternative<RValueAtom>(a.v));
@@ -1540,13 +1520,13 @@ namespace refractir::reify {
     if (acceptable(last))
       return last;
     for (int r = 1; r < rysmith::hp::kAtomRerollMaxAttempts; r++) {
-      Atom cand =
-          genOneAtomOfType(rng, sym, vars, targetType, onPath, cfg, extraRequires, excludeName);
+      Atom cand = genOneAtomOfType(ctx, targetType);
       if (acceptable(cand))
         return cand;
       last = std::move(cand);
     }
-    if (auto cheap = genCheapLinearAtom(rng, vars, targetType, excludeName, allowBareRead))
+    if (auto cheap =
+            genCheapLinearAtom(ctx.rng, ctx.vars, targetType, ctx.excludeName, allowBareRead))
       return std::move(*cheap);
     return last;
   }
@@ -1558,33 +1538,28 @@ namespace refractir::reify {
   // the last (not the first) atom keeps the typechecker's first-atom
   // width inference intact.
   static void rewriteIfAllTriviallyConstant(
-      std::mt19937 &rng, SymCounter *sym, const VarCatalogue &vars, const TypePtr &targetType,
-      bool onPath, const ExprGenConfig &cfg, std::vector<Instr> &extraRequires,
-      const std::optional<std::string> &excludeName, std::vector<Atom> &atoms
+      const ExprGenContext &ctx, const TypePtr &targetType, std::vector<Atom> &atoms
   ) {
     if (!isIntType(targetType) && !isFpType(targetType))
       return;
     std::uniform_real_distribution<double> allowCoin(0.0, 1.0);
-    if (allowCoin(rng) < rysmith::hp::kPAllowAllLiteral)
+    if (allowCoin(ctx.rng) < rysmith::hp::kPAllowAllLiteral)
       return;
     bool allTrivial = std::all_of(atoms.begin(), atoms.end(), [](const Atom &a) {
       return isTriviallyConstantAtom(a);
     });
     if (!allTrivial)
       return;
-    // [P6] When the replacement becomes the WHOLE RHS (single atom replaced
+    // When the replacement becomes the WHOLE RHS (single atom replaced
     // in place), a bare read would manufacture a plain copy out of an
     // all-literal RHS — copy frequency must stay solely under
     // kPAllowPlainCopy's control, so bare reads are ruled out here. Tail
     // positions (append / last-atom replacement) keep them: a read joined
     // by +/- is not a copy.
-    bool inPlaceWholeRhs = atoms.size() == 1 && cfg.maxAtoms <= 1;
-    Atom replacement = genNonTrivialAtomOfType(
-        rng, sym, vars, targetType, onPath, cfg, extraRequires, excludeName,
-        /*allowBareRead=*/!inPlaceWholeRhs
-    );
+    bool inPlaceWholeRhs = atoms.size() == 1 && ctx.cfg.maxAtoms <= 1;
+    Atom replacement = genNonTrivialAtomOfType(ctx, targetType, /*allowBareRead=*/!inPlaceWholeRhs);
     if (atoms.size() == 1) {
-      if (cfg.maxAtoms > 1) {
+      if (ctx.cfg.maxAtoms > 1) {
         atoms.push_back(std::move(replacement));
       } else {
         atoms[0] = std::move(replacement);
@@ -1606,6 +1581,7 @@ namespace refractir::reify {
     // Note: div/mod safety requires are lost in this public API;
     // use genBlockStmts which calls genExprWithRequires internally.
     std::vector<Instr> dummyReqs;
+    ExprGenContext ctx{rng, sym, vars, cfg, onPath, dummyReqs, excludeName};
     std::vector<Atom> atoms;
 
     std::uniform_int_distribution<int> nAtomsDist(cfg.minAtoms, cfg.maxAtoms);
@@ -1619,7 +1595,7 @@ namespace refractir::reify {
     if (isFpType(targetType) && nAtoms > 2) {
       nAtoms = 2;
     }
-    // [v0.2.1] Vec types: 1-2 atoms (lane-wise +/- is valid).
+    // Vec types: 1-2 atoms (lane-wise +/- is valid).
     if (isVecType(targetType)) {
       nAtoms = std::min(nAtoms, 2);
     }
@@ -1628,7 +1604,7 @@ namespace refractir::reify {
       Atom a;
       if (isIntType(targetType)) {
         if (onPath && sym) {
-          a = genIntAtomOnPath(rng, *sym, vars, targetType, cfg, dummyReqs, excludeName);
+          a = genIntAtomOnPath(ctx, targetType);
         } else {
           a = genIntAtomOffPath(rng, vars, targetType, cfg, excludeName);
         }
@@ -1641,7 +1617,7 @@ namespace refractir::reify {
       } else if (isPtrType(targetType)) {
         a = genPtrAtom(rng, vars, targetType, excludeName);
       } else if (isVecType(targetType)) {
-        // [v0.2.1] Vec atom generation.
+        // Vec atom generation.
         auto vecs = excluding(vars.vecsOf(targetType), excludeName);
         const auto &vt = std::get<VecType>(targetType->v);
 
@@ -1717,9 +1693,7 @@ namespace refractir::reify {
     // Trivial-shape post-check. `genExpr` is also called for intrinsic
     // arguments — `call @foo(3, 5)` is just as foldable as a body
     // `%x = 3 + 5;` and benefits from the same reshape.
-    rewriteIfAllTriviallyConstant(
-        rng, sym, vars, targetType, onPath, cfg, dummyReqs, excludeName, atoms
-    );
+    rewriteIfAllTriviallyConstant(ctx, targetType, atoms);
 
     // Build Expr from atoms
     Expr expr;
@@ -1792,7 +1766,8 @@ namespace refractir::reify {
   ) {
     // For i32, a bare CoefAtom is fine (i32 is the default inferred type).
     if (intBitWidth(targetType) == 32) {
-      return genIntAtomOnPath(rng, sym, vars, targetType, cfg, extraRequires, excludeName);
+      ExprGenContext ctx{rng, &sym, vars, cfg, true, extraRequires, excludeName};
+      return genIntAtomOnPath(ctx, targetType);
     }
     // Non-i32: prefer RValueAtom (variable of targetType) since its type is
     // inferred from the declaration. Failing that, wrap a sym coef in a CastAtom.
@@ -1817,6 +1792,7 @@ namespace refractir::reify {
       bool onPath, const ExprGenConfig &cfg, const std::optional<std::string> &excludeName
   ) {
     std::vector<Instr> reqs;
+    ExprGenContext ctx{rng, sym, vars, cfg, onPath, reqs, excludeName};
     std::vector<Atom> atoms;
 
     std::uniform_int_distribution<int> nAtomsDist(cfg.minAtoms, cfg.maxAtoms);
@@ -1831,20 +1807,21 @@ namespace refractir::reify {
       Atom a;
       if (isIntType(targetType)) {
         if (onPath && sym) {
-          // For i==0, use genFirstIntAtomOnPath to ensure non-i32 types get an
-          // explicitly-typed first atom. A bare CoefAtom{SymId} would print as a
-          // bare integer literal after model substitution, defaulting to i32.
+          // For i==0, use genFirstIntAtomOnPath to ensure non-i32 types get
+          // an explicitly-typed first atom. A bare CoefAtom{SymId} would print
+          // as a bare integer literal after model substitution, defaulting to
+          // i32.
           if (i == 0) {
             a = genFirstIntAtomOnPath(rng, *sym, vars, targetType, cfg, reqs, excludeName);
           } else {
-            a = genIntAtomOnPath(rng, *sym, vars, targetType, cfg, reqs, excludeName);
+            a = genIntAtomOnPath(ctx, targetType);
           }
         } else {
           // The first atom of an off-path expression must be explicitly typed.
           // The TypeChecker evaluates the condition LHS with expectedBits=nullopt,
-          // meaning a bare IntLit first atom defaults to i32 regardless of condType.
-          // Using genFirstIntAtomOffPath for i==0 ensures the first atom is always
-          // a RValueAtom or CastAtom whose type is unambiguous.
+          // meaning a bare IntLit first atom defaults to i32 regardless of
+          // condType. Using genFirstIntAtomOffPath for i==0 ensures the first
+          // atom is always a RValueAtom or CastAtom whose type is unambiguous.
           if (i == 0) {
             a = genFirstIntAtomOffPath(rng, vars, targetType, cfg, excludeName);
           } else {
@@ -1860,8 +1837,8 @@ namespace refractir::reify {
       } else if (isPtrType(targetType)) {
         a = genPtrAtom(rng, vars, targetType, excludeName);
       } else if (isVecType(targetType)) {
-        // [v0.2.1] Vec target in genExprWithRequires — delegate to the
-        // same logic as genExpr's vec branch.
+        // Vec target in genExprWithRequires — delegate to the same
+        // logic as genExpr's vec branch.
         auto vecs = excluding(vars.vecsOf(targetType), excludeName);
         const auto &vt = std::get<VecType>(targetType->v);
         if (i == 0 && !vecs.empty()) {
@@ -1900,8 +1877,8 @@ namespace refractir::reify {
       atoms.push_back(std::move(a));
     }
 
-    // R3 + P6: a single-atom bare-RValueAtom RHS (`%v = %w;`) is reshaped
-    // so it can't bulk-collapse under SCCP — except for a kPAllowPlainCopy
+    // A single-atom bare-RValueAtom RHS (`%v = %w;`) is reshaped so it
+    // can't bulk-collapse under SCCP — except for a kPAllowPlainCopy
     // slice that survives verbatim: copy propagation is a distinct dataflow
     // shape the optimizer exercises, and forbidding it outright homogenises
     // every def into an arithmetic join. Self-assigns remain impossible
@@ -1914,7 +1891,7 @@ namespace refractir::reify {
         (isIntType(targetType) || isFpType(targetType)) &&
         copyCoin(rng) >= rysmith::hp::kPAllowPlainCopy) {
       if (cfg.maxAtoms > 1) {
-        // [P3] On-path the appended tail is a cheap linear atom — a slot-
+        // On-path the appended tail is a cheap linear atom — a slot-
         // table roll would mostly mint a fresh sym (free variable) or a
         // nonlinear `sym * var` for what is purely an anti-copy reshape.
         std::optional<Atom> tail =
@@ -1924,12 +1901,10 @@ namespace refractir::reify {
         if (tail) {
           atoms.push_back(std::move(*tail));
         } else {
-          atoms.push_back(
-              genOneAtomOfType(rng, sym, vars, targetType, onPath, cfg, reqs, excludeName)
-          );
+          atoms.push_back(genOneAtomOfType(ctx, targetType));
         }
       } else {
-        // [P3] In-place replacement must not be another bare read (that
+        // In-place replacement must not be another bare read (that
         // would recreate a plain copy of a different var), so the cheap
         // chain is asked for a multiply / cast / load.
         std::optional<Atom> replacement =
@@ -1937,7 +1912,7 @@ namespace refractir::reify {
                 ? genCheapLinearAtom(rng, vars, targetType, excludeName, false)
                 : std::nullopt;
         for (int attempt = 0; !replacement && attempt < 10; attempt++) {
-          Atom cand = genOneAtomOfType(rng, sym, vars, targetType, onPath, cfg, reqs, excludeName);
+          Atom cand = genOneAtomOfType(ctx, targetType);
           if (!std::holds_alternative<RValueAtom>(cand.v))
             replacement = std::move(cand);
         }
@@ -1959,9 +1934,7 @@ namespace refractir::reify {
       }
     }
 
-    rewriteIfAllTriviallyConstant(
-        rng, sym, vars, targetType, onPath, cfg, reqs, excludeName, atoms
-    );
+    rewriteIfAllTriviallyConstant(ctx, targetType, atoms);
 
     Expr expr;
     expr.first = std::move(atoms[0]);
@@ -2000,7 +1973,7 @@ namespace refractir::reify {
       }
     }
 
-    // [P3] Mark the arm expressions as condition context so their trivial-
+    // Mark the arm expressions as condition context so their trivial-
     // shape replacements keep minting syms — conditions are the solver's
     // handles for driving the path; sym-free arms starve it of freedom and
     // inflate the UNSAT/retry rate.
@@ -2035,7 +2008,7 @@ namespace refractir::reify {
 
     // Collect mutable (non-ptr) vars for assignment targets
     // We assign to scalars and array/struct elements.
-    // [v0.2.2] Function parameters are immutable per spec §3.5.2 — exclude.
+    // Function parameters are immutable per spec §3.5.2 — exclude.
     std::vector<const VarEntry *> allVars;
     for (const auto &v: vars.vars)
       if (!v.isParam)
@@ -2066,7 +2039,7 @@ namespace refractir::reify {
             result.push_back(std::move(req));
         valExpr = std::move(ve);
       } else if (isPtrType(ptee)) {
-        // [P7] Store a pointer value through a `ptr ptr T` slot. genPtrAtom
+        // Store a pointer value through a `ptr ptr T` slot. genPtrAtom
         // yields a single valid pointer atom (addr / ptr-copy / load /
         // ptrindex / ptrfield); the solver models the stored provenance, so
         // a later load through the slot reads the right object on-path.
@@ -2272,7 +2245,7 @@ namespace refractir::reify {
           }
           continue;
         } else if (isVecType(lhsVar->type)) {
-          // [v0.2.1] Vec assignment: whole-vec only if we have another vec
+          // Vec assignment: whole-vec only if we have another vec
           // var of the same type to copy from (otherwise the typechecker
           // rejects scalar RHS). Fall back to lane write.
           // Exclude LHS from the same-type pool — `%vec = %vec;` is a
