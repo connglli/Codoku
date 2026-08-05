@@ -282,6 +282,110 @@ struct PerProgConfig {
   double pNocloneCallees = 0.0;
 };
 
+// Where one bundle's compiled output goes, and how to describe it in the log.
+struct EmitTarget {
+  fs::path emitDir;
+  std::string emitStem;
+  std::string progBase;
+  std::string compiledReport;
+  std::string failTag;
+  bool noUbGuards = false;
+};
+
+// Compile `bundle` to cfg.target. Returns false when the backend rejects it.
+[[nodiscard]] static bool
+emitBundle(Program &bundle, std::mt19937 &rng, const PerProgConfig &cfg, const EmitTarget &t) {
+  const fs::path &emitDir = t.emitDir;
+  const std::string &emitStem = t.emitStem;
+  const std::string &progBase = t.progBase;
+  const std::string &compiledReport = t.compiledReport;
+  const std::string &failTag = t.failTag;
+  const bool noUbGuards = t.noUbGuards;
+  (void) progBase;
+  // Target backends. Both code paths run the analysis pipeline on the
+  // in-memory bundle and call CBackend / WasmBackend directly so
+  // FunDecl::sourceStem (set during mergeInto) survives into emitSplit
+  // — going through symirc-as-subprocess would round-trip the bundle
+  // through text and collapse every sourceStem to "".
+  if (cfg.target == "c") {
+    // Split mode: `emitStem = "program"` keys an (empty) primary
+    // translation unit; the per-source .c files carry the bodies and
+    // share a `common.h`. Flat mode: `emitStem = progBase` writes a
+    // single self-contained `<progBase>.c`.
+    //
+    // Resolve `--vec-lowering` once per program against the per-prog
+    // rng so each emitted bundle stamps a single strategy — matching
+    // rysmith's per-fn semantics.  `random` cycles across the five
+    // strategies so a multi-prog sweep exercises every backend
+    // lowering.
+    std::string vecLow = reify::pickVecLowering(rng, cfg.vecLowering);
+    if (cfg.verbose && !vecLow.empty())
+      std::cout << "  vec-lowering: " << vecLow << "\n";
+    // Per-program structured coin, drawn after the vec-lowering pick
+    // (and only for "random") — matching rysmith's stream discipline.
+    bool structured = reify::pickStructuredLowering(rng, cfg.structuredLowering);
+    if (cfg.verbose && structured)
+      std::cout << "  structured-lowering: true\n";
+    reify::EmitOptions emitOpts;
+    emitOpts.keepRequire = cfg.keepRequire;
+    emitOpts.noUbGuards = noUbGuards;
+    emitOpts.vecLowering = vecLow;
+    emitOpts.structuredLowering = structured;
+    emitOpts.emitMain = cfg.emitMain;
+    emitOpts.splitBySource = cfg.splitBySource;
+    emitOpts.verbose = cfg.verbose;
+    if (!emitCInProcess(bundle, emitDir, emitStem, emitOpts)) {
+      if (cfg.verbose)
+        std::cerr << "  backend FAIL (" << failTag << ")\n";
+      return false;
+    }
+    std::cout << "  compiled: " << compiledReport << "\n";
+  } else if (cfg.target == "wasm") {
+    fs::path wasmOut = emitDir / (emitStem + ".wat");
+    std::string vecLow = reify::pickVecLowering(rng, cfg.vecLowering, "wasm");
+    if (cfg.verbose && !vecLow.empty())
+      std::cout << "  vec-lowering: " << vecLow << "\n";
+    // Per-program structured coin, drawn after the vec-lowering pick
+    // (and only for "random") — same stream discipline as the C branch.
+    bool structured = reify::pickStructuredLowering(rng, cfg.structuredLowering);
+    if (cfg.verbose && structured)
+      std::cout << "  structured-lowering: true\n";
+    reify::EmitOptions emitOpts;
+    emitOpts.keepRequire = cfg.keepRequire;
+    emitOpts.noUbGuards = noUbGuards;
+    emitOpts.vecLowering = vecLow;
+    emitOpts.structuredLowering = structured;
+    emitOpts.emitMain = cfg.emitMain;
+    emitOpts.verbose = cfg.verbose;
+    if (!emitWasmInProcess(bundle, wasmOut, emitOpts)) {
+      if (cfg.verbose)
+        std::cerr << "  backend FAIL (" << failTag << ")\n";
+      return false;
+    }
+    std::cout << "  compiled: " << wasmOut << "\n";
+  } else if (cfg.target == "python") {
+    fs::path pyOut = emitDir / (emitStem + ".py");
+    // Per-program strategy pick from the python set (mirrors the C
+    // branch's per-program vec-lowering resolution).
+    std::string vecLow = reify::pickVecLowering(rng, cfg.vecLowering, "python");
+    if (cfg.verbose && !vecLow.empty())
+      std::cout << "  vec-lowering: " << vecLow << "\n";
+    reify::EmitOptions emitOpts;
+    emitOpts.keepRequire = cfg.keepRequire;
+    emitOpts.noUbGuards = noUbGuards;
+    emitOpts.vecLowering = vecLow;
+    emitOpts.emitMain = cfg.emitMain;
+    emitOpts.verbose = cfg.verbose;
+    if (!emitPyInProcess(bundle, pyOut, emitOpts)) {
+      if (cfg.verbose)
+        std::cerr << "  backend FAIL (" << failTag << ")\n";
+      return false;
+    }
+    std::cout << "  compiled: " << pyOut << "\n";
+  }
+  return true;
+}
+
 static bool generateOne(const FuncPool &pool, std::mt19937 &rng, const PerProgConfig &cfg) {
   if (pool.entries.empty())
     return false;
@@ -463,86 +567,10 @@ static bool generateOne(const FuncPool &pool, std::mt19937 &rng, const PerProgCo
       break;
     }
 
-  // Target backends. Both code paths run the analysis pipeline on the
-  // in-memory bundle and call CBackend / WasmBackend directly so
-  // FunDecl::sourceStem (set during mergeInto) survives into emitSplit
-  // — going through symirc-as-subprocess would round-trip the bundle
-  // through text and collapse every sourceStem to "".
-  if (cfg.target == "c") {
-    // Split mode: `emitStem = "program"` keys an (empty) primary
-    // translation unit; the per-source .c files carry the bodies and
-    // share a `common.h`. Flat mode: `emitStem = progBase` writes a
-    // single self-contained `<progBase>.c`.
-    //
-    // Resolve `--vec-lowering` once per program against the per-prog
-    // rng so each emitted bundle stamps a single strategy — matching
-    // rysmith's per-fn semantics.  `random` cycles across the five
-    // strategies so a multi-prog sweep exercises every backend
-    // lowering.
-    std::string vecLow = reify::pickVecLowering(rng, cfg.vecLowering);
-    if (cfg.verbose && !vecLow.empty())
-      std::cout << "  vec-lowering: " << vecLow << "\n";
-    // Per-program structured coin, drawn after the vec-lowering pick
-    // (and only for "random") — matching rysmith's stream discipline.
-    bool structured = reify::pickStructuredLowering(rng, cfg.structuredLowering);
-    if (cfg.verbose && structured)
-      std::cout << "  structured-lowering: true\n";
-    reify::EmitOptions emitOpts;
-    emitOpts.keepRequire = cfg.keepRequire;
-    emitOpts.noUbGuards = noUbGuards;
-    emitOpts.vecLowering = vecLow;
-    emitOpts.structuredLowering = structured;
-    emitOpts.emitMain = cfg.emitMain;
-    emitOpts.splitBySource = cfg.splitBySource;
-    emitOpts.verbose = cfg.verbose;
-    if (!emitCInProcess(bundle, emitDir, emitStem, emitOpts)) {
-      if (cfg.verbose)
-        std::cerr << "  backend FAIL (" << failTag << ")\n";
+  {
+    EmitTarget emitTarget{emitDir, emitStem, progBase, compiledReport, failTag, noUbGuards};
+    if (!emitBundle(bundle, rng, cfg, emitTarget))
       return false;
-    }
-    std::cout << "  compiled: " << compiledReport << "\n";
-  } else if (cfg.target == "wasm") {
-    fs::path wasmOut = emitDir / (emitStem + ".wat");
-    std::string vecLow = reify::pickVecLowering(rng, cfg.vecLowering, "wasm");
-    if (cfg.verbose && !vecLow.empty())
-      std::cout << "  vec-lowering: " << vecLow << "\n";
-    // Per-program structured coin, drawn after the vec-lowering pick
-    // (and only for "random") — same stream discipline as the C branch.
-    bool structured = reify::pickStructuredLowering(rng, cfg.structuredLowering);
-    if (cfg.verbose && structured)
-      std::cout << "  structured-lowering: true\n";
-    reify::EmitOptions emitOpts;
-    emitOpts.keepRequire = cfg.keepRequire;
-    emitOpts.noUbGuards = noUbGuards;
-    emitOpts.vecLowering = vecLow;
-    emitOpts.structuredLowering = structured;
-    emitOpts.emitMain = cfg.emitMain;
-    emitOpts.verbose = cfg.verbose;
-    if (!emitWasmInProcess(bundle, wasmOut, emitOpts)) {
-      if (cfg.verbose)
-        std::cerr << "  backend FAIL (" << failTag << ")\n";
-      return false;
-    }
-    std::cout << "  compiled: " << wasmOut << "\n";
-  } else if (cfg.target == "python") {
-    fs::path pyOut = emitDir / (emitStem + ".py");
-    // Per-program strategy pick from the python set (mirrors the C
-    // branch's per-program vec-lowering resolution).
-    std::string vecLow = reify::pickVecLowering(rng, cfg.vecLowering, "python");
-    if (cfg.verbose && !vecLow.empty())
-      std::cout << "  vec-lowering: " << vecLow << "\n";
-    reify::EmitOptions emitOpts;
-    emitOpts.keepRequire = cfg.keepRequire;
-    emitOpts.noUbGuards = noUbGuards;
-    emitOpts.vecLowering = vecLow;
-    emitOpts.emitMain = cfg.emitMain;
-    emitOpts.verbose = cfg.verbose;
-    if (!emitPyInProcess(bundle, pyOut, emitOpts)) {
-      if (cfg.verbose)
-        std::cerr << "  backend FAIL (" << failTag << ")\n";
-      return false;
-    }
-    std::cout << "  compiled: " << pyOut << "\n";
   }
 
   // Validate the fused program on the entry's solved input, asserting the

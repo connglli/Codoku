@@ -249,16 +249,14 @@ struct LeafGenConfig {
 };
 
 // `rng` is taken by value so the call can run in a detached thread.
-[[nodiscard]] static GenerateResult generateLeaf(
-    const LeafGenConfig &opts, const VarGenConfig &varCfg, const std::string &funcName,
-    std::mt19937 rng, std::uint32_t baseSeed
-) {
-  // S1: CFG
+// S1 of the pipeline: the leaf's control-flow graph. Non-terminating
+// generation needs at least one loop, so it biases toward back edges and
+// regenerates until the repaired CFG admits a lasso — bounded, because the
+// attempt loop downstream fails cleanly when no lasso is ever found.
+[[nodiscard]] static RyCFG buildLeafCFG(const LeafGenConfig &opts, std::mt19937 &rng) {
   GenCFGParams cfgParams;
   cfgParams.nBbls = opts.nBbls;
   cfgParams.pBranch = opts.pBranch;
-  // Non-terminating generation needs at least one loop; bias toward back
-  // edges and regenerate until the CFG admits a lasso (see below).
   cfgParams.pBackedge = opts.requireNonterm ? std::max(opts.pBackedge, 0.5) : opts.pBackedge;
   cfgParams.requireReducible = opts.requireReducible;
   RyCFG cfg;
@@ -267,14 +265,66 @@ struct LeafGenConfig {
     cfg = genCFG(cfgParams);
     if (!opts.requireNonterm)
       break;
-    // A lasso requires a reachable loop header; retry a bounded number of
-    // times if the repaired CFG has none (the attempt loop fails cleanly
-    // if we give up).
     SampleLassoParams probe;
     probe.seed = rng();
     if (sampleLasso(cfg, probe).has_value() || cfgTry >= 20)
       break;
   }
+  return cfg;
+}
+
+// S2: the execution path this attempt will concretize — a lasso for
+// non-terminating generation, otherwise a random entry-to-exit walk whose
+// loop-iteration ceiling decays on each retry. Returns nullopt when the
+// sampler cannot produce one.
+[[nodiscard]] static std::optional<std::vector<std::string>>
+sampleAttemptPath(const LeafGenConfig &opts, const RyCFG &cfg, std::mt19937 &rng, int attempt) {
+  if (opts.requireNonterm) {
+    SampleLassoParams lassoParams;
+    lassoParams.seed = rng();
+    // Draw the period per attempt: a k > 1 orbit is a strictly harder
+    // constraint (the state must avoid the header state for k-1 laps), so
+    // retrying re-rolls it rather than being stuck on one hard k.
+    lassoParams.period =
+        opts.maxLassoPeriod <= 1
+            ? 1
+            : static_cast<int>(std::uniform_int_distribution<int>(1, opts.maxLassoPeriod)(rng));
+    return sampleLasso(cfg, lassoParams);
+  }
+  SamplePathParams pathParams;
+  pathParams.seed = rng();
+  // Keep max >= min so retry decay can't violate the requested minimum.
+  pathParams.maxLoopIter = std::max(opts.minLoopIter, opts.maxLoopIter - attempt);
+  pathParams.minLoopIter = opts.minLoopIter;
+  return samplePath(cfg, pathParams);
+}
+
+// The `// CFG:` / `// PATH:` banner every emitted .sir carries. Fixed for the
+// whole attempt: only the per-init sym and parameter solutions differ.
+static void writePathHeader(
+    std::ostream &os, const RyCFG &cfg, const std::vector<std::string> &path, bool requireNonterm
+) {
+  os << "// CFG:\n";
+  for (const auto &b: cfg.blocks) {
+    os << "//   " << b.label;
+    if (!b.succs.empty()) {
+      os << " ->";
+      for (const auto &succ: b.succs)
+        os << " " << succ;
+    }
+    os << "\n";
+  }
+  os << (requireNonterm ? "// LASSO:" : "// PATH:");
+  for (std::size_t k = 0; k < path.size(); k++)
+    os << (k == 0 ? " " : " -> ") << path[k];
+  os << "\n\n";
+}
+
+[[nodiscard]] static GenerateResult generateLeaf(
+    const LeafGenConfig &opts, const VarGenConfig &varCfg, const std::string &funcName,
+    std::mt19937 rng, std::uint32_t baseSeed
+) {
+  RyCFG cfg = buildLeafCFG(opts, rng);
 
   if (opts.verbose)
     std::cout << "[cfg] " << cfg.blocks.size() << " blocks\n";
@@ -287,28 +337,7 @@ struct LeafGenConfig {
               << " structs\n";
 
   for (int attempt = 0; attempt <= opts.maxRetries; attempt++) {
-    // Path sampling: a lasso for non-terminating generation, otherwise a
-    // random entry-to-exit walk (loop iterations decay on retry).
-    std::optional<std::vector<std::string>> maybePath;
-    if (opts.requireNonterm) {
-      SampleLassoParams lassoParams;
-      lassoParams.seed = rng();
-      // Draw the period per attempt: a k > 1 orbit is a strictly harder
-      // constraint (the state must avoid the header state for k-1 laps), so
-      // retrying re-rolls it rather than being stuck on one hard k.
-      lassoParams.period =
-          opts.maxLassoPeriod <= 1
-              ? 1
-              : static_cast<int>(std::uniform_int_distribution<int>(1, opts.maxLassoPeriod)(rng));
-      maybePath = sampleLasso(cfg, lassoParams);
-    } else {
-      SamplePathParams pathParams;
-      pathParams.seed = rng();
-      // Keep max ≥ min so retry decay can't violate the requested minimum.
-      pathParams.maxLoopIter = std::max(opts.minLoopIter, opts.maxLoopIter - attempt);
-      pathParams.minLoopIter = opts.minLoopIter;
-      maybePath = samplePath(cfg, pathParams);
-    }
+    std::optional<std::vector<std::string>> maybePath = sampleAttemptPath(opts, cfg, rng, attempt);
     if (!maybePath) {
       if (opts.verbose)
         std::cerr << "[sampler] attempt=" << attempt << " sample failed\n";
@@ -319,28 +348,8 @@ struct LeafGenConfig {
     if (opts.verbose)
       std::cout << "[sampler] attempt=" << attempt << " EP len=" << path.size() << "\n";
 
-    // CFG/PATH comment header shared by every init of this attempt
-    // the path itself is fixed for the whole attempt, only the per-init
-    // sym/param solutions differ.
-    auto writePathHeader = [&](std::ostream &os) {
-      os << "// CFG:\n";
-      for (const auto &b: cfg.blocks) {
-        os << "//   " << b.label;
-        if (!b.succs.empty()) {
-          os << " ->";
-          for (const auto &succ: b.succs)
-            os << " " << succ;
-        }
-        os << "\n";
-      }
-      if (opts.requireNonterm) {
-        os << "// LASSO:";
-      } else {
-        os << "// PATH:";
-      }
-      for (std::size_t k = 0; k < path.size(); k++)
-        os << (k == 0 ? " " : " -> ") << path[k];
-      os << "\n\n";
+    auto emitPathHeader = [&](std::ostream &os) {
+      writePathHeader(os, cfg, path, opts.requireNonterm);
     };
 
     // Generate opts.nInits independently-seeded programs
@@ -395,7 +404,7 @@ struct LeafGenConfig {
         auto symPath = opts.outDir / (funcName + reify::rysmith::hp::kSymInfix +
                                       std::to_string(initIdx) + ".sir");
         std::ofstream ofs(symPath);
-        writePathHeader(ofs);
+        emitPathHeader(ofs);
         SIRPrinter printer(ofs);
         printer.print(prog);
         if (opts.verbose)
@@ -595,7 +604,7 @@ struct LeafGenConfig {
             }
             ofs << "\n";
           }
-          writePathHeader(ofs);
+          emitPathHeader(ofs);
           SIRPrinter printer(ofs, res.model);
           printer.print(prog);
         }
@@ -654,100 +663,316 @@ struct LeafGenConfig {
   return GenerateResult{};
 }
 
-int main(int argc, char **argv) {
+// The command-line surface. Defined apart from main so the option table
+// reads as one list rather than as the first ninety lines of the driver.
+[[nodiscard]] static cxxopts::Options makeOptions() {
   cxxopts::Options opts("rysmith", "rysmith — C++ random RefractIR leaf-function generator");
 
   // clang-format off
-  opts.add_options()
-    ("n,n-funcs",         "Number of leaf functions to generate",
-                          cxxopts::value<int>()->default_value("1"))
-    // Type control
-    ("no-fp",             "Disable f32/f64 types entirely")
-    ("no-vec",            "Disable <N> T vector type generation")
-    ("no-agg-ptr",        "Disable ptr [N] T / ptr @S aggregate pointer generation")
-    ("max-ptr-depth",     "Maximum pointer nesting depth (0 disables pointers)",
-                          cxxopts::value<int>()->default_value("2"))
-    ("max-agg-nest",      "Maximum aggregate nesting depth",
-                          cxxopts::value<int>()->default_value("2"))
-    ("max-agg-elems",     "Maximum array size and struct field count",
-                          cxxopts::value<int>()->default_value("3"))
-    // Generation
-    ("n-params",          "Number of scalar parameters per generated function (default: 3)",
-                          cxxopts::value<int>()->default_value("3"))
-    ("n-vars",            "Variables per function",
-                          cxxopts::value<int>()->default_value("10"))
-    ("n-stmts",           "Statements per block on path",
-                          cxxopts::value<int>()->default_value("3"))
-    ("min-atoms",         "Minimum atoms per generated expression",
-                          cxxopts::value<int>()->default_value("1"))
-    ("max-atoms",         "Maximum atoms per generated expression",
-                          cxxopts::value<int>()->default_value("3"))
-    ("off-path-multiplier", "Scale --n-stmts / --min-atoms / --max-atoms by this factor in off-path blocks (never executed; solver-free)",
-                          cxxopts::value<double>()->default_value("2.0"))
-    // Operators
-    ("no-divmod",         "Disable integer division and modulo")
-    ("no-select",         "Disable select ternary expressions")
-    ("no-intrinsics",     "Disable intrinsic call generation")
-    ("no-ptrarith",       "Disable pointer arithmetics")
-    ("no-crc32",          "Disable CRC32 replacement of the original addition-based checksum")
-    // CFG
-    ("n-bbls",            "Basic blocks between entry and exit per CFG",
-                          cxxopts::value<int>()->default_value("15"))
-    ("p-branch",          "Probability of two-successor block",
-                          cxxopts::value<double>()->default_value("0.5"))
-    ("p-backedge",        "Probability of back-edge",
-                          cxxopts::value<double>()->default_value("0.3"))
-    ("require-reducible", "Only generate reducible CFGs (irreducible back edges are repaired away)")
-    // Solver
-    ("timeout",           "SMT solver timeout per attempt in ms",
-                          cxxopts::value<std::uint32_t>()->default_value("2000"))
-    ("require-ub",        "Force at least one UB to be triggered on the chosen path")
-    ("require-nonterm",   "Generate UB-free programs that diverge on the sampled input (samples a lasso; implies --require-reducible and --no-crc32)")
-    ("max-lasso-period",  "Cap the lasso orbit's period k under --require-nonterm; each attempt draws k from [1, N]. k > 1 means the header state recurs only after k laps",
-                          cxxopts::value<int>()->default_value("1"))
-    ("coef-domain",       "Domain for coef symbols",
-                          cxxopts::value<std::string>()->default_value("[-2147483647, 2147483647]"))
-    ("value-domain",      "Domain for value/constant symbols",
-                          cxxopts::value<std::string>()->default_value("[-2147483647, 2147483647]"))
-    ("index-domain",      "Domain for index symbols",
-                          cxxopts::value<std::string>()->default_value("[1, 30]"))
-    // Retry/inits
-    ("n-inits",           "Concretizations per template (different seeds)",
-                          cxxopts::value<int>()->default_value("3"))
-    ("max-retries",       "Retry attempts on solver failure",
-                          cxxopts::value<int>()->default_value("2"))
-    ("max-loop-iter",     "Max loop iterations in the execution path (EP) sample",
-                          cxxopts::value<int>()->default_value("3"))
-    ("min-loop-iter",     "Require at least one loop in the EP to iterate this many times",
-                          cxxopts::value<int>()->default_value("0"))
-    ("p-large-coef",      "Fraction of new on-path coefs forced to |c| > --large-coef",
-                          cxxopts::value<double>()->default_value("0.3"))
-    ("large-coef",        "Magnitude threshold T for the |c| > T interest require (clamped per-coef to --coef-domain)",
-                          cxxopts::value<std::int64_t>()->default_value("1048576"))
-    // Output
-    ("o,output-dir",      "Output directory",
-                          cxxopts::value<std::string>()->default_value("rysmith_out"))
-    ("target",            "Compile concrete .sir to target (sir, c, wasm, python); sir = no compilation",
-                          cxxopts::value<std::string>()->default_value("sir"))
-    ("vec-lowering",      "Vec-lowering strategy for C/WASM/Python backends (random|vecext|scalars|array|structscalars|structarray)",
-                          cxxopts::value<std::string>()->default_value("random"))
-    ("structured-lowering", "Structured lowering for the C (goto-free) and WASM (dispatch-free) targets: true|false|random; true/random imply --require-reducible",
-                          cxxopts::value<std::string>()->default_value("false"))
-    ("keep-require",      "Include require checks in compiled output (default: omitted)")
-    ("keep-ub-guards",    "Keep dynamic UB guards in compiled output even for UB-free programs (default: false)")
-    ("keep-symbolic",     "Write intermediate symbolic .sir files to disk")
-    ("emit-desc",         "Emit per-function descriptor JSON (func_<id>_<i>.json) — needed by rylink")
-    ("emit-state",        "Emit a func_<id>_<i>.state.json profile of the concrete state at each program point — consumed by rytwin. Value selects granularity: pbb (per basic block) or ppp (per program point)",
-                          cxxopts::value<std::string>())
-    ("emit-main",         "Generate a main wrapper in the output program")
-    // Validation
-    ("validate",          "Run symiri on each concrete .sir to validate")
-    // Misc
-    ("seed",              "Master RNG seed (default: random)",
-                          cxxopts::value<std::uint32_t>())
-    ("v,verbose",         "Verbose output")
-    ("h,help",            "Print usage");
+    opts.add_options()
+      ("n,n-funcs",         "Number of leaf functions to generate",
+                            cxxopts::value<int>()->default_value("1"))
+      // Type control
+      ("no-fp",             "Disable f32/f64 types entirely")
+      ("no-vec",            "Disable <N> T vector type generation")
+      ("no-agg-ptr",        "Disable ptr [N] T / ptr @S aggregate pointer generation")
+      ("max-ptr-depth",     "Maximum pointer nesting depth (0 disables pointers)",
+                            cxxopts::value<int>()->default_value("2"))
+      ("max-agg-nest",      "Maximum aggregate nesting depth",
+                            cxxopts::value<int>()->default_value("2"))
+      ("max-agg-elems",     "Maximum array size and struct field count",
+                            cxxopts::value<int>()->default_value("3"))
+      // Generation
+      ("n-params",          "Number of scalar parameters per generated function (default: 3)",
+                            cxxopts::value<int>()->default_value("3"))
+      ("n-vars",            "Variables per function",
+                            cxxopts::value<int>()->default_value("10"))
+      ("n-stmts",           "Statements per block on path",
+                            cxxopts::value<int>()->default_value("3"))
+      ("min-atoms",         "Minimum atoms per generated expression",
+                            cxxopts::value<int>()->default_value("1"))
+      ("max-atoms",         "Maximum atoms per generated expression",
+                            cxxopts::value<int>()->default_value("3"))
+      ("off-path-multiplier", "Scale --n-stmts / --min-atoms / --max-atoms by this factor in off-path blocks (never executed; solver-free)",
+                            cxxopts::value<double>()->default_value("2.0"))
+      // Operators
+      ("no-divmod",         "Disable integer division and modulo")
+      ("no-select",         "Disable select ternary expressions")
+      ("no-intrinsics",     "Disable intrinsic call generation")
+      ("no-ptrarith",       "Disable pointer arithmetics")
+      ("no-crc32",          "Disable CRC32 replacement of the original addition-based checksum")
+      // CFG
+      ("n-bbls",            "Basic blocks between entry and exit per CFG",
+                            cxxopts::value<int>()->default_value("15"))
+      ("p-branch",          "Probability of two-successor block",
+                            cxxopts::value<double>()->default_value("0.5"))
+      ("p-backedge",        "Probability of back-edge",
+                            cxxopts::value<double>()->default_value("0.3"))
+      ("require-reducible", "Only generate reducible CFGs (irreducible back edges are repaired away)")
+      // Solver
+      ("timeout",           "SMT solver timeout per attempt in ms",
+                            cxxopts::value<std::uint32_t>()->default_value("2000"))
+      ("require-ub",        "Force at least one UB to be triggered on the chosen path")
+      ("require-nonterm",   "Generate UB-free programs that diverge on the sampled input (samples a lasso; implies --require-reducible and --no-crc32)")
+      ("max-lasso-period",  "Cap the lasso orbit's period k under --require-nonterm; each attempt draws k from [1, N]. k > 1 means the header state recurs only after k laps",
+                            cxxopts::value<int>()->default_value("1"))
+      ("coef-domain",       "Domain for coef symbols",
+                            cxxopts::value<std::string>()->default_value("[-2147483647, 2147483647]"))
+      ("value-domain",      "Domain for value/constant symbols",
+                            cxxopts::value<std::string>()->default_value("[-2147483647, 2147483647]"))
+      ("index-domain",      "Domain for index symbols",
+                            cxxopts::value<std::string>()->default_value("[1, 30]"))
+      // Retry/inits
+      ("n-inits",           "Concretizations per template (different seeds)",
+                            cxxopts::value<int>()->default_value("3"))
+      ("max-retries",       "Retry attempts on solver failure",
+                            cxxopts::value<int>()->default_value("2"))
+      ("max-loop-iter",     "Max loop iterations in the execution path (EP) sample",
+                            cxxopts::value<int>()->default_value("3"))
+      ("min-loop-iter",     "Require at least one loop in the EP to iterate this many times",
+                            cxxopts::value<int>()->default_value("0"))
+      ("p-large-coef",      "Fraction of new on-path coefs forced to |c| > --large-coef",
+                            cxxopts::value<double>()->default_value("0.3"))
+      ("large-coef",        "Magnitude threshold T for the |c| > T interest require (clamped per-coef to --coef-domain)",
+                            cxxopts::value<std::int64_t>()->default_value("1048576"))
+      // Output
+      ("o,output-dir",      "Output directory",
+                            cxxopts::value<std::string>()->default_value("rysmith_out"))
+      ("target",            "Compile concrete .sir to target (sir, c, wasm, python); sir = no compilation",
+                            cxxopts::value<std::string>()->default_value("sir"))
+      ("vec-lowering",      "Vec-lowering strategy for C/WASM/Python backends (random|vecext|scalars|array|structscalars|structarray)",
+                            cxxopts::value<std::string>()->default_value("random"))
+      ("structured-lowering", "Structured lowering for the C (goto-free) and WASM (dispatch-free) targets: true|false|random; true/random imply --require-reducible",
+                            cxxopts::value<std::string>()->default_value("false"))
+      ("keep-require",      "Include require checks in compiled output (default: omitted)")
+      ("keep-ub-guards",    "Keep dynamic UB guards in compiled output even for UB-free programs (default: false)")
+      ("keep-symbolic",     "Write intermediate symbolic .sir files to disk")
+      ("emit-desc",         "Emit per-function descriptor JSON (func_<id>_<i>.json) — needed by rylink")
+      ("emit-state",        "Emit a func_<id>_<i>.state.json profile of the concrete state at each program point — consumed by rytwin. Value selects granularity: pbb (per basic block) or ppp (per program point)",
+                            cxxopts::value<std::string>())
+      ("emit-main",         "Generate a main wrapper in the output program")
+      // Validation
+      ("validate",          "Run symiri on each concrete .sir to validate")
+      // Misc
+      ("seed",              "Master RNG seed (default: random)",
+                            cxxopts::value<std::uint32_t>())
+      ("v,verbose",         "Verbose output")
+      ("h,help",            "Print usage");
   // clang-format on
+  return opts;
+}
+
+// The run-level switches the per-leaf loop consults after a leaf is solved:
+// which backend to compile to, what to strip from the emitted program, and
+// whether to validate it. Everything that shapes the leaf itself lives in
+// LeafGenConfig.
+struct RunConfig {
+  int nFuncs = 1;
+  std::string target = "sir";
+  std::string vecLoweringOpt;
+  std::string structuredLoweringOpt;
+  bool emitMain = false;
+  bool noRequire = false;
+  bool noUbGuards = false;
+  bool validate = false;
+  int funcTimeoutMs = 0;
+  std::string emitStateMode;
+};
+
+// Generate every leaf of the run, counting successes and failures. Each leaf
+// runs on its own thread so a wall-clock timeout can abandon one that the
+// solver cannot finish, without taking the run down with it.
+static void runGenerationLoop(
+    const LeafGenConfig &leafCfg, const VarGenConfig &varCfg, const RunConfig &run,
+    std::mt19937 &rng, int &nOk, int &nFail
+) {
+  for (int i = 0; i < run.nFuncs; i++) {
+    std::string funcName = std::string(reify::rysmith::hp::kFuncPrefix) + "_" + leafCfg.genId +
+                           "_" + std::to_string(i);
+    std::uint32_t funcSeed = rng();
+    std::cout << "[" << (i + 1) << "/" << run.nFuncs << "] generating " << funcName
+              << " (seed=" << funcSeed << ")\n";
+
+    // Heap-allocated state lets us safely detach the thread on timeout without
+    // dangling references. Leaked on timeout — bounded by run.nFuncs, cleaned at exit.
+    struct FuncState {
+      std::mt19937 rng;
+      GenerateResult result;
+      std::atomic<bool> done{false};
+    };
+
+    auto *state = new FuncState{std::mt19937(funcSeed), {}, false};
+
+    // Per-function copy so funcIdx makes it into struct names
+    // (`@struct_<id>_<funcIdx>_<j>`). Without this every sibling fun in
+    // the same rysmith run would emit `@struct_<id>_0` etc, breaking
+    // rylink's bundle merge on a name vs. content mismatch.
+    VarGenConfig fnVarCfg = varCfg;
+    fnVarCfg.funcIdx = i;
+
+    std::thread t([&, state]() {
+      state->result = generateLeaf(leafCfg, fnVarCfg, funcName, state->rng, funcSeed);
+      state->done.store(true, std::memory_order_release);
+    });
+
+    bool timedOut = false;
+    if (run.funcTimeoutMs > 0) {
+      auto deadline =
+          std::chrono::steady_clock::now() + std::chrono::milliseconds(run.funcTimeoutMs);
+      while (!state->done.load(std::memory_order_acquire)) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+          timedOut = true;
+          break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      }
+    }
+
+    if (timedOut) {
+      t.detach(); // state leaked; thread completes or dies with the process
+      std::cerr << "[TIMEOUT] " << funcName << " exceeded " << run.funcTimeoutMs
+                << "ms wall clock\n";
+      nFail++;
+      continue;
+    }
+    t.join();
+    GenerateResult genRes = std::move(state->result);
+    delete state;
+
+    if (genRes.produced.empty()) {
+      std::cerr << "[FAIL] all attempts failed for " << funcName << " (seed=" << funcSeed << ")\n";
+      nFail++;
+      continue;
+    }
+
+    for (const auto &cf: genRes.produced) {
+      const fs::path &p = cf.path;
+      std::cout << "  concrete: " << p << "\n";
+
+      if (run.target != "sir") {
+        std::string ext = (run.target == "c") ? ".c" : (run.target == "python") ? ".py" : ".wat";
+        fs::path outPath = p.parent_path() / (p.stem().string() + ext);
+        std::string vecLowering = reify::pickVecLowering(rng, run.vecLoweringOpt, run.target);
+        if (leafCfg.verbose && !vecLowering.empty())
+          std::cout << "  vec-lowering: " << vecLowering << "\n";
+        bool structured = (run.target == "c" || run.target == "wasm") &&
+                          reify::pickStructuredLowering(rng, run.structuredLoweringOpt);
+        if (leafCfg.verbose && structured)
+          std::cout << "  structured-lowering: true\n";
+        reify::EmitOptions emitOpts;
+        emitOpts.keepRequire = !run.noRequire;
+        emitOpts.noUbGuards = run.noUbGuards;
+        emitOpts.vecLowering = vecLowering;
+        emitOpts.structuredLowering = structured;
+        emitOpts.emitMain = run.emitMain;
+        emitOpts.verbose = leafCfg.verbose;
+        bool ok = compileSirInProcess(p, run.target, outPath, emitOpts);
+        if (ok)
+          std::cout << "  compiled: " << outPath << "\n";
+        else
+          std::cerr << "  compile FAIL: " << p << "\n";
+      }
+    }
+
+    // Non-terminating programs run forever, so the symiri run.validate /
+    // state-profile passes below would hang. --require-nonterm instead gets a
+    // dedicated bounded-replay divergence check that confirms the header state
+    // recurs after one lap; --emit-state is unsupported for it.
+    if (leafCfg.requireNonterm && run.validate) {
+      bool allOk = true;
+      for (const auto &cf: genRes.produced) {
+        const fs::path &p = cf.path;
+        std::string baseFuncName = getBaseFuncName(p);
+        std::vector<std::string> paramArgs = extractParamArgs(cf.rz);
+        bool ok =
+            validateNontermDiverges(p, baseFuncName, paramArgs, cf.nontermHeader, cf.nontermPeriod);
+        std::cout << "  validated: " << (ok ? "OK" : "FAIL") << "(" << p.filename() << ")\n";
+        if (!ok) {
+          nFail++;
+          allOk = false;
+          break;
+        }
+      }
+      if (allOk)
+        nOk++;
+    } else if ((run.validate || !run.emitStateMode.empty()) && !leafCfg.requireNonterm) {
+      const bool wantProfile = !run.emitStateMode.empty();
+      const StateGranularity stGran =
+          run.emitStateMode == "ppp" ? StateGranularity::Ppp : StateGranularity::Pbb;
+      bool allOk = true;
+      for (const auto &cf: genRes.produced) {
+        const fs::path &p = cf.path;
+        std::string baseFuncName = getBaseFuncName(p);
+        std::vector<std::string> paramArgs = extractParamArgs(cf.rz);
+        // Run the on-disk full program through symiri once. When
+        // validating, its Result is asserted equal to the descriptor's
+        // retValue (captured from the independent minimal oracle at emit
+        // time) — that cross-check exercises the rewriter, the CFG body
+        // execution, and intrinsic dispatch in one shot; exit code 0
+        // alone would only prove symiri didn't crash. When --emit-state
+        // is on, the SAME run also fills the rytwin state profile (see
+        // runSymiriCaptureResult), so profiling costs no extra interpret.
+        // A UB-triggering program (require-ub) traps before producing a
+        // clean trace, so it is validated via the trap and yields no
+        // sidecar.
+        bool ok = !run.validate; // nothing to fail when only profiling
+        std::string mismatchReason;
+        if (leafCfg.solMode == SolvingMode::RequireUB) {
+          if (run.validate) {
+            ok = validateWithSymiri(p, baseFuncName, paramArgs, leafCfg.verbose, leafCfg.solMode);
+            if (!ok)
+              mismatchReason = "Expected UB but program executed successfully or failed statically";
+          }
+        } else {
+          StateProfile profile;
+          auto observed = runSymiriCaptureResult(
+              p, baseFuncName, paramArgs, wantProfile ? &profile : nullptr, stGran
+          );
+          if (wantProfile && observed) {
+            std::ofstream sofs(leafCfg.outDir / (p.stem().string() + ".state.json"));
+            if (sofs)
+              writeStateProfileJson(sofs, profile);
+          }
+          if (run.validate) {
+            if (observed) {
+              if (cf.rz.retValue.empty()) {
+                // No oracle to compare against (e.g. the rewrite was
+                // skipped). Fall back to the exit-code check.
+                ok = validateWithSymiri(
+                    p, baseFuncName, paramArgs, leafCfg.verbose, leafCfg.solMode
+                );
+              } else if (*observed == cf.rz.retValue) {
+                ok = true;
+              } else {
+                mismatchReason = "expected=" + cf.rz.retValue + " observed=" + *observed;
+              }
+            } else {
+              mismatchReason = "symiri produced no Result line";
+            }
+          }
+        }
+        if (run.validate) {
+          std::cout << "  validated: " << (ok ? "OK" : "FAIL") << " (" << p.filename() << ")";
+          if (!ok && !mismatchReason.empty())
+            std::cout << " [" << mismatchReason << "]";
+          std::cout << "\n";
+          if (!ok) {
+            allOk = false;
+            nFail++;
+            break;
+          }
+        }
+      }
+      if (!run.validate || allOk)
+        nOk++;
+    } else {
+      nOk++;
+    }
+  }
+}
+
+int main(int argc, char **argv) {
+  cxxopts::Options opts = makeOptions();
 
   cxxopts::ParseResult result;
   try {
@@ -1024,188 +1249,22 @@ int main(int argc, char **argv) {
   leafCfg.requireNonterm = requireNonterm;
   leafCfg.maxLassoPeriod = maxLassoPeriod;
 
+  RunConfig runCfg;
+  runCfg.nFuncs = nFuncs;
+  runCfg.target = target;
+  runCfg.vecLoweringOpt = vecLoweringOpt;
+  runCfg.structuredLoweringOpt = structuredLoweringOpt;
+  runCfg.emitMain = emitMain;
+  runCfg.noRequire = noRequire;
+  runCfg.noUbGuards = noUbGuards;
+  runCfg.validate = doValidate;
+  runCfg.emitStateMode = emitStateMode;
+  runCfg.funcTimeoutMs = funcTimeoutMs;
+
   auto wallStart = std::chrono::steady_clock::now();
   int nOk = 0, nFail = 0;
 
-  for (int i = 0; i < nFuncs; i++) {
-    std::string funcName =
-        std::string(reify::rysmith::hp::kFuncPrefix) + "_" + genId + "_" + std::to_string(i);
-    std::uint32_t funcSeed = rng();
-    std::cout << "[" << (i + 1) << "/" << nFuncs << "] generating " << funcName
-              << " (seed=" << funcSeed << ")\n";
-
-    // Heap-allocated state lets us safely detach the thread on timeout without
-    // dangling references. Leaked on timeout — bounded by nFuncs, cleaned at exit.
-    struct FuncState {
-      std::mt19937 rng;
-      GenerateResult result;
-      std::atomic<bool> done{false};
-    };
-
-    auto *state = new FuncState{std::mt19937(funcSeed), {}, false};
-
-    // Per-function copy so funcIdx makes it into struct names
-    // (`@struct_<id>_<funcIdx>_<j>`). Without this every sibling fun in
-    // the same rysmith run would emit `@struct_<id>_0` etc, breaking
-    // rylink's bundle merge on a name vs. content mismatch.
-    VarGenConfig fnVarCfg = varCfg;
-    fnVarCfg.funcIdx = i;
-
-    std::thread t([&, state]() {
-      state->result = generateLeaf(leafCfg, fnVarCfg, funcName, state->rng, funcSeed);
-      state->done.store(true, std::memory_order_release);
-    });
-
-    bool timedOut = false;
-    if (funcTimeoutMs > 0) {
-      auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(funcTimeoutMs);
-      while (!state->done.load(std::memory_order_acquire)) {
-        if (std::chrono::steady_clock::now() >= deadline) {
-          timedOut = true;
-          break;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-      }
-    }
-
-    if (timedOut) {
-      t.detach(); // state leaked; thread completes or dies with the process
-      std::cerr << "[TIMEOUT] " << funcName << " exceeded " << funcTimeoutMs << "ms wall clock\n";
-      nFail++;
-      continue;
-    }
-    t.join();
-    GenerateResult genRes = std::move(state->result);
-    delete state;
-
-    if (genRes.produced.empty()) {
-      std::cerr << "[FAIL] all attempts failed for " << funcName << " (seed=" << funcSeed << ")\n";
-      nFail++;
-      continue;
-    }
-
-    for (const auto &cf: genRes.produced) {
-      const fs::path &p = cf.path;
-      std::cout << "  concrete: " << p << "\n";
-
-      if (target != "sir") {
-        std::string ext = (target == "c") ? ".c" : (target == "python") ? ".py" : ".wat";
-        fs::path outPath = p.parent_path() / (p.stem().string() + ext);
-        std::string vecLowering = reify::pickVecLowering(rng, vecLoweringOpt, target);
-        if (verbose && !vecLowering.empty())
-          std::cout << "  vec-lowering: " << vecLowering << "\n";
-        bool structured = (target == "c" || target == "wasm") &&
-                          reify::pickStructuredLowering(rng, structuredLoweringOpt);
-        if (verbose && structured)
-          std::cout << "  structured-lowering: true\n";
-        reify::EmitOptions emitOpts;
-        emitOpts.keepRequire = !noRequire;
-        emitOpts.noUbGuards = noUbGuards;
-        emitOpts.vecLowering = vecLowering;
-        emitOpts.structuredLowering = structured;
-        emitOpts.emitMain = emitMain;
-        emitOpts.verbose = verbose;
-        bool ok = compileSirInProcess(p, target, outPath, emitOpts);
-        if (ok)
-          std::cout << "  compiled: " << outPath << "\n";
-        else
-          std::cerr << "  compile FAIL: " << p << "\n";
-      }
-    }
-
-    // Non-terminating programs run forever, so the symiri validate /
-    // state-profile passes below would hang. --require-nonterm instead gets a
-    // dedicated bounded-replay divergence check that confirms the header state
-    // recurs after one lap; --emit-state is unsupported for it.
-    if (requireNonterm && doValidate) {
-      bool allOk = true;
-      for (const auto &cf: genRes.produced) {
-        const fs::path &p = cf.path;
-        std::string baseFuncName = getBaseFuncName(p);
-        std::vector<std::string> paramArgs = extractParamArgs(cf.rz);
-        bool ok =
-            validateNontermDiverges(p, baseFuncName, paramArgs, cf.nontermHeader, cf.nontermPeriod);
-        std::cout << "  validated: " << (ok ? "OK" : "FAIL") << "(" << p.filename() << ")\n";
-        if (!ok) {
-          nFail++;
-          allOk = false;
-          break;
-        }
-      }
-      if (allOk)
-        nOk++;
-    } else if ((doValidate || !emitStateMode.empty()) && !requireNonterm) {
-      const bool wantProfile = !emitStateMode.empty();
-      const StateGranularity stGran =
-          emitStateMode == "ppp" ? StateGranularity::Ppp : StateGranularity::Pbb;
-      bool allOk = true;
-      for (const auto &cf: genRes.produced) {
-        const fs::path &p = cf.path;
-        std::string baseFuncName = getBaseFuncName(p);
-        std::vector<std::string> paramArgs = extractParamArgs(cf.rz);
-        // Run the on-disk full program through symiri once. When
-        // validating, its Result is asserted equal to the descriptor's
-        // retValue (captured from the independent minimal oracle at emit
-        // time) — that cross-check exercises the rewriter, the CFG body
-        // execution, and intrinsic dispatch in one shot; exit code 0
-        // alone would only prove symiri didn't crash. When --emit-state
-        // is on, the SAME run also fills the rytwin state profile (see
-        // runSymiriCaptureResult), so profiling costs no extra interpret.
-        // A UB-triggering program (require-ub) traps before producing a
-        // clean trace, so it is validated via the trap and yields no
-        // sidecar.
-        bool ok = !doValidate; // nothing to fail when only profiling
-        std::string mismatchReason;
-        if (solMode == SolvingMode::RequireUB) {
-          if (doValidate) {
-            ok = validateWithSymiri(p, baseFuncName, paramArgs, verbose, solMode);
-            if (!ok)
-              mismatchReason = "Expected UB but program executed successfully or failed statically";
-          }
-        } else {
-          StateProfile profile;
-          auto observed = runSymiriCaptureResult(
-              p, baseFuncName, paramArgs, wantProfile ? &profile : nullptr, stGran
-          );
-          if (wantProfile && observed) {
-            std::ofstream sofs(outDir / (p.stem().string() + ".state.json"));
-            if (sofs)
-              writeStateProfileJson(sofs, profile);
-          }
-          if (doValidate) {
-            if (observed) {
-              if (cf.rz.retValue.empty()) {
-                // No oracle to compare against (e.g. the rewrite was
-                // skipped). Fall back to the exit-code check.
-                ok = validateWithSymiri(p, baseFuncName, paramArgs, verbose, solMode);
-              } else if (*observed == cf.rz.retValue) {
-                ok = true;
-              } else {
-                mismatchReason = "expected=" + cf.rz.retValue + " observed=" + *observed;
-              }
-            } else {
-              mismatchReason = "symiri produced no Result line";
-            }
-          }
-        }
-        if (doValidate) {
-          std::cout << "  validated: " << (ok ? "OK" : "FAIL") << " (" << p.filename() << ")";
-          if (!ok && !mismatchReason.empty())
-            std::cout << " [" << mismatchReason << "]";
-          std::cout << "\n";
-          if (!ok) {
-            allOk = false;
-            nFail++;
-            break;
-          }
-        }
-      }
-      if (!doValidate || allOk)
-        nOk++;
-    } else {
-      nOk++;
-    }
-  }
+  runGenerationLoop(leafCfg, varCfg, runCfg, rng, nOk, nFail);
 
   // Single end-of-run orphan sweep.  When a per-function wall-clock
   // timeout fires, the detached worker may have already written some

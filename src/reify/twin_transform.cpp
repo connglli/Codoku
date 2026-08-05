@@ -696,74 +696,51 @@ namespace refractir::reify {
       return true;
     }
 
-    FunDecl buildGuardFun(const std::string &name, const TwinPlan &plan, const StructMap &structs) {
-      FunDecl g;
-      g.name = GlobalId{name, {}};
-      g.retType = makeI1();
+    // Assembles the guard function for one plan. The parameter list, the lets
+    // and the scratch pools are all built while walking the same leaves, so they
+    // share state here instead of being threaded through arguments.
+    struct GuardFunBuilder {
+      GuardFunBuilder(const TwinPlan &p, const StructMap &s) : plan(p), structs(s) {}
 
-      auto addLet = [&g](const std::string &nm, TypePtr ty, InitVal iv, bool mut) {
+      const TwinPlan &plan;
+      const StructMap &structs;
+      FunDecl g;
+      Block e;
+      std::vector<std::pair<TypePtr, std::string>> ptrScratch, loadScratch;
+      int eIdx = 0;
+      int kIdx = 0;
+
+      void addLet(const std::string &nm, TypePtr ty, InitVal iv, bool mut) {
         LetDecl d;
         d.isMutable = mut;
         d.name = LocalId{nm, {}};
         d.type = std::move(ty);
         d.init = std::move(iv);
         g.lets.push_back(std::move(d));
-      };
-      auto intInit = [](std::int64_t v) { return InitVal{InitVal::Kind::Int, IntLit{v, {}}, {}}; };
-      auto zeroInit = [&](const TypePtr &ty) {
+      }
+
+      static InitVal intInit(std::int64_t v) {
+        return InitVal{InitVal::Kind::Int, IntLit{v, {}}, {}};
+      }
+
+      InitVal zeroInit(const TypePtr &ty) {
         if (isPtrType(ty))
           return InitVal{InitVal::Kind::Undef, IntLit{0, {}}, {}};
         if (TypeUtils::getFloatBitWidth(ty))
           return InitVal{InitVal::Kind::Float, FloatLit{0.0, {}}, {}};
         return intInit(0);
-      };
-      auto litInit = [&](const StateValue &v) {
+      }
+
+      InitVal litInit(const StateValue &v) {
         if (v.kind == StateValue::Kind::Float)
           return InitVal{InitVal::Kind::Float, FloatLit{v.floatVal, {}}, {}};
         return intInit(v.intVal);
-      };
-
-      // Params, in guard-root order (the caller emits args the same way).
-      // After each root's main parameter(s) come one expected-pointer
-      // parameter per ptr leaf (`%__e<n>`): the caller reconstructs the
-      // expected pointer with `addr` / `null` and the guard compares with
-      // `==`, which is defined even across objects.
-      int eIdx = 0;
-      for (const auto &root: plan.guardRoots) {
-        if (rootIsFullyFree(plan.box, root))
-          continue;
-        switch (root.kind) {
-          case GuardRoot::Kind::Scalar:
-          case GuardRoot::Kind::Ptr:
-            g.params.push_back({LocalId{root.name, {}}, root.type, {}});
-            break;
-          case GuardRoot::Kind::Vec: {
-            const auto &vt = std::get<VecType>(root.type->v);
-            for (const auto &leaf: root.leaves)
-              if (!leafIsFree(plan.box, root, leaf))
-                g.params.push_back(
-                    {LocalId{vecLaneParam(root.name, laneOf(leaf)), {}}, vt.elem, {}}
-                );
-            break;
-          }
-          case GuardRoot::Kind::Agg:
-            g.params.push_back({LocalId{root.name, {}}, makePtr(root.type), {}});
-            break;
-        }
-        for (const auto &leaf: root.leaves)
-          if (leaf.isPtr())
-            g.params.push_back({LocalId{"%__e" + std::to_string(eIdx++), {}}, leaf.ptrType, {}});
       }
 
-      // i1 is a signed 1-bit type: true is all-ones (-1), so the neutral
-      // AND accumulator starts at -1.
-      addLet("%__acc", makeI1(), intInit(-1), /*mut=*/true);
-      addLet("%__c", makeI1(), intInit(0), /*mut=*/true);
-
-      // Navigation / load scratch locals, one per distinct type.
-      std::vector<std::pair<TypePtr, std::string>> ptrScratch, loadScratch;
-      auto getScratch = [&](std::vector<std::pair<TypePtr, std::string>> &pool, const TypePtr &ty,
-                            const char *prefix, bool isPtr) {
+      std::string getScratch(
+          std::vector<std::pair<TypePtr, std::string>> &pool, const TypePtr &ty, const char *prefix,
+          bool isPtr
+      ) {
         for (const auto &[t, nm]: pool)
           if (TypeUtils::areTypesEqual(t, ty))
             return nm;
@@ -776,95 +753,150 @@ namespace refractir::reify {
           iv = zeroInit(ty);
         addLet(nm, ty, std::move(iv), /*mut=*/true);
         return nm;
-      };
+      }
 
-      Block e;
-      e.label = BlockLabel{"^entry", {}};
-      int kIdx = 0;
-      eIdx = 0;
-      for (const auto &root: plan.guardRoots) {
-        if (rootIsFullyFree(plan.box, root))
-          continue;
-        for (const auto &leaf: root.leaves) {
-          // Decided before the operand is built: a free leaf needs no lane, no
-          // navigation and no load, so none are emitted for it.
-          if (leafIsFree(plan.box, root, leaf))
+      void appendParams() {
+
+        // Params, in guard-root order (the caller emits args the same way).
+        // After each root's main parameter(s) come one expected-pointer
+        // parameter per ptr leaf (`%__e<n>`): the caller reconstructs the
+        // expected pointer with `addr` / `null` and the guard compares with
+        // `==`, which is defined even across objects.
+        for (const auto &root: plan.guardRoots) {
+          if (rootIsFullyFree(plan.box, root))
             continue;
-          std::string operand;
-          TypePtr leafT;
           switch (root.kind) {
             case GuardRoot::Kind::Scalar:
             case GuardRoot::Kind::Ptr:
-              operand = root.name;
-              leafT = root.type;
+              g.params.push_back({LocalId{root.name, {}}, root.type, {}});
               break;
-            case GuardRoot::Kind::Vec:
-              operand = vecLaneParam(root.name, laneOf(leaf));
-              leafT = std::get<VecType>(root.type->v).elem;
-              break;
-            case GuardRoot::Kind::Agg: {
-              // ptrindex/ptrfield down to the leaf cell, then load it. The
-              // constant indices come from the state tree, which mirrors the
-              // static type, so every step is in-bounds on any input.
-              std::string cur = root.name;
-              TypePtr curT = root.type; // pointee of `cur`
-              for (const auto &acc: leaf.path) {
-                TypePtr nextT = stepType(curT, acc, structs);
-                std::string nxt = getScratch(ptrScratch, makePtr(nextT), "%__p", true);
-                Atom nav =
-                    std::holds_alternative<AccessField>(acc)
-                        ? Atom{PtrFieldAtom{localLV(cur), std::get<AccessField>(acc).field, {}}, {}}
-                        : Atom{
-                              PtrIndexAtom{
-                                  localLV(cur),
-                                  Index{std::get<IntLit>(std::get<AccessIndex>(acc).index)},
-                                  {}
-                              },
-                              {}
-                          };
-                e.instrs.push_back(assignInstr(nxt, simpleExpr(std::move(nav))));
-                cur = nxt;
-                curT = nextT;
-              }
-              operand = getScratch(loadScratch, curT, "%__v", false);
-              e.instrs.push_back(
-                  assignInstr(operand, simpleExpr(Atom{LoadAtom{localLV(cur), {}}, {}}))
-              );
-              leafT = curT;
+            case GuardRoot::Kind::Vec: {
+              const auto &vt = std::get<VecType>(root.type->v);
+              for (const auto &leaf: root.leaves)
+                if (!leafIsFree(plan.box, root, leaf))
+                  g.params.push_back(
+                      {LocalId{vecLaneParam(root.name, laneOf(leaf)), {}}, vt.elem, {}}
+                  );
               break;
             }
+            case GuardRoot::Kind::Agg:
+              g.params.push_back({LocalId{root.name, {}}, makePtr(root.type), {}});
+              break;
           }
-          if (leaf.isPtr()) {
-            // Pointer equality against the caller-reconstructed expected
-            // pointer (defined across objects, so total on every input).
-            e.instrs.push_back(cmpEqInstr("%__c", operand, "%__e" + std::to_string(eIdx++)));
-            e.instrs.push_back(andInstr("%__acc", "%__c"));
-            continue;
-          }
-          // What the box proved about this leaf decides what the guard says
-          // about it. Comparisons never trap, so every form stays total.
-          const LeafClass cls = classOf(plan.box, leafKey(root.name, leaf.path));
-          if (cls == LeafClass::Ranged) {
-            const Interval r = rangeOf(plan.box, leafKey(root.name, leaf.path));
-            std::string klo = "%__k" + std::to_string(kIdx++);
-            std::string khi = "%__k" + std::to_string(kIdx++);
-            addLet(klo, leafT, intInit(r.lo), /*mut=*/false);
-            addLet(khi, leafT, intInit(r.hi), /*mut=*/false);
-            e.instrs.push_back(cmpRelInstr("%__c", operand, RelOp::GE, klo));
-            e.instrs.push_back(andInstr("%__acc", "%__c"));
-            e.instrs.push_back(cmpRelInstr("%__c", operand, RelOp::LE, khi));
-            e.instrs.push_back(andInstr("%__acc", "%__c"));
-            continue;
-          }
-          std::string k = "%__k" + std::to_string(kIdx++);
-          addLet(k, leafT, litInit(leaf.val), /*mut=*/false);
-          e.instrs.push_back(cmpEqInstr("%__c", operand, k));
-          e.instrs.push_back(andInstr("%__acc", "%__c"));
+          for (const auto &leaf: root.leaves)
+            if (leaf.isPtr())
+              g.params.push_back({LocalId{"%__e" + std::to_string(eIdx++), {}}, leaf.ptrType, {}});
         }
       }
-      e.term = Terminator{RetTerm{simpleExpr(rvalAtom(localLV("%__acc"))), {}}};
-      g.blocks.push_back(std::move(e));
-      return g;
+
+      // Walk `root` down to `leaf`'s cell with ptrindex/ptrfield and load it.
+      // The constant indices come from the state tree, which mirrors the static
+      // type, so every step is in-bounds on any input. Returns the local
+      // holding the loaded value and reports its type through `leafT`.
+      std::string emitAggLeafLoad(const GuardRoot &root, const LeafRef &leaf, TypePtr &leafT) {
+        std::string cur = root.name;
+        TypePtr curT = root.type; // pointee of `cur`
+        for (const auto &acc: leaf.path) {
+          TypePtr nextT = stepType(curT, acc, structs);
+          std::string nxt = getScratch(ptrScratch, makePtr(nextT), "%__p", true);
+          Atom nav =
+              std::holds_alternative<AccessField>(acc)
+                  ? Atom{PtrFieldAtom{localLV(cur), std::get<AccessField>(acc).field, {}}, {}}
+                  : Atom{
+                        PtrIndexAtom{
+                            localLV(cur),
+                            Index{std::get<IntLit>(std::get<AccessIndex>(acc).index)},
+                            {}
+                        },
+                        {}
+                    };
+          e.instrs.push_back(assignInstr(nxt, simpleExpr(std::move(nav))));
+          cur = nxt;
+          curT = nextT;
+        }
+        std::string operand = getScratch(loadScratch, curT, "%__v", false);
+        e.instrs.push_back(assignInstr(operand, simpleExpr(Atom{LoadAtom{localLV(cur), {}}, {}})));
+        leafT = curT;
+        return operand;
+      }
+
+      void emitLeafChecks() {
+        for (const auto &root: plan.guardRoots) {
+          if (rootIsFullyFree(plan.box, root))
+            continue;
+          for (const auto &leaf: root.leaves) {
+            // Decided before the operand is built: a free leaf needs no lane, no
+            // navigation and no load, so none are emitted for it.
+            if (leafIsFree(plan.box, root, leaf))
+              continue;
+            std::string operand;
+            TypePtr leafT;
+            switch (root.kind) {
+              case GuardRoot::Kind::Scalar:
+              case GuardRoot::Kind::Ptr:
+                operand = root.name;
+                leafT = root.type;
+                break;
+              case GuardRoot::Kind::Vec:
+                operand = vecLaneParam(root.name, laneOf(leaf));
+                leafT = std::get<VecType>(root.type->v).elem;
+                break;
+              case GuardRoot::Kind::Agg:
+                operand = emitAggLeafLoad(root, leaf, leafT);
+                break;
+            }
+            if (leaf.isPtr()) {
+              // Pointer equality against the caller-reconstructed expected
+              // pointer (defined across objects, so total on every input).
+              e.instrs.push_back(cmpEqInstr("%__c", operand, "%__e" + std::to_string(eIdx++)));
+              e.instrs.push_back(andInstr("%__acc", "%__c"));
+              continue;
+            }
+            // What the box proved about this leaf decides what the guard says
+            // about it. Comparisons never trap, so every form stays total.
+            const LeafClass cls = classOf(plan.box, leafKey(root.name, leaf.path));
+            if (cls == LeafClass::Ranged) {
+              const Interval r = rangeOf(plan.box, leafKey(root.name, leaf.path));
+              std::string klo = "%__k" + std::to_string(kIdx++);
+              std::string khi = "%__k" + std::to_string(kIdx++);
+              addLet(klo, leafT, intInit(r.lo), /*mut=*/false);
+              addLet(khi, leafT, intInit(r.hi), /*mut=*/false);
+              e.instrs.push_back(cmpRelInstr("%__c", operand, RelOp::GE, klo));
+              e.instrs.push_back(andInstr("%__acc", "%__c"));
+              e.instrs.push_back(cmpRelInstr("%__c", operand, RelOp::LE, khi));
+              e.instrs.push_back(andInstr("%__acc", "%__c"));
+              continue;
+            }
+            std::string k = "%__k" + std::to_string(kIdx++);
+            addLet(k, leafT, litInit(leaf.val), /*mut=*/false);
+            e.instrs.push_back(cmpEqInstr("%__c", operand, k));
+            e.instrs.push_back(andInstr("%__acc", "%__c"));
+          }
+        }
+      }
+
+      FunDecl build(const std::string &name) {
+        g.name = GlobalId{name, {}};
+        g.retType = makeI1();
+        appendParams();
+
+        // i1 is a signed 1-bit type: true is all-ones (-1), so the neutral
+        // AND accumulator starts at -1.
+        addLet("%__acc", makeI1(), intInit(-1), /*mut=*/true);
+        addLet("%__c", makeI1(), intInit(0), /*mut=*/true);
+
+        e.label = BlockLabel{"^entry", {}};
+        eIdx = 0;
+        emitLeafChecks();
+        e.term = Terminator{RetTerm{simpleExpr(rvalAtom(localLV("%__acc"))), {}}};
+        g.blocks.push_back(std::move(e));
+        return std::move(g);
+      }
+    };
+
+    FunDecl buildGuardFun(const std::string &name, const TwinPlan &plan, const StructMap &structs) {
+      GuardFunBuilder b(plan, structs);
+      return b.build(name);
     }
 
     // The caller-side argument list matching buildGuardFun's parameters.

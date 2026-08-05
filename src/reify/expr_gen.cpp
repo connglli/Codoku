@@ -804,13 +804,10 @@ namespace refractir::reify {
     return genConcreteFloatAtom(rng);
   }
 
-  // Generate a float atom (off-path: concrete literals only)
-  // Off-path FP atom. Pre-restructure this returned a concrete float
-  // literal unconditionally — that left every off-path FP expression
-  // 100% trivially constant (no runtime LValue ref) so the trivial-
-  // shape post-check could never repair it. Allow ~50% var-ref atoms
-  // when a same-typed FP var is available so the post-check has a
-  // non-trivial source to draw from.
+  // Off-path FP atom: about half var-ref, half concrete literal. Returning a
+  // literal unconditionally would leave every off-path FP expression trivially
+  // constant, with no runtime LValue reference for the trivial-shape post-check
+  // to build on, so a same-typed FP var is used whenever one is in scope.
   static Atom genFloatAtomOffPath(
       std::mt19937 &rng, const VarCatalogue &vars, const TypePtr &targetType,
       const ExprGenConfig &cfg, const std::optional<std::string> &excludeName = std::nullopt
@@ -1999,6 +1996,189 @@ namespace refractir::reify {
   // genBlockStmts
   // ---------------------------------------------------------------------------
 
+  // Where one generated assignment writes, and the type its RHS must have.
+  struct AssignTarget {
+    LValue lhs;
+    TypePtr type;
+  };
+
+  // Choose an assignment target inside `lhsVar`. Returns nullopt when the
+  // variable offers no usable slot — a nested-array element, a struct whose
+  // fields are all pointers, an unknown type — which the caller retries with a
+  // fresh LHS pick. Pointer LHSs never come here: they build and push their own
+  // assignment through emitPtrReassign.
+  static std::optional<AssignTarget>
+  pickAssignTarget(std::mt19937 &rng, const VarCatalogue &vars, const VarEntry &lhsVar) {
+    if (isScalarType(lhsVar.type))
+      return AssignTarget{localLV(lhsVar.name), lhsVar.type};
+
+    if (std::holds_alternative<ArrayType>(lhsVar.type->v)) {
+      const auto &at = std::get<ArrayType>(lhsVar.type->v);
+      std::uniform_int_distribution<int64_t> idxd(0, (int64_t) at.size - 1);
+      int64_t idx = idxd(rng);
+      if (isScalarType(at.elem))
+        return AssignTarget{arrayLV(lhsVar.name, idx), at.elem};
+      if (std::holds_alternative<StructType>(at.elem->v)) {
+        // Array-of-struct: pick a scalar field, generate %a[i].f = expr
+        const std::string &ename = std::get<StructType>(at.elem->v).name.name;
+        const StructDecl *sd = nullptr;
+        for (const auto &decl: vars.structDecls)
+          if (decl.name.name == ename) {
+            sd = &decl;
+            break;
+          }
+        if (!sd || sd->fields.empty())
+          return std::nullopt;
+        std::vector<const FieldDecl *> scalarFields;
+        for (const auto &f: sd->fields)
+          if (isScalarType(f.type))
+            scalarFields.push_back(&f);
+        if (scalarFields.empty())
+          return std::nullopt;
+        const FieldDecl *f = pickOne(rng, scalarFields);
+        LValue lhs = arrayLV(lhsVar.name, idx);
+        lhs.accesses.push_back(AccessField{f->name, {}});
+        return AssignTarget{std::move(lhs), f->type};
+      }
+      return std::nullopt; // nested array or other, skip
+    }
+
+    if (std::holds_alternative<StructType>(lhsVar.type->v)) {
+      const std::string &sname = lhsVar.structTypeName;
+      const StructDecl *sd = nullptr;
+      for (const auto &decl: vars.structDecls)
+        if (decl.name.name == sname) {
+          sd = &decl;
+          break;
+        }
+      if (!sd || sd->fields.empty()) {
+        // The struct's declaration is not in scope; fall back to a scalar.
+        auto scalars = vars.allScalars();
+        if (scalars.empty())
+          return std::nullopt;
+        auto *sv = pickOne(rng, scalars);
+        return AssignTarget{localLV(sv->name), sv->type};
+      }
+      std::uniform_int_distribution<int> fpick(0, (int) sd->fields.size() - 1);
+      const auto &f = sd->fields[fpick(rng)];
+      if (isScalarType(f.type))
+        return AssignTarget{structLV(lhsVar.name, f.name), f.type};
+      if (std::holds_alternative<ArrayType>(f.type->v)) {
+        // Struct-of-array field: pick an element, generate %t.f[i] = expr
+        const auto &fat = std::get<ArrayType>(f.type->v);
+        if (!isScalarType(fat.elem))
+          return std::nullopt;
+        std::uniform_int_distribution<int64_t> idxd2(0, (int64_t) fat.size - 1);
+        LValue lhs = structLV(lhsVar.name, f.name);
+        lhs.accesses.push_back(AccessIndex{Index{IntLit{idxd2(rng), {}}}, {}});
+        return AssignTarget{std::move(lhs), fat.elem};
+      }
+      return std::nullopt; // ptr field or other, skip
+    }
+
+    if (isVecType(lhsVar.type)) {
+      // Whole-vec only when another vec var of the same type can supply the
+      // RHS — the typechecker rejects a scalar one. Excluding the LHS from
+      // that pool keeps `%vec = %vec;` impossible, and when it leaves the pool
+      // empty the lane write below takes over, whose RHS lives in scalar
+      // territory.
+      const auto &vt = std::get<VecType>(lhsVar.type->v);
+      auto sameVecs = excluding(vars.vecsOf(lhsVar.type), lhsVar.name);
+      bool canWholeVec = !sameVecs.empty();
+      std::uniform_int_distribution<int> vslot(0, 99);
+      if (canWholeVec && vslot(rng) >= rysmith::hp::kVecLaneWriteProb)
+        return AssignTarget{localLV(lhsVar.name), lhsVar.type};
+      // Lane write: %vec[i] = scalar_expr
+      std::uniform_int_distribution<int64_t> ld(0, (int64_t) vt.size - 1);
+      LValue lhs = localLV(lhsVar.name);
+      lhs.accesses.push_back(AccessIndex{Index{IntLit{ld(rng), {}}}, {}});
+      return AssignTarget{std::move(lhs), vt.elem};
+    }
+
+    return std::nullopt; // unknown type, skip
+  }
+
+  // Emit one pointer reassignment for `lhsVar` into `out`. A pointer LHS never
+  // shares the generic RHS path: each shape here — an in-bounds arithmetic
+  // step, an aggregate navigation chain, or a plain redirect — builds and
+  // pushes its own assignment, so exactly one lands per call.
+  static void emitPtrReassign(
+      std::vector<Instr> &out, std::mt19937 &rng, const VarCatalogue &vars, const VarEntry &lhsVar,
+      bool onPath, const ExprGenConfig &cfg
+  ) {
+    LValue lhs = localLV(lhsVar.name);
+
+    // First try the pointer-arithmetic slot: an in-bounds element step off an
+    // aggregate the LHS pointee lives in. genPtrArithRhs covers both
+    // `ptrindex %ap, b ± d` (array element) and `ptrfield %sp, f ± d`
+    // (consecutive same-type struct fields), each provably load-safe on any
+    // path. It falls through (nullopt) when no such source is in scope.
+    TypePtr lhsPtee = pointeeType(lhsVar.type);
+    std::uniform_real_distribution<double> ptrArithCoin(0.0, 1.0);
+    bool emitted = false;
+    // Pointer arithmetic is offered for any loadable pointee — scalar or
+    // pointer (`ptr ptr T`). Aggregate/vector pointees are excluded: they
+    // aren't loadable, so an element step has nothing valid to dereference.
+    // The element-type matching downstream is by `typeEquals`, so pointer
+    // pointees flow through unchanged.
+    if (cfg.enablePtrArith && lhsPtee && (isScalarType(lhsPtee) || isPtrType(lhsPtee)) &&
+        ptrArithCoin(rng) < rysmith::hp::kPPtrArith) {
+      if (!onPath) {
+        // Off-path (unexecuted) blocks are never run and never symbolically
+        // constrained, so pointer arithmetic here can be arbitrary — any
+        // pointer plus any offset, no in-bounds reasoning, since the result is
+        // never dereferenced or UB-checked. Reuse genPtrAtom for the base (same
+        // definite-init safety as the default redirect) and append an unbounded
+        // stride; this stresses pointer / alias codegen the in-bounds on-path
+        // forms can't. Skip the stride on a `null` base, where `null ± k` would
+        // be a pointless (and parse-noisy) shape.
+        Expr rhs;
+        rhs.first = genPtrAtom(rng, vars, lhsVar.type, lhsVar.name);
+        const auto *ca = std::get_if<CoefAtom>(&rhs.first.v);
+        if (!(ca && std::holds_alternative<NullLit>(ca->coef))) {
+          std::uniform_int_distribution<int64_t> mag(1, rysmith::hp::kOffPathPtrStrideMax);
+          bool minus = std::uniform_int_distribution<int>(0, 1)(rng) == 1;
+          rhs.rest.push_back({minus ? AddOp::Minus : AddOp::Plus, coefAtom(intCoef(mag(rng))), {}});
+        }
+        out.push_back(Instr{AssignInstr{std::move(lhs), std::move(rhs), {}}});
+        emitted = true;
+      } else if (ptrArithCoin(rng) < rysmith::hp::kPPtrArithVarShare &&
+                 tryEmitPtrVarArith(out, rng, vars, lhsPtee, lhsVar.name)) {
+        // On-path: prefer the direct ptr-var arithmetic shape (`%p2 = %p1 ± d`
+        // on a pointer already anchored to an array element in this block).
+        // tryEmitPtrVarArith builds and pushes its own assignment, so its
+        // branch doesn't consume `lhs`.
+        emitted = true;
+      } else if (auto rhs = genPtrArithRhs(rng, vars, lhsPtee, lhsVar.name)) {
+        // On-path fallback: the combined ptrindex/ptrfield expression.
+        out.push_back(Instr{AssignInstr{std::move(lhs), std::move(*rhs), {}}});
+        emitted = true;
+      }
+    }
+
+    // Aggregate-pointer navigation: when the arithmetic slot declined, a
+    // `ptr F` reassign may instead navigate an aggregate to its loadable leaf
+    // via a chain of staged ptrindex/ptrfield steps. Plain navigation (no
+    // arithmetic), so it runs regardless of --no-ptrarith, and is rolled after
+    // the arith slot to leave that stream intact.
+    if (!emitted && lhsPtee && ptrArithCoin(rng) < rysmith::hp::kPNavChain &&
+        tryEmitNavChain(out, rng, vars, lhsPtee, lhsVar.name)) {
+      emitted = true;
+    }
+
+    if (!emitted) {
+      // Default: single-atom ptr redirect via `genPtrAtom`. Exclude the LHS ptr
+      // from its own RHS pool — `%p = %p;` is a no-op that SCCP folds, and the
+      // ptr-copy slot inside `genPtrAtom` would otherwise include `%p`. Bare
+      // `%p = %q;` (q != p) is intentionally permitted: aliasing through a
+      // plain ptr copy is a useful, semantically distinct shape, and adding
+      // `+ 1` to an arbitrary scalar-ptr source would step past its
+      // single-element `addr %scalar` object and make any later `load %p` UB.
+      Expr rhs = simpleExpr(genPtrAtom(rng, vars, lhsVar.type, lhsVar.name));
+      out.push_back(Instr{AssignInstr{std::move(lhs), std::move(rhs), {}}});
+    }
+  }
+
   std::vector<Instr> genBlockStmts(
       std::mt19937 &rng, SymCounter *sym, const VarCatalogue &vars, int nStmts, bool onPath,
       const ExprGenConfig &cfg
@@ -2059,15 +2239,11 @@ namespace refractir::reify {
     for (int s = 0; s < nStmts; s++) {
       // Bernoulli chain of StoreInstrs spliced before this AssignInstr.
       // Each successful roll emits one store and rolls again; the chain
-      // stops on the first failed roll. Stores do NOT consume the
-      // `nStmts` budget — the budget tracks AssignInstrs only, so the
-      // name (`n-stmts`) matches what it counts. With the default
+      // stops on the first failed roll. Stores do not consume the
+      // `nStmts` budget — it tracks AssignInstrs only, so `--n-stmts N`
+      // names exactly what it produces. With the default
       // `kPStoreBeforeAssign = 0.25` the expected chain length is
-      // p / (1 - p) ≈ 0.33 stores per assignment. Pre-restructure a
-      // single coin toss decided "this slot is a store XOR an assign",
-      // which meant a heavy store density starved the assign count
-      // and `--n-stmts` no longer matched the body's assignment
-      // population.
+      // p / (1 - p) ≈ 0.33 stores per assignment.
       while (prob(rng) < rysmith::hp::kPStoreBeforeAssign) {
         if (!tryEmitStore())
           break;
@@ -2086,193 +2262,17 @@ namespace refractir::reify {
           break;
         auto *lhsVar = pickOne(rng, allVars);
 
-        // Build LHS based on var type
-        LValue lhs;
-        TypePtr assignType;
-
-        if (isScalarType(lhsVar->type)) {
-          lhs = localLV(lhsVar->name);
-          assignType = lhsVar->type;
-        } else if (std::holds_alternative<ArrayType>(lhsVar->type->v)) {
-          const auto &at = std::get<ArrayType>(lhsVar->type->v);
-          std::uniform_int_distribution<int64_t> idxd(0, (int64_t) at.size - 1);
-          int64_t idx = idxd(rng);
-          if (isScalarType(at.elem)) {
-            lhs = arrayLV(lhsVar->name, idx);
-            assignType = at.elem;
-          } else if (std::holds_alternative<StructType>(at.elem->v)) {
-            // Array-of-struct: pick a scalar field, generate %a[i].f = expr
-            const std::string &ename = std::get<StructType>(at.elem->v).name.name;
-            const StructDecl *sd = nullptr;
-            for (const auto &decl: vars.structDecls)
-              if (decl.name.name == ename) {
-                sd = &decl;
-                break;
-              }
-            if (!sd || sd->fields.empty())
-              continue;
-            std::vector<const FieldDecl *> scalarFields;
-            for (const auto &f: sd->fields)
-              if (isScalarType(f.type))
-                scalarFields.push_back(&f);
-            if (scalarFields.empty())
-              continue;
-            const FieldDecl *f = pickOne(rng, scalarFields);
-            lhs = arrayLV(lhsVar->name, idx);
-            lhs.accesses.push_back(AccessField{f->name, {}});
-            assignType = f->type;
-          } else {
-            continue; // nested array or other, skip
-          }
-        } else if (std::holds_alternative<StructType>(lhsVar->type->v)) {
-          const std::string &sname = lhsVar->structTypeName;
-          const StructDecl *sd = nullptr;
-          for (const auto &decl: vars.structDecls)
-            if (decl.name.name == sname) {
-              sd = &decl;
-              break;
-            }
-          if (!sd || sd->fields.empty()) {
-            // Fallback: scalar assignment
-            auto scalars = vars.allScalars();
-            if (scalars.empty())
-              continue;
-            auto *sv = pickOne(rng, scalars);
-            lhs = localLV(sv->name);
-            assignType = sv->type;
-          } else {
-            std::uniform_int_distribution<int> fpick(0, (int) sd->fields.size() - 1);
-            const auto &f = sd->fields[fpick(rng)];
-            if (isScalarType(f.type)) {
-              lhs = structLV(lhsVar->name, f.name);
-              assignType = f.type;
-            } else if (std::holds_alternative<ArrayType>(f.type->v)) {
-              // Struct-of-array field: pick an element, generate %t.f[i] = expr
-              const auto &fat = std::get<ArrayType>(f.type->v);
-              if (!isScalarType(fat.elem))
-                continue;
-              std::uniform_int_distribution<int64_t> idxd2(0, (int64_t) fat.size - 1);
-              lhs = structLV(lhsVar->name, f.name);
-              lhs.accesses.push_back(AccessIndex{Index{IntLit{idxd2(rng), {}}}, {}});
-              assignType = fat.elem;
-            } else {
-              continue; // ptr field or other, skip
-            }
-          }
-        } else if (isPtrType(lhsVar->type)) {
-          // Ptr reassignment: redirect to another target.
-          lhs = localLV(lhsVar->name);
-
-          // First try the pointer-arithmetic slot: an in-bounds element step
-          // off an aggregate the LHS pointee lives in. genPtrArithRhs covers
-          // both `ptrindex %ap, b ± d` (array element) and
-          // `ptrfield %sp, f ± d` (consecutive same-type struct fields),
-          // each provably load-safe on any path. It falls through (nullopt)
-          // when no such source is in scope.
-          TypePtr lhsPtee = pointeeType(lhsVar->type);
-          std::uniform_real_distribution<double> ptrArithCoin(0.0, 1.0);
-          bool emittedPtrArith = false;
-          // Pointer arithmetic is offered for any LOADABLE pointee — scalar
-          // or pointer (`ptr ptr T`). Aggregate/vector pointees are excluded:
-          // they aren't loadable, so an element step has nothing valid to
-          // dereference. The element-type matching downstream is by
-          // `typeEquals`, so pointer pointees flow through unchanged.
-          if (cfg.enablePtrArith && lhsPtee && (isScalarType(lhsPtee) || isPtrType(lhsPtee)) &&
-              ptrArithCoin(rng) < rysmith::hp::kPPtrArith) {
-            if (!onPath) {
-              // Off-path (unexecuted) blocks are never run and never
-              // symbolically constrained, so pointer arithmetic here can be
-              // arbitrary — any pointer plus any offset, no in-bounds
-              // reasoning, since the result is never dereferenced or
-              // UB-checked. Reuse genPtrAtom for the base (same definite-init
-              // safety as the default redirect) and append an unbounded
-              // stride; this stresses pointer / alias codegen the in-bounds
-              // on-path forms can't. Skip the stride on a `null` base, where
-              // `null ± k` would be a pointless (and parse-noisy) shape.
-              Expr rhs;
-              rhs.first = genPtrAtom(rng, vars, lhsVar->type, lhsVar->name);
-              const auto *ca = std::get_if<CoefAtom>(&rhs.first.v);
-              if (!(ca && std::holds_alternative<NullLit>(ca->coef))) {
-                std::uniform_int_distribution<int64_t> mag(1, rysmith::hp::kOffPathPtrStrideMax);
-                bool minus = std::uniform_int_distribution<int>(0, 1)(rng) == 1;
-                rhs.rest.push_back(
-                    {minus ? AddOp::Minus : AddOp::Plus, coefAtom(intCoef(mag(rng))), {}}
-                );
-              }
-              result.push_back(Instr{AssignInstr{std::move(lhs), std::move(rhs), {}}});
-              assignEmitted = true;
-              emittedPtrArith = true;
-            } else if (ptrArithCoin(rng) < rysmith::hp::kPPtrArithVarShare &&
-                       tryEmitPtrVarArith(result, rng, vars, lhsPtee, lhsVar->name)) {
-              // On-path: prefer the direct ptr-var arithmetic shape
-              // (`%p2 = %p1 ± d` on a pointer already anchored to an array
-              // element in this block). tryEmitPtrVarArith builds and pushes
-              // its own assignment, so its branch doesn't consume `lhs`.
-              assignEmitted = true;
-              emittedPtrArith = true;
-            } else if (auto rhs = genPtrArithRhs(rng, vars, lhsPtee, lhsVar->name)) {
-              // On-path fallback: the combined ptrindex/ptrfield expression.
-              result.push_back(Instr{AssignInstr{std::move(lhs), std::move(*rhs), {}}});
-              assignEmitted = true;
-              emittedPtrArith = true;
-            }
-          }
-
-          // Aggregate-pointer navigation: when the arithmetic slot declined, a
-          // `ptr F` reassign may instead navigate an aggregate to its loadable
-          // leaf via a chain of staged ptrindex/ptrfield steps. Plain
-          // navigation (no arithmetic), so it runs regardless of --no-ptrarith,
-          // and is rolled after the arith slot to leave that stream intact.
-          if (!emittedPtrArith && lhsPtee && ptrArithCoin(rng) < rysmith::hp::kPNavChain &&
-              tryEmitNavChain(result, rng, vars, lhsPtee, lhsVar->name)) {
-            assignEmitted = true;
-            emittedPtrArith = true;
-          }
-
-          if (!emittedPtrArith) {
-            // Default: single-atom ptr redirect via `genPtrAtom`.
-            // Exclude the LHS ptr from its own RHS pool — `%p = %p;` is
-            // a no-op that SCCP folds; the ptr-copy slot inside
-            // `genPtrAtom` would otherwise include `%p`. Bare `%p = %q;`
-            // (q != p) is intentionally permitted — aliasing through a
-            // plain ptr copy is a useful, semantically distinct shape,
-            // and adding `+ 1` to an arbitrary scalar-ptr source would
-            // step past its single-element `addr %scalar` object and
-            // make any later `load %p` UB.
-            Expr rhs = simpleExpr(genPtrAtom(rng, vars, lhsVar->type, lhsVar->name));
-            result.push_back(Instr{AssignInstr{std::move(lhs), std::move(rhs), {}}});
-            assignEmitted = true;
-          }
+        // A pointer LHS emits its own assignment and never reaches the shared
+        // RHS path below.
+        if (isPtrType(lhsVar->type)) {
+          emitPtrReassign(result, rng, vars, *lhsVar, onPath, cfg);
+          assignEmitted = true;
           continue;
-        } else if (isVecType(lhsVar->type)) {
-          // Vec assignment: whole-vec only if we have another vec
-          // var of the same type to copy from (otherwise the typechecker
-          // rejects scalar RHS). Fall back to lane write.
-          // Exclude LHS from the same-type pool — `%vec = %vec;` is a
-          // no-op and the whole-vec RHS expr would otherwise have to pick
-          // the same var. With only the LHS available, fall through to
-          // lane write so the RHS lives in scalar-pool territory.
-          const auto &vt = std::get<VecType>(lhsVar->type->v);
-          auto sameVecs = excluding(vars.vecsOf(lhsVar->type), lhsVar->name);
-          bool canWholeVec = !sameVecs.empty();
-          std::uniform_int_distribution<int> vslot(0, 99);
-          if (canWholeVec && vslot(rng) >= rysmith::hp::kVecLaneWriteProb) {
-            // Whole-vec assign (copy or broadcast-mul)
-            lhs = localLV(lhsVar->name);
-            assignType = lhsVar->type;
-          } else {
-            // Lane write: %vec[i] = scalar_expr
-            std::uniform_int_distribution<int64_t> ld(0, (int64_t) vt.size - 1);
-            lhs = localLV(lhsVar->name);
-            lhs.accesses.push_back(AccessIndex{Index{IntLit{ld(rng), {}}}, {}});
-            assignType = vt.elem;
-          }
-        } else {
-          continue; // unknown type, skip
         }
 
-        if (!assignType)
-          continue;
+        auto target = pickAssignTarget(rng, vars, *lhsVar);
+        if (!target)
+          continue; // this var offers no usable slot; retry with another LHS
 
         // The LHS root name (e.g. `%v0`, `%a` in `%a[i].f`, `%vec` in
         // `%vec` whole-vec or `%vec[i]` lane write) is forbidden as an
@@ -2280,7 +2280,7 @@ namespace refractir::reify {
         // excluding the root has no practical effect (the root is not a
         // scalar and scalar pickers never see it), but it costs nothing.
         auto [rhs, reqs] =
-            genExprWithRequires(rng, sym, vars, assignType, onPath, cfg, lhsVar->name);
+            genExprWithRequires(rng, sym, vars, target->type, onPath, cfg, lhsVar->name);
 
         // Insert safety requires before assignment (on-path only — off-path
         // blocks are never executed at the solved inputs).
@@ -2289,7 +2289,7 @@ namespace refractir::reify {
             result.push_back(std::move(req));
         }
 
-        result.push_back(Instr{AssignInstr{std::move(lhs), std::move(rhs), {}}});
+        result.push_back(Instr{AssignInstr{std::move(target->lhs), std::move(rhs), {}}});
         assignEmitted = true;
       } // end of LHS-pick retry loop
     }

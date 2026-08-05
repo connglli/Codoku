@@ -37,8 +37,8 @@ namespace refractir::reify {
    * Resolve a --structured-lowering request (true|false|random)
    * to a per-program decision. Shared between rysmith and rylink so
    * both tools flip the same coin with the same odds. Only "random"
-   * consumes RNG state, so runs without the flag keep their historical
-   * seed streams.
+   * consumes RNG state, so a run without the flag draws the same stream it
+   * would have drawn if the flag did not exist.
    */
   [[nodiscard]] bool pickStructuredLowering(std::mt19937 &rng, const std::string &requested);
 

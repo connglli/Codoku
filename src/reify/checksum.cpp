@@ -97,6 +97,114 @@ namespace refractir::reify {
       );
     }
 
+    static const StructDecl *
+    lookupStruct(const TypeUtils::StructTable &structs, const std::string &nm) {
+      auto it = structs.find(nm);
+      return it == structs.end() ? nullptr : it->second;
+    }
+
+    // Packed size of `t`, in the byte scale the solver reports offsets in.
+    static std::uint64_t packedSize(const TypeUtils::StructTable &structs, const TypePtr &t) {
+      return TypeUtils::packedSizeof(t, structs);
+    }
+
+    // Type-equality probe restricted to the type families a RefractIR pointer
+    // pointee can name. It decides where the offset walk stops: a `ptr T` must
+    // land on a sub-value of type T, not on a leaf inside T.
+    static bool sameLeafType(const TypePtr &a, const TypePtr &b) {
+      if (!a || !b)
+        return a == b;
+      if (a->v.index() != b->v.index())
+        return false;
+      if (auto pa = std::get_if<IntType>(&a->v)) {
+        auto pb = std::get_if<IntType>(&b->v);
+        if (pa->kind != pb->kind)
+          return false;
+        if (pa->kind == IntType::Kind::ICustom)
+          return pa->bits.value_or(32) == pb->bits.value_or(32);
+        return true;
+      }
+      if (auto pa = std::get_if<FloatType>(&a->v))
+        return pa->kind == std::get<FloatType>(b->v).kind;
+      if (auto pa = std::get_if<PtrType>(&a->v))
+        return sameLeafType(pa->pointee, std::get<PtrType>(b->v).pointee);
+      if (auto pa = std::get_if<ArrayType>(&a->v)) {
+        auto pb = std::get_if<ArrayType>(&b->v);
+        return pa->size == pb->size && sameLeafType(pa->elem, pb->elem);
+      }
+      if (auto pa = std::get_if<VecType>(&a->v)) {
+        auto pb = std::get_if<VecType>(&b->v);
+        return pa->size == pb->size && sameLeafType(pa->elem, pb->elem);
+      }
+      if (auto pa = std::get_if<StructType>(&a->v))
+        return pa->name.name == std::get<StructType>(b->v).name.name;
+      return false;
+    }
+
+    // Walk type `t` for a contiguous in-object offset (packed bytes — the scale
+    // the solver reports LetExitValue::targetOffset in), appending the field and
+    // index accesses that reach a sub-value whose type matches `target`. Stops at
+    // the first matching (type, remOff == 0) pair, so a `ptr [N] T` lands on the
+    // whole array rather than its first scalar leaf. Returns true and narrows `t`
+    // to the matched sub-type; false means the offset lands on no sub-value of the
+    // requested type, which happens when the pointer pointee disagrees with the
+    // base local's leaf layout.
+    //
+    // The size model here must be the one the solver measured with, or the walk
+    // reaches the wrong leaf and this oracle silently disagrees with the program
+    // it is meant to check.
+    static bool resolveOffsetPath(
+        TypePtr &t, std::uint64_t &remOff, std::vector<Access> &acc, const TypePtr &target,
+        const TypeUtils::StructTable &structs
+    ) {
+      if (!t)
+        return false;
+      if (remOff == 0 && sameLeafType(t, target))
+        return true;
+      if (auto at = std::get_if<ArrayType>(&t->v)) {
+        uint64_t stride = packedSize(structs, at->elem);
+        if (stride == 0)
+          return false;
+        uint64_t idx = remOff / stride;
+        if (idx >= at->size)
+          return false;
+        acc.push_back(AccessIndex{Index{IntLit{(int64_t) idx, {}}}, {}});
+        remOff -= idx * stride;
+        t = at->elem;
+        return resolveOffsetPath(t, remOff, acc, target, structs);
+      }
+      if (auto vt = std::get_if<VecType>(&t->v)) {
+        uint64_t stride = packedSize(structs, vt->elem);
+        if (stride == 0)
+          return false;
+        uint64_t idx = remOff / stride;
+        if (idx >= vt->size)
+          return false;
+        acc.push_back(AccessIndex{Index{IntLit{(int64_t) idx, {}}}, {}});
+        remOff -= idx * stride;
+        t = vt->elem;
+        return resolveOffsetPath(t, remOff, acc, target, structs);
+      }
+      if (auto st = std::get_if<StructType>(&t->v)) {
+        const StructDecl *sd = lookupStruct(structs, st->name.name);
+        if (!sd)
+          return false;
+        for (const auto &f: sd->fields) {
+          uint64_t fsz = packedSize(structs, f.type);
+          if (remOff < fsz) {
+            acc.push_back(AccessField{f.name, {}});
+            t = f.type;
+            return resolveOffsetPath(t, remOff, acc, target, structs);
+          }
+          remOff -= fsz;
+        }
+        return false;
+      }
+      // Scalar / ptr already exhausted aggregate walks; only a
+      // typeEq match at remOff==0 (handled at the top) succeeds.
+      return false;
+    }
+
   } // namespace
 
   size_t rewriteExitToCrc32Checksum(
@@ -510,115 +618,9 @@ namespace refractir::reify {
     // The size model here MUST be the one the solver measured with, or
     // the walk lands on the wrong leaf and this oracle silently disagrees
     // with the program it is meant to check.
-    auto findStructByName = [&](const std::string &nm) -> const StructDecl * {
-      for (const auto &s: full.structs) {
-        if (s.name.name == nm)
-          return &s;
-      }
-      return nullptr;
-    };
     TypeUtils::StructTable structTable;
     for (const auto &s: full.structs)
       structTable[s.name.name] = &s;
-    auto sizeUnits = [&](const TypePtr &t) -> uint64_t {
-      return TypeUtils::packedSizeof(t, structTable);
-    };
-    // Type-equality probe restricted to the type families a RefractIR
-    // pointer pointee can name. Used to decide when to stop the
-    // offset-walk: a `ptr T` should land on a sub-value of type T,
-    // not on a leaf inside T.
-    std::function<bool(const TypePtr &, const TypePtr &)> typeEq;
-    typeEq = [&](const TypePtr &a, const TypePtr &b) -> bool {
-      if (!a || !b)
-        return a == b;
-      if (a->v.index() != b->v.index())
-        return false;
-      if (auto pa = std::get_if<IntType>(&a->v)) {
-        auto pb = std::get_if<IntType>(&b->v);
-        if (pa->kind != pb->kind)
-          return false;
-        if (pa->kind == IntType::Kind::ICustom)
-          return pa->bits.value_or(32) == pb->bits.value_or(32);
-        return true;
-      }
-      if (auto pa = std::get_if<FloatType>(&a->v))
-        return pa->kind == std::get<FloatType>(b->v).kind;
-      if (auto pa = std::get_if<PtrType>(&a->v))
-        return typeEq(pa->pointee, std::get<PtrType>(b->v).pointee);
-      if (auto pa = std::get_if<ArrayType>(&a->v)) {
-        auto pb = std::get_if<ArrayType>(&b->v);
-        return pa->size == pb->size && typeEq(pa->elem, pb->elem);
-      }
-      if (auto pa = std::get_if<VecType>(&a->v)) {
-        auto pb = std::get_if<VecType>(&b->v);
-        return pa->size == pb->size && typeEq(pa->elem, pb->elem);
-      }
-      if (auto pa = std::get_if<StructType>(&a->v))
-        return pa->name.name == std::get<StructType>(b->v).name.name;
-      return false;
-    };
-
-    // Walk type `t` for a contiguous in-object offset (packed bytes —
-    // the scale the solver reports LetExitValue::targetOffset in)
-    // and append the field / index accesses needed to reach a
-    // sub-value whose type matches `target`. Stops at the first
-    // matching (type, remOff==0) pair so a `ptr [N] T` lands on the
-    // whole array, not on its first scalar leaf. Returns true on
-    // success and narrows `t` to the matched sub-type. False means
-    // the offset doesn't land on any sub-value of the requested
-    // type — happens when the pointer pointee disagrees with the
-    // base local's leaf layout.
-    std::function<bool(TypePtr &, uint64_t &, std::vector<Access> &, const TypePtr &)>
-        resolveOffsetPath;
-    resolveOffsetPath = [&](TypePtr &t, uint64_t &remOff, std::vector<Access> &acc,
-                            const TypePtr &target) -> bool {
-      if (!t)
-        return false;
-      if (remOff == 0 && typeEq(t, target))
-        return true;
-      if (auto at = std::get_if<ArrayType>(&t->v)) {
-        uint64_t stride = sizeUnits(at->elem);
-        if (stride == 0)
-          return false;
-        uint64_t idx = remOff / stride;
-        if (idx >= at->size)
-          return false;
-        acc.push_back(AccessIndex{Index{IntLit{(int64_t) idx, {}}}, {}});
-        remOff -= idx * stride;
-        t = at->elem;
-        return resolveOffsetPath(t, remOff, acc, target);
-      }
-      if (auto vt = std::get_if<VecType>(&t->v)) {
-        uint64_t stride = sizeUnits(vt->elem);
-        if (stride == 0)
-          return false;
-        uint64_t idx = remOff / stride;
-        if (idx >= vt->size)
-          return false;
-        acc.push_back(AccessIndex{Index{IntLit{(int64_t) idx, {}}}, {}});
-        remOff -= idx * stride;
-        t = vt->elem;
-        return resolveOffsetPath(t, remOff, acc, target);
-      }
-      if (auto st = std::get_if<StructType>(&t->v)) {
-        const StructDecl *sd = findStructByName(st->name.name);
-        if (!sd)
-          return false;
-        for (const auto &f: sd->fields) {
-          uint64_t fsz = sizeUnits(f.type);
-          if (remOff < fsz) {
-            acc.push_back(AccessField{f.name, {}});
-            t = f.type;
-            return resolveOffsetPath(t, remOff, acc, target);
-          }
-          remOff -= fsz;
-        }
-        return false;
-      }
-      // Scalar / ptr already exhausted aggregate walks; only a
-      // typeEq match at remOff==0 (handled at the top) succeeds.
-      return false;
-    };
 
     // Entry block: one `%p = addr <exit-leaf>;` per pointer let,
     // where `<exit-leaf>` is the scalar leaf reached by walking the
@@ -660,7 +662,7 @@ namespace refractir::reify {
         std::vector<Access> acc;
         uint64_t remOff = targetOffset;
         TypePtr cur = targetTy;
-        if (targetTy && pointeeTy && resolveOffsetPath(cur, remOff, acc, pointeeTy)) {
+        if (targetTy && pointeeTy && resolveOffsetPath(cur, remOff, acc, pointeeTy, structTable)) {
           addrSrc.base = LocalId{targetLocal, {}};
           addrSrc.accesses = std::move(acc);
           resolved = true;

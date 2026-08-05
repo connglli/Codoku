@@ -105,12 +105,11 @@ namespace refractir::reify::rysmith::hp {
   // Per-AssignInstr probability that one or more StoreInstrs are spliced in
   // *before* it. Rolled as a Bernoulli chain: each successful roll emits a
   // store and rolls again, so a single assignment slot may carry several
-  // stores. Stores explicitly do NOT count against the `--n-stmts` budget
-  // — the budget is the number of `AssignInstr`s per block, and stores
-  // are an independent side stream meant to add aliasing for the
-  // compiler to chew on. (Pre-restructure this knob was an inline
-  // `prob > 0.80` that *did* consume the per-iter budget, so heavy
-  // store density starved the assignment count.)
+  // stores. Stores do not count against the `--n-stmts` budget — the budget
+  // is the number of `AssignInstr`s per block, and stores are an independent
+  // side stream meant to add aliasing for the compiler to chew on. Charging
+  // them to the same budget would let a heavy store density starve the
+  // assignment count.
   inline constexpr double kPStoreBeforeAssign = 0.25;
 
   // How many LHS picks `genBlockStmts` tries before giving up on the

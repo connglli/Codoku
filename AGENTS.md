@@ -276,8 +276,10 @@ Always follow good practices:
 4. Fix **all compiler warnings**
 5. Keep a clean, layered project structure
 6. Write high-quality comments that explain *why*, not *what*
-7. Keep CHANGELOG concise (multiple related entries can be summarized in one line)
-8. Follow [./docs/AGENTS.md](./docs/AGENTS.md) when writing documents, header comments, or anything else durable in prose
+7. Comments describe the current state, not the change history, unless it is a bugfix or a workaround for a critical known issue
+8. Keep functions small, shallow, and focused on a single responsibility
+9. Keep CHANGELOG concise (multiple related entries can be summarized in one line)
+10. Follow [./docs/AGENTS.md](./docs/AGENTS.md) when writing documents, header comments, or anything else durable in prose
 
 Always check whether a design/implementation is *elegant*:
 
