@@ -19,7 +19,7 @@ namespace refractir {
     UBFree,         // Assert every safety guard true: the path executes with no UB (default).
     RequireUB,      // Assert NOT(and guards): the model triggers at least one UB on the path.
     RequireNonterm, // Lasso path: assert guards true AND the header state recurs after one
-                    // lap, so the program diverges UB-free (see docs/reify.md).
+                    // lap, so the program diverges UB-free.
     Unconstrained   // Leave UB guards unasserted: solve for a feasible path, UB either way.
   };
 
@@ -99,17 +99,17 @@ namespace refractir {
       std::string message;
       using ModelVal = SymbolicExecutor::ModelVal;
       std::unordered_map<std::string, ModelVal> model;
-      // [v0.2.1] Per-lane model for vector syms. Populated only for syms
+      // Per-lane model for vector syms. Populated only for syms
       // of vector type. Each entry holds N lane values matching the sym's
       // declared `<N> T` shape. Floats stored as bit-exact int64 too (so
       // a single map type fits both `<N> iM` and `<N> fM` cases —
       // consumers reinterpret as needed).
       std::unordered_map<std::string, std::vector<ModelVal>> vecModel;
-      // [v0.2.2] Solved values for the entry function's parameters
+      // Solved values for the entry function's parameters
       // (treated as symbols by the solver but printed verbatim in the
       // output). Empty when the entry has no parameters.
       std::unordered_map<std::string, ModelVal> paramModel;
-      // [v0.2.2] Solved value for the entry function's `ret`
+      // Solved value for the entry function's `ret`
       // expression on the chosen path. `has_value() == false` when the
       // path's terminator is not a `ret <expr>;`.
       std::optional<ModelVal> retModel;
@@ -154,7 +154,7 @@ namespace refractir {
     SymbolicValue
     mergeAggregate(const std::vector<SymbolicValue> &elements, smt::Term idx, smt::ISolver &solver);
 
-    // [v0.2.1] Evaluate an Expr whose value is a vector, returning a
+    // Evaluate an Expr whose value is a vector, returning a
     // SymbolicValue of Kind::Vec. Used by AssignInstr when the LHS is
     // vector-typed. Handles CoefAtom/RValueAtom (whole-vector reference),
     // OpAtom (per-lane scalar arith with coef-broadcast), UnaryAtom,
@@ -164,7 +164,7 @@ namespace refractir {
         std::vector<smt::Term> &pc, std::vector<smt::Term> &ub
     );
 
-    // [v0.2.1] Per-atom evaluator for vector RHS. Pulled out so the
+    // Per-atom evaluator for vector RHS. Pulled out so the
     // chain-application loop in evalVecExpr can lower each atom without
     // round-tripping through Expr (which is not copy-assignable).
     SymbolicValue evalVecExprAtom(
@@ -314,7 +314,7 @@ namespace refractir {
     TypePtr resolveAtomType(const Atom &a) const;
     TypePtr resolveSelectValType(const SelectVal &sv) const;
 
-    // [v0.2.2] SMT lowering for built-in intrinsics.
+    // SMT lowering for built-in intrinsics.
     // Implemented in src/solver/intrinsics.cpp — the single source of
     // truth for solver-side intrinsic semantics. Adds UB path conditions
     // (e.g. x != 0 for @clz/@ctz) directly to `pc`.
@@ -325,23 +325,23 @@ namespace refractir {
 
     std::unordered_map<std::string, const StructDecl *> structs_;
 
-    // Pointer dispatch helpers (v0.2.0):
+    // Pointer dispatch helpers:
     // Pointers are encoded as BV64 tags identifying their target local. The
     // current FunDecl is held per-solve via thread_local storage to support
     // load/store dispatch over candidate targets, while keeping sample() safe
     // for concurrent workers.
     static thread_local const FunDecl *currentFun_;
 
-    // [v0.2.1] Per-solve pointer provenance store (rule 14, 19). Owns the
+    // Per-solve pointer provenance store (rule 14, 19). Owns the
     // `ptr T` local → PtrProvenance map; see Provenance (solver/provenance.hpp).
     Provenance prov_;
 
-    // [v0.2.2] §9.6.1 shared sym cache: a `sym` declared in a `fun`
+    // §9.6.1 shared sym cache: a `sym` declared in a `fun`
     // body becomes one solver constant reused across every call to
     // that function on the path. Keyed by FunDecl*.
     std::unordered_map<const FunDecl *, std::unordered_map<std::string, SymbolicValue>> calleeSyms_;
 
-    // [v0.2.2] Symbolic interprocedural call. Evaluates the callee
+    // Symbolic interprocedural call. Evaluates the callee
     // body on its straight-line CFG path and returns the symbolic
     // value of the ret expression. The caller's FunDecl and store are
     // passed in so that `store %p, %v` instructions inside the callee
@@ -353,7 +353,7 @@ namespace refractir {
         SymbolicStore *callerStore = nullptr
     );
 
-    // [v0.2.2 Phase 8] §9.6.2 contract-form decl expansion. `pre`
+    // §9.6.2 contract-form decl expansion. `pre`
     // clauses join PC; a fresh ret_sym stands for the return value;
     // `post` clauses are assumed by joining PC. Memory havoc
     // (§9.6.2.4) is the next refinement and is currently a TODO --
@@ -366,18 +366,18 @@ namespace refractir {
         std::vector<smt::Term> &pc, std::vector<smt::Term> &ub
     );
 
-    // [v0.2.2] Currently active requirements vector (so nested callees
+    // Currently active requirements vector (so nested callees
     // can push REQ terms). Set by solve() and consumed by callFunction.
     std::vector<smt::Term> *currentReq_ = nullptr;
 
 
-    // [v0.2.2] Per-solve RNG used by callFunction to pick a branch when
+    // Per-solve RNG used by callFunction to pick a branch when
     // a callee has a non-straight CFG. Seeded from config_.seed at the
     // start of solve(). A future sub-path syntax (see SPEC §13) will
     // replace this random sampling with a user-supplied callee path.
     std::mt19937 calleeRng_;
 
-    // [v0.2.2] Caller frame snapshot for the current `callFunction`
+    // Caller frame snapshot for the current `callFunction`
     // activation.  Used by LoadAtom / StoreInstr handlers so that a
     // pointer parameter dereferenced inside a callee can land its read
     // / write on the caller-side `let mut` that owns the storage —

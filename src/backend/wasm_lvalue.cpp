@@ -68,7 +68,7 @@ namespace refractir {
     if (!locals_.count(lv.base.name))
       return;
     const auto &info = locals_.at(lv.base.name);
-    // [v0.2.3] `%v[idx]` on a register-strategy vector local/param: the
+    // `%v[idx]` on a register-strategy vector local/param: the
     // strategy owns the lane read. Stores never reach here — lane writes
     // are intercepted at AssignInstr.
     if (!isStore && !lv.accesses.empty() &&

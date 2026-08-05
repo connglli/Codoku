@@ -40,7 +40,7 @@ namespace refractir {
       return solver.make_bv_sort(kPtrBits);
     }
     if (auto vt = std::get_if<VecType>(&t->v)) {
-      // [v0.2.1] Vectors aren't a single SMT sort; lanes are held as N
+      // Vectors aren't a single SMT sort; lanes are held as N
       // independent terms in SymbolicValue::arrayVal. getSort returns the
       // lane sort so any downstream caller that wants "what kind of term
       // is in each lane?" gets the right answer.
@@ -62,7 +62,7 @@ namespace refractir {
         );
       }
     } else if (auto vt = std::get_if<VecType>(&t->v)) {
-      // [v0.2.1] Vector sym: N independent lane-symbolic constants
+      // Vector sym: N independent lane-symbolic constants
       // (§9.5.1). Same shape as Array but tagged Vec so downstream
       // dispatch picks the lane-wise UB path.
       res.kind = SymbolicValue::Kind::Vec;
@@ -183,7 +183,7 @@ namespace refractir {
     if (iv.kind == InitVal::Kind::Undef)
       return makeUndef(t, solver);
 
-    // [v0.2.1] Atom-form initializer (addr, load, cmp, ptrindex, etc.)
+    // Atom-form initializer (addr, load, cmp, ptrindex, etc.)
     if (iv.kind == InitVal::Kind::Atom) {
       const auto &atom = *std::get<AtomPtr>(iv.value);
       if (auto vt = std::get_if<VecType>(&t->v)) {

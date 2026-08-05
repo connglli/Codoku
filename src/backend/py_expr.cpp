@@ -37,7 +37,7 @@ namespace refractir {
 
   } // namespace
 
-  // --- [v0.2.3] Binary-operator lowering (see py_backend.hpp) ---------------
+  // --- Binary-operator lowering (see py_backend.hpp) ---------------
 
   std::string PyBackend::binInt(
       const char *helper, char op, const std::string &a, const std::string &b, const std::string &n

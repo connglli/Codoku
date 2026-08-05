@@ -110,7 +110,7 @@ int main(int argc, char **argv) {
     Parser ps(std::move(toks));
     Program prog = ps.parseProgram();
 
-    // [v0.2.2] -I link-form resolution.
+    // -I link-form resolution.
     std::vector<Program> libs;
     if (result.count("I")) {
       libs = loadIncludeDirs(result["I"].as<std::vector<std::string>>());
@@ -221,13 +221,13 @@ int main(int argc, char **argv) {
                     << std::endl;
           return 1;
         }
-        // [v0.2.2] SOLVED header: structured comment line carrying the
+        // SOLVED header: structured comment line carrying the
         // values the solver chose for each entry-fun parameter plus
         // the value of the ret expression on the chosen path. Param
         // names appear verbatim in the body of the function — the
-        // SIRPrinter does NOT substitute them. Consumers (e.g. rylink)
-        // read this header to pin entry-points without running the
-        // solver themselves.
+        // SIRPrinter does NOT substitute them. Consumers read this
+        // header to pin entry-points without running the solver
+        // themselves.
         auto fmtVal = [](const SymbolicExecutor::Result::ModelVal &v) {
           if (std::holds_alternative<int64_t>(v))
             return std::to_string(std::get<int64_t>(v));

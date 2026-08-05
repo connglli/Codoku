@@ -5,7 +5,7 @@
 
 namespace refractir {
 
-  // [v0.2.3] Walk the program collecting every (N, T) vector shape
+  // Walk the program collecting every (N, T) vector shape
   // used, so a vec-lowering strategy can emit its per-shape preamble
   // (C typedefs / struct decls, python helper classes). Shapes may
   // repeat; strategies deduplicate. Shared by the C and python

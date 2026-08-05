@@ -72,19 +72,19 @@ namespace refractir {
     FloatType, // f32, f64
     KwUndef,
     KwAs,        // "as"
-    KwPtr,       // "ptr"   [v0.2.0]
-    KwAddr,      // "addr"  [v0.2.0]
-    KwLoad,      // "load"  [v0.2.0]
-    KwStore,     // "store" [v0.2.0]
-    KwNull,      // "null"  [v0.2.0]
-    KwCmp,       // "cmp"       [v0.2.1]
-    KwPtrIndex,  // "ptrindex"  [v0.2.1]
-    KwPtrField,  // "ptrfield"  [v0.2.1]
-    KwCall,      // "call"      [v0.2.2]
-    KwDecl,      // "decl"      [v0.2.2]
-    KwIntrinsic, // "intrinsic" [v0.2.2]
-    KwPre,       // "pre"       [v0.2.2]
-    KwPost,      // "post"      [v0.2.2]
+    KwPtr,       // "ptr"
+    KwAddr,      // "addr"
+    KwLoad,      // "load"
+    KwStore,     // "store"
+    KwNull,      // "null"
+    KwCmp,       // "cmp"
+    KwPtrIndex,  // "ptrindex"
+    KwPtrField,  // "ptrfield"
+    KwCall,      // "call"
+    KwDecl,      // "decl"
+    KwIntrinsic, // "intrinsic"
+    KwPre,       // "pre"
+    KwPost,      // "post"
   };
 
   /**

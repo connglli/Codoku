@@ -12,7 +12,7 @@ namespace refractir {
    * CVecLowering — abstract strategy that controls how the C backend lowers
    * `<N> T` vector locals and operations. Four built-in strategies are
    * provided via `makeCVecLowering`; external tools may subclass for custom
-   * lowerings (the interface is stable enough for rysmith mutation).
+   * lowerings, and the interface is stable enough to be swapped per run.
    */
   class CVecLowering {
   public:

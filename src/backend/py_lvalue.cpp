@@ -428,7 +428,7 @@ namespace refractir {
 
   void PyBackend::collectBoxedRoots(const FunDecl &f) {
     boxedRoots_.clear();
-    // [v0.2.3] Top-level vector locals/params are managed by the
+    // Top-level vector locals/params are managed by the
     // vec-lowering strategy, not flattened into a boxed leaf-slot
     // list — only array/struct aggregates are boxed roots. (Vectors
     // *nested* in an array/struct are part of the enclosing root and

@@ -7,7 +7,7 @@
 namespace refractir {
 
   void CBackend::emitLValue(const LValue &lv) {
-    // [v0.2.1] Vector lane access through the LValue path goes through the
+    // Vector lane access through the LValue path goes through the
     // strategy's emitLaneRead so each strategy controls its lane syntax
     // (vecext: `name[k]`; scalars: `name_k`; structarray: `name.lanes[k]`;
     // structscalars: `name.l<k>`).
@@ -23,7 +23,7 @@ namespace refractir {
           emitIndex(ai->index);
           orig.rdbuf(origBuf);
           std::string idxStr = tmp.str();
-          // [v0.2.1] Dynamic lane indices need a runtime bounds check —
+          // Dynamic lane indices need a runtime bounds check —
           // GCC vec-ext lane access doesn't trap on OOB by itself. For
           // an IntLit index the parser already pinned it, so skip the
           // check (the typechecker may also have rejected it).
@@ -99,7 +99,7 @@ namespace refractir {
         break;
       }
       case InitVal::Kind::Atom: {
-        // [v0.2.1] §3.4.2 atom-form init — emit the atom inline (the
+        // §3.4.2 atom-form init — emit the atom inline (the
         // typechecker has already verified the atom's type matches the
         // target).
         emitAtom(*std::get<AtomPtr>(iv.value));

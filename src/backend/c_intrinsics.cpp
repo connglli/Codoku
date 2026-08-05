@@ -1,4 +1,4 @@
-// [v0.2.2] C backend intrinsic helper emission.
+// C backend intrinsic helper emission.
 //
 // This file is the single source of truth for the C code emitted for
 // every built-in RefractIR intrinsic. The helpers use a widening-and-mask
@@ -64,7 +64,7 @@ namespace refractir {
 
   protected:
     static std::ostream &out(CBackend &backend);
-    // [v0.2.3] Sink for UB-precondition guard lines: `out(backend)`
+    // Sink for UB-precondition guard lines: `out(backend)`
     // normally, but a discarding stream under --no-ub-guards, so the
     // guards vanish from the emitted helper while its computation (which
     // is only ever reached on UB-free inputs) is untouched.
@@ -136,7 +136,7 @@ namespace refractir {
   struct CIntrinsicRegistry {
     static std::ostream &out(CBackend &backend) { return backend.out_; }
 
-    // [v0.2.3] Guard-line sink shared by both intrinsic base classes:
+    // Guard-line sink shared by both intrinsic base classes:
     // the real stream normally, but a discarding one (null streambuf →
     // writes set badbit and emit nothing) under --no-ub-guards.
     // Emission is single-threaded per backend instance.
@@ -252,7 +252,7 @@ namespace refractir {
       }
     };
 
-    // ── §12.3 Integer extras (v0.2.2 extra batch A) ────────────────────────────────
+    // ── §12.3 Integer extras ────────────────────────────────
 
     class AbsDiffIntrinsic final : public CIntrinsic {
     public:
@@ -331,7 +331,7 @@ namespace refractir {
       }
     };
 
-    // ── §12.4 Bit-manipulation (v0.2.2 extra batch B) ──────────────────────────────
+    // ── §12.4 Bit-manipulation ──────────────────────────────
 
     class ParityIntrinsic final : public CIntrinsic {
     public:
@@ -463,7 +463,7 @@ namespace refractir {
       }
     };
 
-    // ── §12.5 Integer overflow-aware family (v0.2.2 extra batch C) ────────
+    // ── §12.5 Integer overflow-aware family ────────
     //
     // The widening-and-mask strategy already gives us native wrapping at
     // the helper width `W`; for return widths `N < W` we mask + sign-extend
@@ -723,7 +723,7 @@ namespace refractir {
       }
     };
 
-    // ── §12.6 Floating-point sign / bit ops (v0.2.2 extra batch D.1) ────
+    // ── §12.6 Floating-point sign / bit ops ────
 
     /**
      * @brief Abstract base for FP-touching intrinsic emitters. Unlike
@@ -743,7 +743,7 @@ namespace refractir {
     protected:
       static std::ostream &out(CBackend &backend) { return CIntrinsicRegistry::out(backend); }
 
-      // [v0.2.3] See CIntrinsicRegistry::guardOut — discards under --no-ub-guards.
+      // See CIntrinsicRegistry::guardOut — discards under --no-ub-guards.
       static std::ostream &guardOut(CBackend &backend) {
         return CIntrinsicRegistry::guardOut(backend);
       }
@@ -961,8 +961,8 @@ namespace refractir {
       // The lookup table is a function-local static initialised lazily on
       // the first call. Marking the helper noinline keeps the C compiler
       // from cloning it into every caller and propagating the table
-      // contents back through constant folding — that's the whole point of
-      // R1's "opaque to the optimizer" property.
+      // contents back through constant folding, which is what makes the
+      // checksum opaque to the optimizer.
       std::string linkageQualifier() const override { return "static __attribute__((noinline))"; }
 
       void emit(
@@ -1136,7 +1136,7 @@ namespace refractir {
     return "_refractir_" + base + "_i" + std::to_string(bits);
   }
 
-  // FP-aware overload (v0.2.2 extra D.1): mangle FP-touching intrinsics by
+  // FP-aware overload: mangle FP-touching intrinsics by
   // their first operand's type so e.g. @fabs(f32) and @fabs(f64) get
   // distinct helper names, and so @to_bits(f32)→i32 doesn't collide with
   // @from_bits(i32)→f32 (both would map to *_i32 under the legacy rule).
@@ -1144,7 +1144,7 @@ namespace refractir {
     std::string base = intr.name.name;
     if (!base.empty() && base[0] == '@')
       base.erase(0, 1);
-    // [v0.2.3 V1] Reductions overload on vector shape (lane count +
+    // Reductions overload on vector shape (lane count +
     // element type), so mangle by both — `_refractir_reduce_add_v4_i32`,
     // `_refractir_reduce_add_v2_f64` — to keep distinct declarations from
     // colliding on one helper name.
@@ -1201,7 +1201,7 @@ namespace refractir {
   }
 
   void CBackend::emitIntrinsicHelper(const IntrinsicDecl &intr) {
-    // [v0.2.3 V1] Horizontal vector reductions (§12.4) have a vector
+    // Horizontal vector reductions (§12.4) have a vector
     // parameter, so they lower to a dedicated helper rather than the
     // scalar widening-and-mask path below.
     if (auto k = getIntrinsicKind(intr.name.name); k && isReductionIntrinsic(*k)) {
@@ -1291,7 +1291,7 @@ namespace refractir {
     out_ << "}\n\n";
   }
 
-  // [v0.2.3 V1] Horizontal vector reduction helper (§12.4). Emits a
+  // Horizontal vector reduction helper (§12.4). Emits a
   // `static inline T H(<vec> a0) { ... }` that folds the lanes left-to-right
   // into one scalar, reproducing the interpreter's per-step UB exactly:
   // @reduce_add traps on an out-of-range partial sum (int) or a non-finite

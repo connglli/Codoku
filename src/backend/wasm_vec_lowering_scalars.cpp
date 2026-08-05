@@ -1,4 +1,4 @@
-// [v0.2.3] "scalars" WASM vec-lowering: a vector `<N> T` local is
+// "scalars" WASM vec-lowering: a vector `<N> T` local is
 // stored as N separate WASM locals `$v__0 .. $v__{N-1}` (elem-typed,
 // integer lanes kept sign-extended at their WASM width). Mirrors the C
 // and python "scalars" strategies — including the refusal of dynamic

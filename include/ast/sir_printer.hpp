@@ -26,9 +26,9 @@ namespace refractir {
 
     void print(const Program &p);
 
-    // [v0.2.2] Publicly exposed so tools (e.g. rysmith's func_desc
-    // emitter, future rylink) can serialize a TypePtr back to its
-    // canonical SIR surface syntax without rolling a private printer.
+    // Publicly exposed so a caller that persists type information can
+    // serialize a TypePtr back to its canonical SIR surface syntax
+    // without rolling a private printer.
     void printType(const TypePtr &t);
 
     // Convenience: render a TypePtr to its canonical SIR surface
@@ -38,7 +38,7 @@ namespace refractir {
   private:
     std::ostream &out_;
     std::unordered_map<std::string, SymbolicExecutor::Result::ModelVal> model_;
-    // [v0.2.1] Per-lane concrete values for vector syms produced by the
+    // Per-lane concrete values for vector syms produced by the
     // solver. References to a vec sym `%?v` are rewritten to a synthetic
     // local `%v__solved` whose init list carries these lane values.
     std::unordered_map<std::string, std::vector<SymbolicExecutor::Result::ModelVal>> vecModel_;

@@ -95,7 +95,7 @@ namespace refractir {
               off += fSize;
             }
           } else if (sv.arrayVal[i].kind == RuntimeValue::Kind::Array) {
-            // [v0.2.1 fix] Nested array element (e.g., [3] i32 inside
+            // Nested array element (e.g., [3] i32 inside
             // [2][3] i32): create a sub-array ObjectInfo and recursively
             // flatten leaf elements into per-address heap entries so that
             // ptrindex can navigate into sub-arrays and load individual
@@ -245,7 +245,7 @@ namespace refractir {
     uint64_t base = bumpAlloc(totalSize);
     addrMap_[varName] = base;
 
-    // [v0.2.1] Create a whole-struct ObjectInfo so that ptrfield-derived
+    // Create a whole-struct ObjectInfo so that ptrfield-derived
     // pointers (whose provenance = the struct per rule 15) can roam over
     // the entire struct range. The elemSize is set to the smallest field
     // size so ptr arith steps by the right granularity.
@@ -263,7 +263,7 @@ namespace refractir {
     );
 
     // Create one ObjectInfo per field and sync its value into the heap.
-    // [v0.2.1] Recurse into nested struct fields so that Rule 15b
+    // Recurse into nested struct fields so that Rule 15b
     // typed-access mismatch checks can resolve nested field ObjectInfos.
     uint64_t offset = 0;
     auto sv = store.find(varName);
@@ -297,7 +297,7 @@ namespace refractir {
           }
       );
 
-      // [v0.2.1 fix] For nested struct fields, create sub-field ObjectInfos
+      // For nested struct fields, create sub-field ObjectInfos
       // so that Rule 15b checks can identify typed-access mismatches inside
       // nested structs (e.g., ptr i32 accessing an i64 field).
       if (fieldIsStruct && fieldSD) {

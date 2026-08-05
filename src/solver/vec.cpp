@@ -15,7 +15,7 @@ namespace refractir {
     return r;
   }
 
-  // [v0.2.1] evalVecExpr — evaluate an Expr whose value is a vector,
+  // evalVecExpr — evaluate an Expr whose value is a vector,
   // returning a SymbolicValue with Kind::Vec. Single-atom Expr only
   // (chains involving vectors aren't exercised by our v0.2.1 tests; the
   // typechecker already permits them, so this is the natural follow-up
@@ -62,7 +62,7 @@ namespace refractir {
           if (fpLane)
             opK = term.op == AddOp::Plus ? smt::Kind::FP_ADD : smt::Kind::FP_SUB;
           else {
-            // [v0.2.1] Per-lane signed BV add/sub overflow is UB
+            // Per-lane signed BV add/sub overflow is UB
             // (rule 1 / 2 lifted to lanes).
             auto ovK =
                 term.op == AddOp::Plus ? smt::Kind::BV_SADD_OVERFLOW : smt::Kind::BV_SSUB_OVERFLOW;
@@ -72,7 +72,7 @@ namespace refractir {
           }
           acc[k] = fpLane ? solver.make_term(opK, {rmRNE, acc[k], next[k]})
                           : solver.make_term(opK, {acc[k], next[k]});
-          // [v0.2.1] Per-lane FP result must be finite (rule 6/7 lifted).
+          // Per-lane FP result must be finite (rule 6/7 lifted).
           if (fpLane)
             assertFPFinite(acc[k], solver, ub);
         }
@@ -262,7 +262,7 @@ namespace refractir {
       smt::Term cond = solver.make_term(smt::Kind::EQUAL, {maskV.arrayVal[k].term, oneI1});
       smt::Term chosen =
           solver.make_term(smt::Kind::ITE, {cond, vtArm.arrayVal[k].term, vfArm.arrayVal[k].term});
-      // [v0.2.1] Propagate per-lane is_defined: select on an undef
+      // Propagate per-lane is_defined: select on an undef
       // lane is still undef. Use the lane's source is_defined if
       // present; default to "defined" otherwise.
       smt::Term chosenDef;
@@ -337,10 +337,10 @@ namespace refractir {
           default:
             throw std::runtime_error("Vec FP OpAtom: only mul/div supported on FP lanes");
         }
-        // [v0.2.1] Per-lane FP rule 6/7: each lane must be finite.
+        // Per-lane FP rule 6/7: each lane must be finite.
         assertFPFinite(out, solver, ub);
       } else {
-        // [v0.2.1] Per-lane shift UB: amount in [0, width) and Shl
+        // Per-lane shift UB: amount in [0, width) and Shl
         // requires non-negative operand (rule 4/5).
         auto sortR = solver.get_sort(r);
         auto sortC = solver.get_sort(c);
@@ -361,7 +361,7 @@ namespace refractir {
           }
           case AtomOpKind::Div: {
             ub.push_back(solver.make_term(smt::Kind::DISTINCT, {r, bvZeroR}));
-            // [v0.2.1 fix] Per-lane INT_MIN / -1 overflow is UB
+            // Per-lane INT_MIN / -1 overflow is UB
             // (rule 4 lifted to lanes by rule 21).
             auto min_signed = solver.make_bv_min_signed(solver.get_sort(c));
             auto minus_one = solver.make_bv_value_int64(solver.get_sort(r), -1);
@@ -374,7 +374,7 @@ namespace refractir {
           }
           case AtomOpKind::Mod: {
             ub.push_back(solver.make_term(smt::Kind::DISTINCT, {r, bvZeroR}));
-            // [v0.2.1 fix] Per-lane INT_MIN % -1 overflow is UB
+            // Per-lane INT_MIN % -1 overflow is UB
             // (rule 4 lifted to lanes by rule 21).
             auto min_signed_m = solver.make_bv_min_signed(solver.get_sort(c));
             auto minus_one_m = solver.make_bv_value_int64(solver.get_sort(r), -1);
@@ -469,13 +469,13 @@ namespace refractir {
         auto [exp, sig] = solver.get_fp_dims(dstSort);
         auto rmRNE = solver.make_rm_value(smt::RoundingMode::RNE);
         out = solver.make_term(smt::Kind::FP_TO_FP_FROM_SBV, {rmRNE, lane}, {exp, sig});
-        // [v0.2.1] Per-lane finite (rule 6/7 lifted).
+        // Per-lane finite (rule 6/7 lifted).
         assertFPFinite(out, solver, ub);
       } else if (srcIsFp && dstIsFp) {
         auto [exp, sig] = solver.get_fp_dims(dstSort);
         auto rmRNE = solver.make_rm_value(smt::RoundingMode::RNE);
         out = solver.make_term(smt::Kind::FP_TO_FP_FROM_FP, {rmRNE, lane}, {exp, sig});
-        // [v0.2.1] Per-lane finite (rule 6/7 lifted) — catches
+        // Per-lane finite (rule 6/7 lifted) — catches
         // f64→f32 overflow producing ±inf.
         assertFPFinite(out, solver, ub);
       } else { // BV -> BV

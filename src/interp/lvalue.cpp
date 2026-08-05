@@ -217,7 +217,7 @@ namespace refractir {
     }
 
     if (l.kind == RuntimeValue::Kind::Int && r.kind == RuntimeValue::Kind::Int) {
-      // [v0.2.2] Spec §6.12 + §6.4: all iN are signed; the typechecker
+      // Spec §6.12 + §6.4: all iN are signed; the typechecker
       // range-checks integer literals against the target type's signed
       // range [-2^(N-1), 2^(N-1) - 1], so by the time we reach this
       // comparison both sides are already canonical signed int64 values

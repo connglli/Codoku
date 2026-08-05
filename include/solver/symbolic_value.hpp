@@ -16,7 +16,7 @@ namespace refractir {
    * can share it without depending on the full SymbolicExecutor definition.
    */
   struct SymbolicValue {
-    // [v0.2.1] Vec: N-lane tuple (held in arrayVal, same shape as Array).
+    // Vec: N-lane tuple (held in arrayVal, same shape as Array).
     // Distinguished from Array so the solver can apply lane-wise UB
     // semantics and the C-backend-compatible 0/1 mask representation.
     enum class Kind { Int, Array, Struct, Undef, Vec } kind = Kind::Undef;
@@ -25,8 +25,8 @@ namespace refractir {
     std::vector<SymbolicValue> arrayVal;
     std::unordered_map<std::string, SymbolicValue> structVal;
 
-    smt::Term prov_base; // [v0.2.1] Pointer provenance base tag (BV64)
-    smt::Term prov_size; // [v0.2.1] Pointer provenance size in tag-units (BV64)
+    smt::Term prov_base; // Pointer provenance base tag (BV64)
+    smt::Term prov_size; // Pointer provenance size in tag-units (BV64)
 
     SymbolicValue() = default;
 

@@ -116,7 +116,7 @@ int main(int argc, char **argv) {
     Parser ps(std::move(toks));
     Program prog = ps.parseProgram();
 
-    // 1b. [v0.2.2] Load -I libraries and resolve link-form `decl`s.
+    // 1b. Load -I libraries and resolve link-form `decl`s.
     std::vector<Program> libs;
     if (result.count("I")) {
       libs = loadIncludeDirs(result["I"].as<std::vector<std::string>>());

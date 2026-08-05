@@ -169,7 +169,7 @@ namespace refractir {
             }
             return nullptr;
           } else if constexpr (std::is_same_v<T, CallAtom>) {
-            // [v0.2.2] Honour the overload pinned by the type checker;
+            // Honour the overload pinned by the type checker;
             // see CallAtom::resolvedIntrinsic.
             if (arg.resolvedIntrinsic)
               return arg.resolvedIntrinsic->retType;

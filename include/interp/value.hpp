@@ -24,7 +24,7 @@ namespace refractir {
     std::uint64_t elemSize = 1; // for Ptr kind: static element size of the pointee type
     std::vector<RuntimeValue> arrayVal;
     std::unordered_map<std::string, RuntimeValue> structVal;
-    // [v0.2.1] Vec: same shape as Array (per-lane RuntimeValue tuple),
+    // Vec: same shape as Array (per-lane RuntimeValue tuple),
     // but represents a vector value (no address; not in heap_; lane-wise
     // arithmetic). Element kind matches the lane scalar type.
   };

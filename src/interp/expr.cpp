@@ -12,7 +12,7 @@ namespace refractir {
     RuntimeValue v = evalAtom(e.first, store);
     for (const auto &tail: e.rest) {
       RuntimeValue right = evalAtom(tail.atom, store);
-      // [v0.2.1] Vector chain: lane-wise +/-. The other operand may be
+      // Vector chain: lane-wise +/-. The other operand may be
       // another Vec OR a scalar literal that broadcasts (matches the
       // typechecker rule allowing literal broadcast in vec chains).
       if (v.kind == RuntimeValue::Kind::Vec &&
@@ -174,7 +174,7 @@ namespace refractir {
 
     RuntimeValue c = evalCoef(arg.coef, store);
     RuntimeValue r = evalLValue(arg.rval, store);
-    // [v0.2.1] Vector OpAtom: rval is Vec; coef is either Vec or a
+    // Vector OpAtom: rval is Vec; coef is either Vec or a
     // scalar literal that broadcasts. Build a per-lane Coef-LValue
     // and recurse into a synthetic OpAtom evaluation for each lane.
     if (r.kind == RuntimeValue::Kind::Vec) {
@@ -381,7 +381,7 @@ namespace refractir {
   RuntimeValue Interpreter::evalUnaryAtom(const UnaryAtom &arg, const Store &store) {
 
     RuntimeValue r = evalLValue(arg.rval, store);
-    // [v0.2.1] Vector unary ~: lane-wise.
+    // Vector unary ~: lane-wise.
     if (r.kind == RuntimeValue::Kind::Vec) {
       RuntimeValue res;
       res.kind = RuntimeValue::Kind::Vec;
@@ -415,7 +415,7 @@ namespace refractir {
 
   RuntimeValue Interpreter::evalSelectAtom(const SelectAtom &arg, const Store &store) {
 
-    // [v0.2.1] Two forms. Mask form requires lane-wise (or scalar
+    // Two forms. Mask form requires lane-wise (or scalar
     // i1) blend; Cond form is the existing scalar boolean select.
     if (arg.cond) {
       return evalCond(*arg.cond, store) ? evalSelectVal(arg.vtrue, store)
@@ -454,13 +454,13 @@ namespace refractir {
 
   RuntimeValue Interpreter::evalCmpAtom(const CmpAtom &arg, const Store &store) {
 
-    // [v0.2.1] Reified comparison. Both operands are SelectVal.
+    // Reified comparison. Both operands are SelectVal.
     RuntimeValue lv = evalSelectVal(arg.lhs, store);
     RuntimeValue rv = evalSelectVal(arg.rhs, store);
     auto cmpScalar = [&](const RuntimeValue &a, const RuntimeValue &b) -> bool {
       if (a.kind == RuntimeValue::Kind::Undef || b.kind == RuntimeValue::Kind::Undef)
         throw UndefinedBehaviorError("UB: undef in cmp");
-      // [v0.2.1] Rule 14: relational compare of pointers from
+      // Rule 14: relational compare of pointers from
       // different objects (or null vs non-null in a relational
       // op) is UB. Equality / inequality remain legal.
       if (a.kind == RuntimeValue::Kind::Ptr || b.kind == RuntimeValue::Kind::Ptr) {
@@ -722,7 +722,7 @@ namespace refractir {
       throw UndefinedBehaviorError("UB: Load from unknown address");
     if (ptrRv.ptrVal < obj->base || ptrRv.ptrVal >= obj->end)
       throw UndefinedBehaviorError("UB: Load out of bounds");
-    // [v0.2.1] Rule 15b: typed-access mismatch. The load address
+    // Rule 15b: typed-access mismatch. The load address
     // must coincide with the start of a cell whose declared type
     // matches the pointer's static type. We check by finding the
     // most specific (field-level) ObjectInfo at the address; if
@@ -754,7 +754,7 @@ namespace refractir {
 
   RuntimeValue Interpreter::evalPtrIndexAtom(const PtrIndexAtom &arg, const Store &store) {
 
-    // [v0.2.1] §6.8.9: ptrindex <ptr>, <index> navigates a ptr [N] T
+    // §6.8.9: ptrindex <ptr>, <index> navigates a ptr [N] T
     // to ptr T at element `index`. Strict UB at the navigation site
     // for null (rule 17), undef (rule 18), or one-past-end (rule 19)
     // sources, plus out-of-bounds index (rule 16, index in [0, N]).
@@ -771,7 +771,7 @@ namespace refractir {
     if (ptrRv.ptrVal == obj->end)
       throw UndefinedBehaviorError("UB: 'ptrindex' from a one-past-the-end pointer");
 
-    // [v0.2.1 fix] Derive the array element count and element size
+    // Derive the array element count and element size
     // from the pointer's static type (ptr [N] T), NOT from the
     // provenance ObjectInfo. This is critical for nested arrays:
     // a ptr [3] i32 inside a [2][3] i32 must check against N=3,
@@ -856,7 +856,7 @@ namespace refractir {
 
   RuntimeValue Interpreter::evalPtrFieldAtom(const PtrFieldAtom &arg, const Store &store) {
 
-    // [v0.2.1] §6.8.10: ptrfield <ptr>, <fld> navigates ptr @S to
+    // §6.8.10: ptrfield <ptr>, <fld> navigates ptr @S to
     // ptr FieldType at the field's static offset.
     RuntimeValue ptrRv = evalLValue(arg.rval, store);
     if (ptrRv.kind == RuntimeValue::Kind::Undef)
@@ -978,7 +978,7 @@ namespace refractir {
     if (v.kind == RuntimeValue::Kind::Undef)
       throw UndefinedBehaviorError("UB: Reading undef in cast");
 
-    // [v0.2.1] Vector cast: lane-wise. v is a Vec; dstType is <N> U.
+    // Vector cast: lane-wise. v is a Vec; dstType is <N> U.
     if (v.kind == RuntimeValue::Kind::Vec) {
       auto vt = TypeUtils::asVec(arg.dstType);
       if (!vt)
@@ -1066,7 +1066,7 @@ namespace refractir {
 
   RuntimeValue Interpreter::evalCallAtom(const CallAtom &arg, const Store &store) {
 
-    // [v0.2.2] Function call. Phase 4 only handles intrinsics; fun
+    // Function call. Phase 4 only handles intrinsics; fun
     // calls and contract/link `decl` calls land in Phases 5/7/8.
     // §2.12 strict left-to-right evaluation order.
     std::vector<RuntimeValue> argVals;
@@ -1074,7 +1074,7 @@ namespace refractir {
     for (const auto &ap: arg.args) {
       argVals.push_back(evalExpr(*ap, store));
     }
-    // [v0.2.2] Honour the overload the type checker pinned onto
+    // Honour the overload the type checker pinned onto
     // this call site. Falling back to a local heuristic would
     // diverge from the type checker (which uses return-type
     // context) — see `CallAtom::resolvedIntrinsic`. The fallback
@@ -1110,11 +1110,11 @@ namespace refractir {
     if (intr) {
       return callIntrinsic(*intr, argVals, arg.span);
     }
-    // [v0.2.2 Phase 5] `fun` target: nested call frame.
+    // `fun` target: nested call frame.
     for (const auto &f: prog_.funs)
       if (f.name.name == arg.callee.name) {
         RuntimeValue rv = callFunction(f, argVals);
-        // [v0.2.2] §9.6.1 step 5: callee may have mutated caller
+        // §9.6.1 step 5: callee may have mutated caller
         // memory through pointer arguments. Refresh any addr-
         // promoted caller-side local before the next read.
         syncStoreFromHeap(const_cast<Store &>(store));
@@ -1123,7 +1123,7 @@ namespace refractir {
     for (const auto &d: prog_.extDecls)
       if (d.name.name == arg.callee.name) {
         if (d.contract) {
-          // [v0.2.2] §11.3: interpreter rejects contract-form decl calls.
+          // §11.3: interpreter rejects contract-form decl calls.
           throw std::runtime_error(
               "Interpreter rejects call to contract-form `decl` (no body): " + arg.callee.name
           );

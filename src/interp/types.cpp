@@ -146,7 +146,7 @@ namespace refractir {
             }
             return nullptr;
           } else if constexpr (std::is_same_v<T, CallAtom>) {
-            // [v0.2.2] Function/intrinsic call returns its return type. For
+            // Function/intrinsic call returns its return type. For
             // overloaded intrinsics, honour the resolution the type
             // checker pinned onto the AST node.
             if (arg.resolvedIntrinsic)

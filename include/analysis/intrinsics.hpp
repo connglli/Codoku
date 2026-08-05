@@ -108,10 +108,10 @@ namespace refractir {
     //     backend emits a `volatile` write of v, an observable side effect the
     //     optimizer must preserve. This anchors a computation the compiler
     //     cannot prove dead — e.g. the body of a deliberately non-terminating
-    //     loop (rysmith --require-nonterm). WASM / Python have no
-    //     forward-progress assumption, so there it lowers to plain identity.
+    //     loop. WASM / Python have no forward-progress assumption, so there it
+    //     lowers to plain identity.
     Observe,
-    // v0.2.3 V1 — horizontal vector reductions (§12.4). The sole parameter
+    // Horizontal vector reductions (§12.4). The sole parameter
     // is a vector `<N> T`; the result is the scalar element type `T`.
     // Add / Min / Max fold over integer or floating-point lanes; the
     // bitwise reductions And / Or / Xor are integer-only. `@reduce_mul` is

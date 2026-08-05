@@ -258,7 +258,7 @@ def _pfield(p, foff, flen, slen):
     return _Ptr(p.buf, p.off + foff, flen, p.off, p.off + slen)
 )PY";
 
-    // [v0.2.3] --no-ub-guards preamble: the same value semantics as
+    // --no-ub-guards preamble: the same value semantics as
     // kPreamble with every UB trap removed. Sound only for known-UB-free
     // programs (the dropped guards never fire on one). The arithmetic
     // operators are inlined at their call sites (see PyBackend::binInt
@@ -441,7 +441,7 @@ def _pfield(p, foff, flen, slen):
       for (const auto &f: s.fields)
         fields.emplace_back(f.name, f.type);
     }
-    // [v0.2.3] Vector-lowering strategy: storage form of vector
+    // Vector-lowering strategy: storage form of vector
     // locals. Default to "array" (plain lane lists — the historical
     // representation); struct strategies emit per-shape classes after
     // the preamble. The stamp mirrors the C backend's
@@ -474,7 +474,7 @@ def _pfield(p, foff, flen, slen):
       emitFunction(f);
     }
 
-    // [v0.2.3] Module driver: --emit-main output is directly
+    // Module driver: --emit-main output is directly
     // executable (`python3 prog.py`), mirroring the C target where
     // main() is the process entry point. main()'s i32 becomes the
     // exit status (truncated mod 256 by the OS, exactly like a C

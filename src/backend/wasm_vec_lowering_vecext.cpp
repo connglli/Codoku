@@ -1,4 +1,4 @@
-// [v0.2.3] "vecext" WASM vec-lowering: a vector `<N> T` local lives in
+// "vecext" WASM vec-lowering: a vector `<N> T` local lives in
 // native SIMD-128 registers — ceil(N*sizeof(T)/16) `v128` locals
 // `$v__0, $v__1, ...`, lane k at sublane k%L of register k/L where
 // L = 16/sizeof(T). This is the WASM analogue of the C backend's

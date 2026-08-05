@@ -1,4 +1,4 @@
-// [v0.2.2] Solver-side SMT lowering for built-in intrinsics.
+// Solver-side SMT lowering for built-in intrinsics.
 //
 // This file is the single source of truth for every intrinsic
 // supported by the RefractIR symbolic executor / SMT constraint generator.
@@ -184,7 +184,7 @@ namespace refractir {
       }
     };
 
-    // ── §12.3 Integer extras (v0.2.2 extra batch A) ────────────────────────────────
+    // ── §12.3 Integer extras ────────────────────────────────
 
     class AbsDiffIntrinsic final : public SolverIntrinsic {
     public:
@@ -258,7 +258,7 @@ namespace refractir {
       }
     };
 
-    // ── §12.4 Bit-manipulation (v0.2.2 extra batch B) ──────────────────────────────
+    // ── §12.4 Bit-manipulation ──────────────────────────────
 
     class ParityIntrinsic final : public SolverIntrinsic {
     public:
@@ -434,7 +434,7 @@ namespace refractir {
       }
     };
 
-    // ── §12.5 Integer overflow-aware family (v0.2.2 extra batch C) ────────
+    // ── §12.5 Integer overflow-aware family ────────
 
     /**
      * @brief @wrapping_add(a, b) — BV_ADD already operates modulo 2^N.
@@ -699,7 +699,7 @@ namespace refractir {
       }
     };
 
-    // ── §12.6 Floating-point sign / bit ops (v0.2.2 extra batch D.1) ────
+    // ── §12.6 Floating-point sign / bit ops ────
 
     /**
      * @brief FP-intrinsic base class. Receives the IntrinsicDecl directly
@@ -1007,7 +1007,7 @@ namespace refractir {
       }
     };
 
-    // ── §12.4 Horizontal vector reductions (v0.2.3 V1) ─────────────────────
+    // ── §12.4 Horizontal vector reductions ─────────────────────
     //
     // A reduction folds the lane terms of its sole vector argument
     // (SymbolicValue::Kind::Vec, lanes in arrayVal) into one scalar term
@@ -1183,7 +1183,7 @@ namespace refractir {
         // §12.6 D.5 — compositions.
         registry_[IntrinsicKind::Fract] = std::make_unique<FractSolverIntrinsic>();
         registry_[IntrinsicKind::Recip] = std::make_unique<RecipSolverIntrinsic>();
-        // §12.4 — floating-point horizontal reductions (v0.2.3 V1). Only the
+        // §12.4 — floating-point horizontal reductions. Only the
         // arithmetic add / min / max fold FP lanes; the bitwise reductions
         // are integer-only and live solely in the integer registry.
         registry_[IntrinsicKind::ReduceAdd] =
@@ -1245,7 +1245,7 @@ namespace refractir {
         registry_[IntrinsicKind::SaturatingNeg] = std::make_unique<SaturatingNegIntrinsic>();
         registry_[IntrinsicKind::DivEuclid] = std::make_unique<DivEuclidIntrinsic>();
         registry_[IntrinsicKind::RemEuclid] = std::make_unique<RemEuclidIntrinsic>();
-        // §12.4 — integer horizontal reductions (v0.2.3 V1). All six kinds
+        // §12.4 — integer horizontal reductions. All six kinds
         // fold integer lanes; add / min / max additionally have an FP
         // overload in the SolverFpIntrinsicRegistry above.
         registry_[IntrinsicKind::ReduceAdd] =
@@ -1276,7 +1276,7 @@ namespace refractir {
     if (!kind)
       throw std::runtime_error("Solver: unknown intrinsic " + intr.name.name);
 
-    // FP-touching dispatch first (v0.2.2 extra D.1): the integer path's
+    // FP-touching dispatch first: the integer path's
     // bvN = bv_sort(retBits) only fits integer-return intrinsics; FP-return
     // and FP-param intrinsics route through their own registry.
     bool anyFp = (intr.retType && std::holds_alternative<FloatType>(intr.retType->v));

@@ -13,7 +13,7 @@ namespace refractir {
       TypeAnnotations ann;
       checkFunction(f, ann, diags);
     }
-    // [v0.2.2] Contract well-formedness uses the callee registry.
+    // Contract well-formedness uses the callee registry.
     for (const auto &d: prog.extDecls) {
       if (d.contract) {
         TypeAnnotations ann;
@@ -24,7 +24,7 @@ namespace refractir {
     return diags.hasErrors() ? refractir::PassResult::Error : refractir::PassResult::Success;
   }
 
-  // [v0.2.1] Recursive well-formedness check on type usages. Catches the
+  // Recursive well-formedness check on type usages. Catches the
   // structural restrictions §3.2 and §6.9.1: no vector of non-scalar, no
   // ptr to vector, no vector with N<2, no vector as struct field, no array
   // of vector.
@@ -75,7 +75,7 @@ namespace refractir {
       StructInfo si;
       si.declSpan = sd.span;
       for (const auto &fd: sd.fields) {
-        // [v0.2.1] Validate per-field type: in particular reject vector
+        // Validate per-field type: in particular reject vector
         // fields explicitly with insideField=true.
         validateTypeWF(fd.type, diags, false, true, false);
         si.fields[fd.name] = fd.type;
@@ -122,7 +122,7 @@ namespace refractir {
       validateTypeWF(i.retType, diags);
       for (const auto &p: i.params)
         validateTypeWF(p.type, diags);
-      // [v0.2.2 §12 / D.1] Intrinsics are defined over scalar `iN` or `fN`
+      // §12 Intrinsics are defined over scalar `iN` or `fN`
       // — except the v0.2.3 horizontal reductions (§12.4), whose parameter
       // is a vector `<N> T` of scalar lanes. This is the coarse gate;
       // per-intrinsic correctness (which iN/fN/`<N> T` combinations a given
@@ -198,7 +198,7 @@ namespace refractir {
     }
   }
 
-  // [v0.2.2] §6.11 Contract well-formedness:
+  // §6.11 Contract well-formedness:
   //   - Each `pre` cond's free variables ⊆ params (no `ret`).
   //   - Each `post` cond's free variables ⊆ params ∪ {ret}.
   //   - `ret` has the declared return type.
@@ -254,7 +254,7 @@ namespace refractir {
       if (exprMentionsRet(pre.cond.lhs) || exprMentionsRet(pre.cond.rhs)) {
         diags.error("`ret` may not appear in `pre` clauses (§6.11)", pre.span);
       }
-      // [v0.2.2 §6.11] pre clauses must be scalar Cond; vector-typed
+      // §6.11 pre clauses must be scalar Cond; vector-typed
       // operands would produce a `<N> i1` mask, which is not a single
       // truth value. Type the LHS first (with null disallowed); if the
       // LHS is a vector, flag the error before delegating to checkCond
@@ -280,7 +280,7 @@ namespace refractir {
     vars.erase("ret");
   }
 
-  // [v0.2.2] §9.7 No recursion. Build the call graph from fun bodies and
+  // §9.7 No recursion. Build the call graph from fun bodies and
   // contract bodies (which can transitively `call` other functions via
   // `pre`/`post` clauses — though uncommon, the spec covers it). Tarjan's
   // SCC catches both self-edges and mutual cycles.
@@ -472,7 +472,7 @@ namespace refractir {
           checkInitVal(*elements[i], sit->second.fieldList[i].second, vars, syms, diags);
         }
       } else if (vt) {
-        // [v0.2.1] Vector brace init: exactly N lane initializers, each of
+        // Vector brace init: exactly N lane initializers, each of
         // the lane scalar type. BraceElem restrictions (no atom-form inside
         // a brace) are enforced syntactically by the parser.
         if (elements.size() != vt->size) {
@@ -505,7 +505,7 @@ namespace refractir {
             collect(fld.second);
         }
       } else if (auto inner_vt = TypeUtils::asVec(t)) {
-        // [v0.2.1] Vector broadcast: scalar init type must match the lane
+        // Vector broadcast: scalar init type must match the lane
         // scalar type. Recursing on `elem` lets the existing leaf-check
         // reject `let %v: <4> i32 = 1.5;` etc.
         collect(inner_vt->elem);
@@ -589,7 +589,7 @@ namespace refractir {
     std::unordered_map<std::string, VarInfo> vars;
     std::unordered_map<std::string, SymInfo> syms;
 
-    // [v0.2.1] Up-front type validation so structural errors fire before
+    // Up-front type validation so structural errors fire before
     // any expression check that would also touch the type.
     validateTypeWF(f.retType, diags);
     for (const auto &p: f.params) {
@@ -602,7 +602,7 @@ namespace refractir {
       if (s.type && std::holds_alternative<PtrType>(s.type->v)) {
         diags.error("sym of pointer type is not allowed in v0.2.0: " + s.name.name, s.span);
       }
-      // [v0.2.3] Aggregate symbols are likewise rejected: the language
+      // Aggregate symbols are likewise rejected: the language
       // has no consumer syntax for them (whole-aggregate-copy init is
       // banned and syms take no element access), so a declarable
       // array/struct sym would be dead weight. Planned for a later
@@ -630,7 +630,7 @@ namespace refractir {
     auto retBits = TypeUtils::getIntBitWidth(f.retType);
     bool isRetFloat = f.retType && std::holds_alternative<FloatType>(f.retType->v);
     bool isRetPtr = f.retType && std::holds_alternative<PtrType>(f.retType->v);
-    bool isRetVec = f.retType && std::holds_alternative<VecType>(f.retType->v); // [v0.2.1]
+    bool isRetVec = f.retType && std::holds_alternative<VecType>(f.retType->v);
 
     if (!retBits && !isRetFloat && !isRetPtr && !isRetVec)
       diags.error("Return type must be a scalar, pointer, or vector type", f.span);
@@ -657,7 +657,7 @@ namespace refractir {
                     else if (!TypeUtils::areTypesEqual(rhsTy.ptrType(), lt))
                       diags.error("Pointer type mismatch in assignment", arg.rhs.span);
                   } else if (auto lvt = TypeUtils::asVec(lt)) {
-                    // [v0.2.1] Vector assignment: whole-vector copy or lane
+                    // Vector assignment: whole-vector copy or lane
                     // write. For lane write (LHS has a trailing [i] access
                     // and i resolves to a vector lane), the LHS lt is the
                     // lane element type — which is handled by the integer/
@@ -769,7 +769,7 @@ namespace refractir {
                   else if (!TypeUtils::areTypesEqual(rhsTy.ptrType(), f.retType))
                     diags.error("Return pointer type mismatch", arg.value->span);
                 } else if (isRetVec) {
-                  // [v0.2.1] Vector return: RHS must be the same vector type.
+                  // Vector return: RHS must be the same vector type.
                   rhsTy = typeOfExpr(*arg.value, vars, syms, ann, diags, std::nullopt, f.retType);
                   if (!rhsTy.isVec())
                     diags.error("Expected vector return value", arg.value->span);
@@ -799,7 +799,7 @@ namespace refractir {
     for (const auto &acc: lv.accesses) {
       if (auto ai = std::get_if<AccessIndex>(&acc)) {
         if (auto vt = TypeUtils::asVec(cur)) {
-          // [v0.2.1] Vector lane access: lv[i] : T_elem. Bounds-check
+          // Vector lane access: lv[i] : T_elem. Bounds-check
           // constant index now (§7.6 rule 20 statically); dynamic index
           // bounds are runtime UB.
           if (auto il = std::get_if<IntLit>(&ai->index)) {
@@ -899,7 +899,7 @@ namespace refractir {
             : t.isFloat() ? std::optional(t.floatBits())
                           : expectedBits
         );
-        // [v0.2.1] Vector chain: both atoms must agree on vector type, but
+        // Vector chain: both atoms must agree on vector type, but
         // a scalar literal atom (`CoefAtom` of IntLit/FloatLit) broadcasts
         // to the running vector type, mirroring §6.11.
         if (t.isVec() || ti.isVec()) {
@@ -948,7 +948,7 @@ namespace refractir {
             auto rt = typeOfLValue(arg.rval, vars, syms, diags);
             auto rb = TypeUtils::getIntBitWidth(rt);
 
-            // [v0.2.1] Vector OpAtom: Coef can be a vector LValue of the
+            // Vector OpAtom: Coef can be a vector LValue of the
             // same type, or a literal that broadcasts to the vector.
             if (auto vt = TypeUtils::asVec(rt)) {
               if (auto lsid = std::get_if<LocalOrSymId>(&arg.coef)) {
@@ -1009,7 +1009,7 @@ namespace refractir {
             if (auto rb = TypeUtils::getIntBitWidth(rt)) {
               return Ty{Ty::BVTy{*rb}};
             }
-            // [v0.2.1] Unary ~ on a vector of integers yields the same type.
+            // Unary ~ on a vector of integers yields the same type.
             if (auto vt = TypeUtils::asVec(rt)) {
               if (!vt->elem || !std::holds_alternative<IntType>(vt->elem->v))
                 diags.error("Unary ~ requires integer lane type", arg.span);
@@ -1018,7 +1018,7 @@ namespace refractir {
             diags.error("Unary op not supported for float", arg.span);
             return Ty{std::monostate{}};
           } else if constexpr (std::is_same_v<T, SelectAtom>) {
-            // [v0.2.1] Two forms. cond=Cond form; maskExpr=mask form.
+            // Two forms. cond=Cond form; maskExpr=mask form.
             bool maskIsVec = false;
             if (arg.cond) {
               checkCond(*arg.cond, vars, syms, ann, diags);
@@ -1080,7 +1080,7 @@ namespace refractir {
               };
             if (std::holds_alternative<PtrType>(ct->v))
               return Ty{Ty::PtrTy{ct}};
-            // [v0.2.1] Sym of vector type: a CoefAtom referencing a
+            // Sym of vector type: a CoefAtom referencing a
             // vector sym yields a vector value (used to stage sym
             // vectors into a local before lane subscripting).
             if (std::holds_alternative<VecType>(ct->v))
@@ -1108,10 +1108,10 @@ namespace refractir {
               return Ty{Ty::StructTy{rt}};
             return Ty{std::monostate{}};
           } else if constexpr (std::is_same_v<T, CmpAtom>) {
-            // [v0.2.1] cmp: result is i1 (scalar) or <N> i1 (vector).
+            // cmp: result is i1 (scalar) or <N> i1 (vector).
             // Both operands must have the same type; we infer from lhs.
             auto t1 = typeOfSelectVal(arg.lhs, vars, syms, ann, diags, std::nullopt);
-            // [v0.2.1] Sibling pointer context: if LHS is a pointer, pass it
+            // Sibling pointer context: if LHS is a pointer, pass it
             // as ptrCtx to RHS so that `cmp == %p, null` can infer null's type.
             // This mirrors the pattern in checkCond() (line ~1047).
             TypePtr cmpPtrCtx = t1.isPtr() ? t1.ptrType() : nullptr;
@@ -1158,7 +1158,7 @@ namespace refractir {
             } else if (auto ft = std::get_if<FloatType>(&arg.dstType->v)) {
               return Ty{Ty::FloatTy{ft->kind == FloatType::Kind::F32 ? 32u : 64u}};
             } else if (auto vt = std::get_if<VecType>(&arg.dstType->v)) {
-              // [v0.2.1] Vector cast: src must be a vector of matching N.
+              // Vector cast: src must be a vector of matching N.
               // The cast applies lane-wise; the elem-cast must be valid by
               // the scalar rules above (we don't re-check here).
               if (srcType) {
@@ -1185,7 +1185,7 @@ namespace refractir {
                   arg.span
               );
             }
-            // [v0.2.1] §6.8.2: addr is forbidden on vector-typed lvalues
+            // §6.8.2: addr is forbidden on vector-typed lvalues
             // (whole vector or any lane). Walk the access chain looking for
             // any traversal through a vector.
             if (it != vars.end()) {
@@ -1232,7 +1232,7 @@ namespace refractir {
               return Ty{std::monostate{}};
             }
             TypePtr pointee = pt->pointee;
-            // [v0.2.1] §6.8.5: aggregate / vector pointees aren't loadable.
+            // §6.8.5: aggregate / vector pointees aren't loadable.
             if (std::holds_alternative<ArrayType>(pointee->v) ||
                 std::holds_alternative<StructType>(pointee->v) ||
                 std::holds_alternative<VecType>(pointee->v)) {
@@ -1254,7 +1254,7 @@ namespace refractir {
             diags.error("'load' pointee type not supported", arg.span);
             return Ty{std::monostate{}};
           } else if constexpr (std::is_same_v<T, PtrIndexAtom>) {
-            // [v0.2.1] §6.8.9: ptrindex <ptr>, <index> where ptr : ptr [N] T,
+            // §6.8.9: ptrindex <ptr>, <index> where ptr : ptr [N] T,
             // index : iN, result : ptr T.
             auto rvTy = typeOfLValue(arg.rval, vars, syms, diags);
             if (!rvTy)
@@ -1301,7 +1301,7 @@ namespace refractir {
             auto resultPtr = std::make_shared<Type>(PtrType{at->elem, arg.span}, arg.span);
             return Ty{Ty::PtrTy{resultPtr}};
           } else if constexpr (std::is_same_v<T, PtrFieldAtom>) {
-            // [v0.2.1] §6.8.10: ptrfield <ptr>, <fld> where ptr : ptr @S,
+            // §6.8.10: ptrfield <ptr>, <fld> where ptr : ptr @S,
             // result : ptr F where F is the declared type of @S.fld.
             auto rvTy = typeOfLValue(arg.rval, vars, syms, diags);
             if (!rvTy)
@@ -1334,7 +1334,7 @@ namespace refractir {
             auto resultPtr = std::make_shared<Type>(PtrType{fit->second, arg.span}, arg.span);
             return Ty{Ty::PtrTy{resultPtr}};
           } else if constexpr (std::is_same_v<T, CallAtom>) {
-            // [v0.2.2] §6.10 Call typing. Resolve callee against the
+            // §6.10 Call typing. Resolve callee against the
             // registry built in collectCallees, verify arity and exact
             // parameter-type match. When multiple callees share a name
             // (intrinsic overloading), select the one whose param types
@@ -1357,7 +1357,7 @@ namespace refractir {
                 ci = &cand;
                 continue;
               }
-              // [v0.2.3 V1] Vector-parameter overloads (the horizontal
+              // Vector-parameter overloads (the horizontal
               // reductions) are disambiguated by the argument's *exact*
               // vector type — its lane count and element type. That is the
               // authoritative signal (a typed vector local, not an
@@ -1459,7 +1459,7 @@ namespace refractir {
               diags.error("Call to undeclared function: " + arg.callee.name, arg.span);
               return Ty{std::monostate{}};
             }
-            // [v0.2.2] Pin the resolved overload onto the AST node so that
+            // Pin the resolved overload onto the AST node so that
             // every downstream consumer (interpreter, C/WASM backends,
             // solver) honours the same decision instead of re-running
             // their own heuristics. Non-intrinsic callees leave it null.
@@ -1603,7 +1603,7 @@ namespace refractir {
   void TypeChecker::checkLiteralRange(int64_t val, uint32_t bits, SourceSpan sp, DiagBag &diags) {
     if (bits >= 64)
       return;
-    // [v0.2.2] Spec §6.12 + §6.4: all iN are signed two's-complement
+    // Spec §6.12 + §6.4: all iN are signed two's-complement
     // integers (including i1).  Literals must fit the *signed* range
     // [-2^(N-1), 2^(N-1) - 1] of the target type — no implicit
     // bit-truncating narrowing.  Previously the upper bound used the
@@ -1647,7 +1647,7 @@ namespace refractir {
     }
     if (std::holds_alternative<PtrType>(t->v))
       return Ty{Ty::PtrTy{t}};
-    // [v0.2.1] Vector arms of `select` (Cond form or mask form).
+    // Vector arms of `select` (Cond form or mask form).
     if (std::holds_alternative<VecType>(t->v))
       return Ty{Ty::VecTy{t}};
     if (std::holds_alternative<ArrayType>(t->v))

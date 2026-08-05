@@ -24,7 +24,7 @@ namespace refractir {
       TypePtr type; // always a PtrType node
     };
 
-    /// [v0.2.1] Vector type: carries the full <N> T TypePtr.
+    /// Vector type: carries the full <N> T TypePtr.
     struct VecTy {
       TypePtr type; // always a VecType node
     };
@@ -97,7 +97,7 @@ namespace refractir {
 
     std::unordered_map<std::string, StructInfo> structs_;
 
-    // [v0.2.2] Callable registry — populated up-front from all `fun`,
+    // Callable registry — populated up-front from all `fun`,
     // `decl`, and `intrinsic` declarations. Used by `call @name(...)` to
     // resolve the callee, validate arity/types, and produce the result
     // type without depending on declaration order.
@@ -129,11 +129,11 @@ namespace refractir {
 
     // --- Internal type checking helpers ---
     void collectStructs(const Program &prog, DiagBag &diags);
-    // [v0.2.2] Build the callable registry; check ext/intrinsic signatures.
+    // Build the callable registry; check ext/intrinsic signatures.
     void collectCallees(const Program &prog, DiagBag &diags);
-    // [v0.2.2] Validate contract well-formedness for one ExtDecl.
+    // Validate contract well-formedness for one ExtDecl.
     void checkContract(const ExtDecl &d, TypeAnnotations &ann, DiagBag &diags);
-    // [v0.2.2] Build the call graph and reject any cycle (no recursion).
+    // Build the call graph and reject any cycle (no recursion).
     void checkNoRecursion(const Program &prog, DiagBag &diags);
     void checkFunction(const FunDecl &f, TypeAnnotations &ann, DiagBag &diags);
 

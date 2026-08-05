@@ -165,7 +165,7 @@ namespace refractir {
             }
             return nullptr;
           } else if constexpr (std::is_same_v<T, CallAtom>) {
-            // [v0.2.2] Use the overload the type checker pinned onto
+            // Use the overload the type checker pinned onto
             // the AST node. Fall back to the local heuristic only for
             // un-typechecked input.
             if (arg.resolvedIntrinsic)

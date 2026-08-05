@@ -39,13 +39,13 @@ namespace refractir {
 
     StructDecl parseStructDecl();
     FunDecl parseFunDecl();
-    // [v0.2.2] decl @name(params): T;   OR  decl @name(params): T { pre... post... };
+    // decl @name(params): T;   OR  decl @name(params): T { pre... post... };
     ExtDecl parseExtDecl();
-    // [v0.2.2] intrinsic @name(params): T;
+    // intrinsic @name(params): T;
     IntrinsicDecl parseIntrinsicDecl();
-    // [v0.2.2] call @name(args) atom — parsed by parseAtom on KwCall.
+    // call @name(args) atom — parsed by parseAtom on KwCall.
     Atom parseCallAtom();
-    // [v0.2.2] In `post` clauses the bareword `ret` is a reserved identifier
+    // In `post` clauses the bareword `ret` is a reserved identifier
     // referring to the callee's return value. We carry this context flag so
     // parseCoef can synthesize a LocalId{"ret", ...} when it sees KwRet.
     bool inPostClause_ = false;
@@ -54,7 +54,7 @@ namespace refractir {
     std::optional<Domain> parseOptionalDomain();
     SymDecl parseSymDecl();
     LetDecl parseLetDecl();
-    // [v0.2.1] `allowAtom` is true at the top of `let mut x: T = …;`
+    // `allowAtom` is true at the top of `let mut x: T = …;`
     // — atom forms like `addr %x` are spec §3.4.2 valid. Inside
     // aggregate braces it's false: BraceInit restricts elements to
     // literals / names / null / undef / nested braces.

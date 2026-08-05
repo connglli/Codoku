@@ -157,7 +157,7 @@ namespace refractir {
   };
 
   /**
-   * [v0.2.1] Fixed-width SIMD vector type: <N> T.
+   * Fixed-width SIMD vector type: <N> T.
    * T must be a scalar (iN, f32, f64). N >= 2. The bitwidth is
    * N * bitwidth(T); vectors are register-shaped value types and not
    * addressable (no `ptr <N> T`). Lane access uses LValue subscript.
@@ -283,7 +283,7 @@ namespace refractir {
    */
   struct SelectAtom {
     std::unique_ptr<Cond> cond;     // Cond form
-    std::unique_ptr<Expr> maskExpr; // mask form [v0.2.1]
+    std::unique_ptr<Expr> maskExpr; // mask form
     SelectVal vtrue;
     SelectVal vfalse;
     SourceSpan span;
@@ -360,7 +360,7 @@ namespace refractir {
   };
 
   /**
-   * [v0.2.1] Reified comparison: cmp <relop> <lhs>, <rhs>.
+   * Reified comparison: cmp <relop> <lhs>, <rhs>.
    * Produces i1 for scalar operands or <N> i1 for vector operands.
    * lhs/rhs are SelectVal (RValue | Coef) so literals are admitted.
    */
@@ -372,7 +372,7 @@ namespace refractir {
   };
 
   /**
-   * [v0.2.1] Aggregate-pointer navigation atoms (§6.8.9, §6.8.10).
+   * Aggregate-pointer navigation atoms (§6.8.9, §6.8.10).
    *
    * `ptrindex <ptr>, <index>` navigates from `ptr [N] T` to `ptr T` at
    * a runtime index. Strict UB rules: index in [0, N], non-null, non-
@@ -395,7 +395,7 @@ namespace refractir {
   };
 
   /**
-   * [v0.2.2] Function call atom: `call @name(args...)`.
+   * Function call atom: `call @name(args...)`.
    * The callee is resolved by name at typecheck time against the visible
    * `fun`/`decl`/`intrinsic` declarations. Arguments are evaluated
    * left-to-right; side effects (memory mutation, PC/REQ updates) commit
@@ -407,7 +407,7 @@ namespace refractir {
     GlobalId callee;
     std::vector<std::shared_ptr<Expr>> args;
     SourceSpan span;
-    // [v0.2.2] Resolved overload for intrinsic calls. The type checker
+    // Resolved overload for intrinsic calls. The type checker
     // pins the exact IntrinsicDecl chosen for this call site (using
     // arg types + return-type context). Non-intrinsic calls or
     // un-typechecked AST leave this null; consumers (interp, C/WASM
@@ -592,7 +592,7 @@ namespace refractir {
   /**
    * Initializer value for variables.
    *
-   * [v0.2.1] §3.4.2: a non-aggregate target may use any `Atom` as its
+   * §3.4.2: a non-aggregate target may use any `Atom` as its
    * initializer (e.g. `let %p: ptr i32 = addr %x;`,
    * `let %v: i32 = load %p;`, `let %m: i1 = cmp < %a, %b;`,
    * `let %lane: i32 = %v[0];`). For aggregate targets the spec still
@@ -607,7 +607,7 @@ namespace refractir {
       Undef,
       Aggregate,
       Null,
-      Atom, // [v0.2.1] atom-form init: load/addr/cmp/ptrindex/lvalue-with-accesses/etc.
+      Atom, // atom-form init: load/addr/cmp/ptrindex/lvalue-with-accesses/etc.
     } kind;
     std::variant<IntLit, FloatLit, SymId, LocalId, std::vector<InitValPtr>, AtomPtr> value;
     SourceSpan span;
@@ -644,17 +644,16 @@ namespace refractir {
     std::vector<LetDecl> lets;
     std::vector<Block> blocks;
     SourceSpan span;
-    // [v0.2.2] Stem of the .sir file this fun came from (no extension,
+    // Stem of the .sir file this fun came from (no extension,
     // no directory). Empty for the primary translation unit; populated
     // by the link resolver when the fun is moved in from an -I lib.
     // The C backend uses this to split per-source `<stem>.c` outputs
     // when --split-by-source is enabled.
     std::string sourceStem;
 
-    // [v0.2.3] Backend-facing hints. These are not part of the RefractIR
+    // Backend-facing hints. These are not part of the RefractIR
     // surface syntax — the parser does not currently emit them. They
-    // are set by upstream tooling (e.g. reify's --p-noinline-callees
-    // and --p-noclone-callees randomly mark generated callees) and
+    // are set by upstream tooling that marks individual callees, and
     // consumed by each backend in whatever way the target language
     // supports. The C backend translates `noInline` / `noClone` into
     // the matching `__attribute__((noinline))` / `__attribute__((noclone))`
@@ -670,7 +669,7 @@ namespace refractir {
   };
 
   /**
-   * [v0.2.2] A pre-clause inside a contract: `pre <cond>(, "msg")?;`.
+   * A pre-clause inside a contract: `pre <cond>(, "msg")?;`.
    */
   struct PreClause {
     Cond cond;
@@ -679,7 +678,7 @@ namespace refractir {
   };
 
   /**
-   * [v0.2.2] A post-clause inside a contract: `post <cond>(, "msg")?;`.
+   * A post-clause inside a contract: `post <cond>(, "msg")?;`.
    * `ret` may appear as a bareword identifier inside the cond, referring
    * to the callee's return value (handled by parser via InPostClause flag).
    */
@@ -690,7 +689,7 @@ namespace refractir {
   };
 
   /**
-   * [v0.2.2] A behavioral contract on an external declaration:
+   * A behavioral contract on an external declaration:
    *   `{ pre... post... }` (zero or more pre, at least one post).
    */
   struct Contract {
@@ -700,7 +699,7 @@ namespace refractir {
   };
 
   /**
-   * [v0.2.2] External function declaration.
+   * External function declaration.
    *
    * Two forms (mutually exclusive):
    *   - Link form: signature only (`contract` is std::nullopt).
@@ -722,7 +721,7 @@ namespace refractir {
   };
 
   /**
-   * [v0.2.2] A built-in intrinsic declaration. The toolchain owns the
+   * A built-in intrinsic declaration. The toolchain owns the
    * semantics — no body, no contract, no `-I` resolution.
    */
   struct IntrinsicDecl {
@@ -738,8 +737,8 @@ namespace refractir {
   struct Program {
     std::vector<StructDecl> structs;
     std::vector<FunDecl> funs;
-    std::vector<ExtDecl> extDecls;         // [v0.2.2]
-    std::vector<IntrinsicDecl> intrinsics; // [v0.2.2]
+    std::vector<ExtDecl> extDecls;
+    std::vector<IntrinsicDecl> intrinsics;
     SourceSpan span;
   };
 

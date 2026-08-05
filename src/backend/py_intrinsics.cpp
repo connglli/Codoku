@@ -1,4 +1,4 @@
-// [v0.2.2] Python-side built-in intrinsic emission.
+// Python-side built-in intrinsic emission.
 //
 // Mirrors the interpreter's semantics (src/interp/intrinsics.cpp — the
 // single source of truth) with one generic, width-parameterized python
@@ -381,9 +381,11 @@ def _in_check_chksum(expected, actual):
 def _in_observe(x):
     return x
 )PY";
-        // [v0.2.3 V1] Horizontal vector reductions (§12.4) are not yet
-        // lowered on any compiled target — interpreter and solver implement
-        // them, backend support is planned.
+        // Horizontal vector reductions (§12.4) never reach here:
+        // emitIntrinsicHelpers routes them to emitReductionHelperDefs, whose
+        // body varies with the guard mode and the element width and so
+        // cannot come from a static source string. Reaching this case means
+        // that routing was bypassed.
         case IntrinsicKind::ReduceAdd:
         case IntrinsicKind::ReduceMin:
         case IntrinsicKind::ReduceMax:
@@ -391,8 +393,8 @@ def _in_observe(x):
         case IntrinsicKind::ReduceOr:
         case IntrinsicKind::ReduceXor:
           throw std::runtime_error(
-              "python target: horizontal vector reductions (@reduce_*) are not yet "
-              "lowered (v0.2.3 V1 backend support is planned)"
+              "python target: horizontal vector reductions (@reduce_*) are emitted by "
+              "emitReductionHelperDefs, not helperSource"
           );
       }
       return "";
@@ -430,7 +432,7 @@ def _in_observe(x):
       kinds.insert(*k);
     }
     for (IntrinsicKind k: kinds) {
-      // [v0.2.3 V1] Reductions are generated dynamically (mode- and
+      // Reductions are generated dynamically (mode- and
       // width-aware) rather than from a static source string.
       if (isReductionIntrinsic(k))
         emitReductionHelperDefs(k);
@@ -439,7 +441,7 @@ def _in_observe(x):
     }
   }
 
-  // [v0.2.3 V1] Horizontal vector reductions (§12.4). Each helper takes the
+  // Horizontal vector reductions (§12.4). Each helper takes the
   // vector as a lane list (the Python function-boundary ABI) and folds it
   // left-to-right, reading every lane through `_rd` (undef → trap). The
   // element domain splits int (`_i`) from float (`_f`); @reduce_add carries
@@ -650,7 +652,7 @@ def _in_observe(x):
         return "_in_check_chksum(" + join({}) + ")";
       case IntrinsicKind::Observe:
         return "_in_observe(" + join({}) + ")";
-      // [v0.2.3 V1] Reductions: fold the vector-list argument. Add carries a
+      // Reductions: fold the vector-list argument. Add carries a
       // width (int overflow / f32 rounding); min/max/bitwise do not.
       case IntrinsicKind::ReduceAdd: {
         const VecType &vt = std::get<VecType>(intr.params[0].type->v);

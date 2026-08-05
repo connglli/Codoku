@@ -1,4 +1,4 @@
-// [v0.2.3] Structured C body emission (--structured-lowering).
+// Structured C body emission (--structured-lowering).
 //
 // The driver registers ReducibilityCheck whenever this mode is on, so
 // every function reaching emitStructuredBody has a reducible CFG and

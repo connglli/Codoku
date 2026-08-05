@@ -86,7 +86,7 @@ int main(int argc, char **argv) {
     Parser ps(std::move(toks));
     Program prog = ps.parseProgram();
 
-    // 1b. [v0.2.2] -I link-form resolution.
+    // 1b. -I link-form resolution.
     std::vector<Program> libs;
     if (result.count("I")) {
       libs = loadIncludeDirs(result["I"].as<std::vector<std::string>>());
@@ -223,7 +223,7 @@ int main(int argc, char **argv) {
     }
 
     if (target == "c") {
-      // [v0.2.2] --split-by-source: emit one <stem>.c per source file
+      // --split-by-source: emit one <stem>.c per source file
       // + common.h into the directory specified by -o.
       if (result["split-by-source"].as<bool>()) {
         if (!result.count("output")) {
@@ -242,18 +242,18 @@ int main(int argc, char **argv) {
         cb.setNoUbGuards(noUbGuards);
         cb.setNoMainMangle(emitMain);
         cb.setStructuredLowering(structuredLowering);
-        // [v0.2.1] Set up the vector-lowering strategy.
+        // Set up the vector-lowering strategy.
         auto vl = makeCVecLowering(vlName);
         if (!vl) {
           std::cerr << "Error: unknown --vec-lowering '" << vlName << "'\n";
           return 1;
         }
         cb.setVecLowering(std::move(vl));
-        // [v0.2.2] No per-file `wrote …` chatter. rylink consumes this
-        // path and wants a clean stderr so its own `completed: …`
-        // per-program log line is the only thing the user sees; the
-        // returned list is dropped and the caller inspects the output
-        // directory if it cares about which files landed.
+        // No per-file `wrote …` chatter: a caller driving this path over
+        // many programs wants a clean stderr so its own per-program log
+        // line is the only thing the user sees. The returned list is
+        // dropped, and the caller inspects the output directory if it
+        // cares about which files landed.
         (void) cb.emitSplit(prog, outDir, primaryStem);
       } else {
         CBackend cb(*outStream);
@@ -261,7 +261,7 @@ int main(int argc, char **argv) {
         cb.setNoUbGuards(noUbGuards);
         cb.setNoMainMangle(emitMain);
         cb.setStructuredLowering(structuredLowering);
-        // [v0.2.1] Set up the vector-lowering strategy.
+        // Set up the vector-lowering strategy.
         auto vl = makeCVecLowering(vlName);
         if (!vl) {
           std::cerr << "Error: unknown --vec-lowering '" << vlName
@@ -280,7 +280,7 @@ int main(int argc, char **argv) {
       wb.setNoUbGuards(noUbGuards);
       wb.setNoMainMangle(emitMain);
       wb.setStructuredLowering(structuredLowering);
-      // [v0.2.3] Vector-lowering strategy (validated above).
+      // Vector-lowering strategy (validated above).
       wb.setVecLowering(makeWasmVecLowering(vlName));
       wb.emit(prog);
     } else if (target == "python") {

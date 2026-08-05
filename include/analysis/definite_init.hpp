@@ -27,9 +27,10 @@ namespace refractir {
      *
      * This is the same must-analysis `run` checks with, exposed because a
      * consumer that emits a *read* somewhere has to agree with the checker
-     * about where a read is legal — rytwin splices a guard call at a region
-     * entry and passes the live state to it, and a guard reading a local the
-     * checker cannot prove initialized is a program that fails re-analysis.
+     * about where a read is legal — a caller that splices a guard call at a
+     * region entry and passes it the live state emits a guard whose reads
+     * the checker must be able to prove initialized, or the rewritten
+     * program fails re-analysis.
      * Approximating it ("declared with an initializer, or assigned in the
      * function's entry block") is sound but refuses regions the checker would
      * have accepted.

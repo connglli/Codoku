@@ -104,7 +104,7 @@ namespace refractir {
                 }
                 checkLValue(arg.rval);
               } else if constexpr (std::is_same_v<T, SelectAtom>) {
-                // [v0.2.1] Two forms: Cond form has arg.cond; mask form has
+                // Two forms: Cond form has arg.cond; mask form has
                 // arg.maskExpr. The selectvals themselves are checked
                 // separately by selectVal walking below.
                 if (arg.cond) {
@@ -114,7 +114,7 @@ namespace refractir {
                   self(*arg.maskExpr, self);
                 }
               } else if constexpr (std::is_same_v<T, CmpAtom>) {
-                // [v0.2.1] cmp <relop> lhs, rhs: walk both SelectVal operands.
+                // cmp <relop> lhs, rhs: walk both SelectVal operands.
                 auto checkSv = [&](const SelectVal &sv) {
                   if (auto rv = std::get_if<RValue>(&sv))
                     checkLValue(*rv);

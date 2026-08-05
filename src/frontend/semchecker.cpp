@@ -24,7 +24,7 @@ namespace refractir {
       checkFunction(f, diags);
     }
 
-    // [v0.2.2] External declarations: each `decl @name` is a global name and
+    // External declarations: each `decl @name` is a global name and
     // must not collide with any struct/fun/intrinsic. A contract-form `decl`
     // and a `fun` with the same name within the same file is rejected (the
     // cross-file body+contract conflict is enforced by the link resolver).
@@ -36,7 +36,7 @@ namespace refractir {
       checkExtDecl(d, diags);
     }
 
-    // [v0.2.2] Intrinsic declarations. Two intrinsics with the same name
+    // Intrinsic declarations. Two intrinsics with the same name
     // but different parameter-type signatures are distinct functions and
     // may coexist (overloading). Same name + same param types = duplicate.
     // Intrinsic names are tracked separately so that same-name intrinsics
@@ -57,14 +57,14 @@ namespace refractir {
           sig += "i" + std::to_string(*bits);
         else if (auto ft =
                      d.params[i].type ? std::get_if<FloatType>(&d.params[i].type->v) : nullptr)
-          // [v0.2.2 D.1+] FP overloads must not collide on the same arity:
+          // FP overloads must not collide on the same arity:
           // @to_bits(f32) and @to_bits(f64) are distinct intrinsics with
           // distinct lowerings.  Use the FP precision in the sig string so
           // both can be declared in the same program.
           sig += "f" + std::string(ft->kind == FloatType::Kind::F32 ? "32" : "64");
         else if (auto vt =
                      d.params[i].type ? std::get_if<VecType>(&d.params[i].type->v) : nullptr) {
-          // [v0.2.3 V1] Reduction overloads differ by vector shape:
+          // Reduction overloads differ by vector shape:
           // @reduce_add(<4> i32) and @reduce_add(<8> i32) are distinct
           // declarations.  Encode both the lane count and the element type
           // so they don't collide on the same arity.
@@ -167,7 +167,7 @@ namespace refractir {
     }
   }
 
-  // [v0.2.2] §3.4: a contract must have at least one `post` clause. `pre`
+  // §3.4: a contract must have at least one `post` clause. `pre`
   // clauses are optional. Parameter names must be unique.
   void SemChecker::checkExtDecl(const ExtDecl &d, DiagBag &diags) {
     std::unordered_set<std::string> params;
@@ -195,7 +195,7 @@ namespace refractir {
       params.insert(p.name.name);
     }
 
-    // [v0.2.2 extra batch A/B] Per-intrinsic signature validation.
+    // Per-intrinsic signature validation.
     // The interpreter/solver/codegen rely on these invariants; rejecting
     // mis-shaped declarations at check time is cheaper than diagnosing
     // them mid-execution.

@@ -6,10 +6,10 @@
 
 namespace refractir {
 
-  // [v0.2.1] cmp on vector operands lowers to a lane-wise loop. We need a
+  // cmp on vector operands lowers to a lane-wise loop. We need a
   // C-expression string for each side; SelectVal's parts can be either an
   // RValue (local name) or a Coef (literal / local / sym).
-  // [v0.2.1] Per-lane C expression for a SelectVal. Delegates lane access
+  // Per-lane C expression for a SelectVal. Delegates lane access
   // to the active VecLowering so each strategy picks its lane syntax.
   std::string
   CBackend::sirSelectValLane(const SelectVal &sv, const VecType &vt, const std::string &kExpr) {
@@ -128,7 +128,7 @@ namespace refractir {
     out_ << ";\n";
   }
 
-  // [v0.2.1] emitVecAtomLane: return a C expression for lane k of an Atom
+  // emitVecAtomLane: return a C expression for lane k of an Atom
   // that yields a vector value. Used by the lane-unroll path when the
   // active strategy can't lower vector ops as native C operators.
   std::string CBackend::emitVecAtomLane(const Atom &a, const VecType &vt, std::uint64_t k) {

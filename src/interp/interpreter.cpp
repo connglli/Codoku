@@ -51,7 +51,7 @@ namespace refractir {
       throw std::runtime_error("Entry function not found: " + entryFuncName);
     }
 
-    // [v0.2.2] Bind positional arguments to entry-fun parameters.
+    // Bind positional arguments to entry-fun parameters.
     if (paramArgs.size() != entry->params.size()) {
       throw std::runtime_error(
           "Entry function " + entryFuncName + " expects " + std::to_string(entry->params.size()) +
@@ -73,7 +73,7 @@ namespace refractir {
         v.kind = RuntimeValue::Kind::Int;
         v.bits = *bits;
         v.intVal = parseIntegerLiteral(paramArgs[i]);
-        // [v0.2.2] CLI positional args ARE literals being bound to the
+        // CLI positional args ARE literals being bound to the
         // entry function's parameters; apply the same signed-range
         // rule the typechecker enforces on in-source literals
         // (spec §6.12 + §6.4).  Without this an out-of-range CLI value
@@ -159,7 +159,7 @@ namespace refractir {
   }
 
   RuntimeValue Interpreter::callFunction(const FunDecl &f, std::vector<RuntimeValue> args) {
-    // [v0.2.2] §9.6.1 — interprocedural execution in the interpreter.
+    // §9.6.1 — interprocedural execution in the interpreter.
     // Memory state (heap, objects, addresses) is preserved across the
     // call: pointer arguments must remain valid in the callee. typeMap_
     // entries that share a name with a callee parameter or local are
@@ -249,7 +249,7 @@ namespace refractir {
     return ret;
   }
 
-  // [v0.2.2] §9.6.1 step 5: refresh caller-side Store entries from heap.
+  // §9.6.1 step 5: refresh caller-side Store entries from heap.
   // Walk every addr-promoted local (varName ∈ the address map) that has a Store
   // entry in `store`. Reconstruct its value by reading the heap at the base
   // address (and at the per-element offsets for arrays). Scalars, ptrs,
@@ -387,7 +387,7 @@ namespace refractir {
                   throw UndefinedBehaviorError("UB: Store to unknown address");
                 if (ptrVal.ptrVal < obj->base || ptrVal.ptrVal >= obj->end)
                   throw UndefinedBehaviorError("UB: Store out of bounds");
-                // [v0.2.1] Rule 15b: typed-access mismatch on store.
+                // Rule 15b: typed-access mismatch on store.
                 // Derive the pointer's pointee type from the expression's first
                 // atom — supports AddrAtom, RValueAtom, LoadAtom, PtrIndexAtom,
                 // PtrFieldAtom, etc.

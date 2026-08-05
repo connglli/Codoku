@@ -1,4 +1,4 @@
-// [v0.2.3] "structarray" and "structscalars" python vec-lowering.
+// "structarray" and "structscalars" python vec-lowering.
 // A vector `<N> T` local is stored in a per-shape helper class,
 // mirroring the C struct strategies:
 //   structarray:   class _vec_<N>_<Telem>_arr  with a `lanes` list

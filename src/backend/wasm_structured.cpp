@@ -1,4 +1,4 @@
-// [v0.2.3] Structured WASM body emission (--structured-lowering).
+// Structured WASM body emission (--structured-lowering).
 //
 // WebAssembly has no goto; the default backend encodes arbitrary CFGs
 // with a $__pc + br_table dispatch loop. When the CFG is reducible we

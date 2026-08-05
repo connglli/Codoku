@@ -123,7 +123,7 @@ namespace refractir {
           PtrType{std::move(pointee), SourceSpan{b, prevEnd()}}, SourceSpan{b, prevEnd()}
       );
     }
-    // [v0.2.1] vector type: <N> ScalarType. N is parsed as IntLit; the
+    // vector type: <N> ScalarType. N is parsed as IntLit; the
     // typechecker enforces N >= 2 and the elem-is-scalar restriction.
     if (tryConsume(TokenKind::Lt)) {
       Token t = consume(TokenKind::IntLit, "vector lane count N");
@@ -476,7 +476,7 @@ namespace refractir {
       return iv;
     }
 
-    // [v0.2.1] §3.4.2: an atom (addr / load / cmp / ptrindex / ptrfield /
+    // §3.4.2: an atom (addr / load / cmp / ptrindex / ptrfield /
     // select / cast / unary / op) is a valid initializer for a non-
     // aggregate target. Forbidden inside aggregate braces.
     if (is(TokenKind::KwAddr) || is(TokenKind::KwLoad) || is(TokenKind::KwCmp) ||
@@ -640,7 +640,7 @@ namespace refractir {
     SourcePos b = peek().span.begin;
     LocalId base;
     if (inPostClause_ && is(TokenKind::KwRet)) {
-      // [v0.2.2] Inside `post` clauses, the bareword `ret` is a reserved
+      // Inside `post` clauses, the bareword `ret` is a reserved
       // identifier referring to the callee's return value. Synthesize a
       // LocalId so the rest of the AST/typechecker sees it uniformly.
       const Token &t = consume(TokenKind::KwRet, "'ret'");
@@ -775,7 +775,7 @@ namespace refractir {
 
     if (is(TokenKind::KwSelect)) {
       consume(TokenKind::KwSelect, "'select'");
-      // [v0.2.1] Two select forms. Parse the first Expr, then dispatch on
+      // Two select forms. Parse the first Expr, then dispatch on
       // the next token: RelOp → Cond form; Comma → mask form.
       SourcePos sb = peek().span.begin;
       Expr first = parseExpr();
@@ -799,7 +799,7 @@ namespace refractir {
       return Atom{std::move(sa), sa.span};
     }
 
-    // [v0.2.1] cmp atom: cmp <RelOp> <lhs>, <rhs>
+    // cmp atom: cmp <RelOp> <lhs>, <rhs>
     // Produces i1 for scalar operands, <N> i1 for vector operands.
     if (is(TokenKind::KwCmp)) {
       consume(TokenKind::KwCmp, "'cmp'");
@@ -811,7 +811,7 @@ namespace refractir {
       return Atom{std::move(ca), ca.span};
     }
 
-    // [v0.2.1] ptrindex atom: ptrindex <RValue>, <Index>
+    // ptrindex atom: ptrindex <RValue>, <Index>
     if (is(TokenKind::KwPtrIndex)) {
       consume(TokenKind::KwPtrIndex, "'ptrindex'");
       RValue rv = parseLValue();
@@ -821,7 +821,7 @@ namespace refractir {
       return Atom{std::move(pa), pa.span};
     }
 
-    // [v0.2.1] ptrfield atom: ptrfield <RValue>, <Ident>
+    // ptrfield atom: ptrfield <RValue>, <Ident>
     if (is(TokenKind::KwPtrField)) {
       consume(TokenKind::KwPtrField, "'ptrfield'");
       RValue rv = parseLValue();

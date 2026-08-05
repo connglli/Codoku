@@ -57,7 +57,7 @@ namespace refractir {
     );
   }
 
-  // ── [v0.2.3] Vector-returning calls in vector expressions ────────────
+  // ── Vector-returning calls in vector expressions ────────────
   //
   // Per-lane expression emission re-walks the rhs once per lane, so a
   // call atom left in place would re-invoke the callee N times — wrong
@@ -186,7 +186,7 @@ namespace refractir {
         emitY();
         indent();
         out_ << prefix << "div\n";
-        // [v0.2.2] Same §2.9 intermediate-overflow trap as the
+        // Same §2.9 intermediate-overflow trap as the
         // scalar fmod path — applied per lane (rule 21). Under
         // --no-ub-guards the (stack-neutral) check is elided; the
         // quotient stays on the stack from the `div` above.
@@ -491,7 +491,7 @@ namespace refractir {
       }
     }
     out_ << opStr << "\n";
-    // [v0.2.2] vector lane cmp returns i1; sign-extend bit 0 so true is -1.
+    // vector lane cmp returns i1; sign-extend bit 0 so true is -1.
     emitSignExtend(1, (targetWidth > 32 ? 64 : 32));
   }
 
@@ -556,7 +556,7 @@ namespace refractir {
       return;
     const auto &info = locals_.at(lv.base.name);
 
-    // [v0.2.3] Register-strategy storage: the strategy owns lane reads of
+    // Register-strategy storage: the strategy owns lane reads of
     // plain vector locals and params.
     if (lv.accesses.empty() && std::holds_alternative<VecType>(info.refractirType->v) &&
         !vecLowering_->usesFrameMemory()) {
@@ -566,7 +566,7 @@ namespace refractir {
       return;
     }
 
-    // [v0.2.3] Whole-vector read of a vector *param*: the param local
+    // Whole-vector read of a vector *param*: the param local
     // holds the caller's spill address (the by-address boundary ABI), so
     // a lane read is a load at pointer + lane*elemSize.
     if (info.isParam && std::holds_alternative<VecType>(info.refractirType->v) &&
@@ -656,7 +656,7 @@ namespace refractir {
     emitVecLaneConvert(elemTy, targetWidth);
   }
 
-  // [v0.2.3] Initializer for a register-strategy vector local. Mirrors
+  // Initializer for a register-strategy vector local. Mirrors
   // the frame-memory emitInitVal semantics per lane (literals broadcast,
   // aggregate elements land per-lane, syms call the per-lane provider,
   // Local copies from the source's storage), but routes every write

@@ -1,4 +1,4 @@
-// [v0.2.2] Interpreter-side built-in intrinsic dispatch.
+// Interpreter-side built-in intrinsic dispatch.
 //
 // This file is the single source of truth for every intrinsic
 // supported by the RefractIR interpreter. To add a new intrinsic:
@@ -82,7 +82,7 @@ namespace refractir {
         throw std::runtime_error("Intrinsic " + intr.name.name + ": non-integer argument");
       auto pb = TypeUtils::getIntBitWidth(intr.params[i].type);
       uint32_t pN = pb ? *pb : args[i].bits;
-      // [v0.2.2] All iN — including i1 — are signed two's-complement.
+      // All iN — including i1 — are signed two's-complement.
       // Sign-extend bit 0 of an i1 so true reads back as -1, matching
       // the storage convention enforced by makeInt and `iN as iM`.
       return sextToInt64(args[i].intVal, pN);
@@ -110,7 +110,7 @@ namespace refractir {
       RuntimeValue r;
       r.kind = RuntimeValue::Kind::Int;
       r.bits = N;
-      // [v0.2.2] Spec §6.4: i1 is signed.  Sign-extension of the low
+      // Spec §6.4: i1 is signed.  Sign-extension of the low
       // bit is 0 → 0 and 1 → -1, matching `iN as iM` widening
       // semantics and the C/WASM backends' i1 sign-extend.
       r.intVal = sextToInt64(v, N);
@@ -252,7 +252,7 @@ namespace refractir {
       }
     };
 
-    // ── §12.3 Integer extras (v0.2.2 extra batch A) ────────────────────────────────
+    // ── §12.3 Integer extras ────────────────────────────────
 
     /**
      * @brief @abs_diff(a, b) = |a - b|, UB if the result is not representable in iN.
@@ -364,7 +364,7 @@ namespace refractir {
       }
     };
 
-    // ── §12.4 Bit-manipulation (v0.2.2 extra batch B) ──────────────────────────────
+    // ── §12.4 Bit-manipulation ──────────────────────────────
 
     /**
      * @brief @parity(x) -> i1; XOR of all bits.
@@ -489,7 +489,7 @@ namespace refractir {
       }
     };
 
-    // ── §12.5 Integer overflow-aware family (v0.2.2 extra batch C) ────────
+    // ── §12.5 Integer overflow-aware family ────────
     //
     // Conventions: all members are declared at one common iN.  Width-mod
     // arithmetic is computed on int64 and then masked / sign-extended
@@ -743,7 +743,7 @@ namespace refractir {
       }
     };
 
-    // ── §12.6 Floating-point sign / bit ops (v0.2.2 extra batch D.1) ────
+    // ── §12.6 Floating-point sign / bit ops ────
 
     /**
      * @brief @fabs(x) = |x|. Clears the IEEE 754 sign bit; never UB on the
@@ -1120,7 +1120,7 @@ namespace refractir {
       }
     };
 
-    // ── §12.4 Horizontal vector reductions (v0.2.3 V1) ─────────────────────
+    // ── §12.4 Horizontal vector reductions ─────────────────────
     //
     // The sole argument is a vector `<N> T` (a RuntimeValue of kind Vec whose
     // arrayVal holds the N lane scalars); the result is the scalar element
@@ -1304,7 +1304,7 @@ namespace refractir {
         registry_[IntrinsicKind::SaturatingNeg] = std::make_unique<SaturatingNegIntrinsic>();
         registry_[IntrinsicKind::DivEuclid] = std::make_unique<DivEuclidIntrinsic>();
         registry_[IntrinsicKind::RemEuclid] = std::make_unique<RemEuclidIntrinsic>();
-        // §12.6 — FP sign / bit ops (v0.2.2 extra batch D.1).
+        // §12.6 — FP sign / bit ops.
         registry_[IntrinsicKind::Fabs] = std::make_unique<FabsIntrinsic>();
         registry_[IntrinsicKind::Fneg] = std::make_unique<FnegIntrinsic>();
         registry_[IntrinsicKind::Copysign] = std::make_unique<CopysignIntrinsic>();
@@ -1329,7 +1329,7 @@ namespace refractir {
         registry_[IntrinsicKind::Crc32Update] = std::make_unique<Crc32UpdateIntrinsic>();
         registry_[IntrinsicKind::CheckChksum] = std::make_unique<CheckChksumIntrinsic>();
         registry_[IntrinsicKind::Observe] = std::make_unique<ObserveIntrinsic>();
-        // §12.4 — horizontal vector reductions (v0.2.3 V1).
+        // §12.4 — horizontal vector reductions.
         registry_[IntrinsicKind::ReduceAdd] =
             std::make_unique<ReduceIntrinsic>(IntrinsicKind::ReduceAdd);
         registry_[IntrinsicKind::ReduceMin] =

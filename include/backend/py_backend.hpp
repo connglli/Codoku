@@ -43,7 +43,7 @@ namespace refractir {
 
     void setNoRequire(bool val) { noRequire_ = val; }
 
-    /// [v0.2.3] Omit the dynamic undefined-behavior guards. Sound only
+    /// Omit the dynamic undefined-behavior guards. Sound only
     /// for known-UB-free programs: the guards never fire on such a
     /// program, so behavior is identical. Under this mode the arithmetic
     /// operators lower to inline Python expressions (`a + b`, truncating
@@ -53,7 +53,7 @@ namespace refractir {
 
     void setNoMainMangle(bool val) { noMainMangle_ = val; }
 
-    /// [v0.2.3] Set the vector-lowering strategy (storage form of
+    /// Set the vector-lowering strategy (storage form of
     /// vector locals). Takes ownership. If never called, the backend
     /// defaults to "array" (plain lane lists) on first emit.
     void setVecLowering(std::unique_ptr<PyVecLowering> vl) { vecLowering_ = std::move(vl); }
@@ -61,10 +61,10 @@ namespace refractir {
   private:
     std::ostream &out_;
     bool noRequire_ = false;
-    bool noUbGuards_ = false; // [v0.2.3] see setNoUbGuards
+    bool noUbGuards_ = false; // see setNoUbGuards
     bool noMainMangle_ = false;
     const Program *prog_ = nullptr;
-    std::unique_ptr<PyVecLowering> vecLowering_; // [v0.2.3] see py_vec_lowering.hpp
+    std::unique_ptr<PyVecLowering> vecLowering_; // see py_vec_lowering.hpp
     std::string curFuncName_;
     int indent_ = 0;
     int stmtCount_ = 0; // statements in the innermost open suite ("pass" insertion)
@@ -111,7 +111,7 @@ namespace refractir {
     std::string atomStr(const Atom &atom);
     std::string opAtomStr(const OpAtom &arg);
 
-    // [v0.2.3] Binary-operator lowering, shared by the scalar and
+    // Binary-operator lowering, shared by the scalar and
     // per-lane paths. Each returns the checked-helper call by default
     // and an inline Python expression under --no-ub-guards (`a`,`b` are
     // already-emitted operand strings, `n` the bit-width string). The
@@ -215,7 +215,7 @@ namespace refractir {
 
     // --- Intrinsics ---
     void emitIntrinsicHelpers(const Program &prog);
-    // [v0.2.3 V1] Emit the Python `def`s for a horizontal vector reduction
+    // Emit the Python `def`s for a horizontal vector reduction
     // kind (generated dynamically so the body can vary with --no-ub-guards
     // and reuse the checked/inline arithmetic of the active preamble).
     void emitReductionHelperDefs(IntrinsicKind k);

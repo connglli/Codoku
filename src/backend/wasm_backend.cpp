@@ -323,7 +323,7 @@ namespace refractir {
       }
     }
 
-    // [v0.2.2] Import link-form decls FIRST — WAT requires all (import ...)
+    // Import link-form decls FIRST — WAT requires all (import ...)
     // declarations to precede globals and function definitions in the module.
     for (const auto &d: prog.extDecls) {
       indent();
@@ -341,7 +341,7 @@ namespace refractir {
     indent();
     out_ << "(global $__stack_pointer (mut i32) (i32.const 1048576))\n";
 
-    // [v0.2.2] Emit intrinsic helper functions (these are func defs, not imports).
+    // Emit intrinsic helper functions (these are func defs, not imports).
     for (const auto &intr: prog.intrinsics) {
       emitIntrinsicHelper(intr);
     }
@@ -373,13 +373,13 @@ namespace refractir {
                   scanExpr(*arg.maskExpr);
                 }
               } else if constexpr (std::is_same_v<T, CallAtom>) {
-                // [v0.2.2 §2.12 fix] A call argument may itself contain
+                // §2.12 A call argument may itself contain
                 // `addr <lv>`, which must spill <lv> onto the shadow
                 // stack. Recurse into every argument expression.
                 for (const auto &ap: arg.args) {
                   scanExpr(*ap);
                 }
-                // [v0.2.3] Size this call site's scratch block for
+                // Size this call site's scratch block for
                 // vectors crossing the boundary (spilled args + sret).
                 VecCallSlots slots = vecCallSlots(arg);
                 if (slots.totalBytes > 0) {
@@ -429,7 +429,7 @@ namespace refractir {
                   scanExpr(instr.ptr);
                   scanExpr(instr.val);
                 } else if constexpr (std::is_same_v<IT, AssumeInstr>) {
-                  // [v0.2.2 fix] assume cond may contain `call @f(addr %x)`
+                  // assume cond may contain `call @f(addr %x)`
                   scanExpr(instr.cond.lhs);
                   scanExpr(instr.cond.rhs);
                 } else if constexpr (std::is_same_v<IT, RequireInstr>) {
@@ -445,7 +445,7 @@ namespace refractir {
             scanExpr(*rt->value);
           }
         } else if (auto bt = std::get_if<BrTerm>(&b.term)) {
-          // [v0.2.2 fix] conditional br's predicate may contain `call`.
+          // conditional br's predicate may contain `call`.
           if (bt->isConditional && bt->cond) {
             scanExpr(bt->cond->lhs);
             scanExpr(bt->cond->rhs);
@@ -487,7 +487,7 @@ namespace refractir {
       for (const auto &p: f.params) {
         out_ << " (param " << mangleName(p.name.name) << " " << getWasmType(p.type) << ")";
       }
-      // [v0.2.3] Vector returns go through a hidden trailing sret address
+      // Vector returns go through a hidden trailing sret address
       // param instead of a WASM result — the callee writes the lanes into
       // caller-owned frame memory.
       bool retVec = f.retType && std::holds_alternative<VecType>(f.retType->v);
@@ -508,7 +508,7 @@ namespace refractir {
       indent();
       out_ << "(local $__idx_temp i32)\n"; // scratch register for index bounds checks
       indent();
-      // [v0.2.2] Scratch FP scalars used by the inline fmod expansion to
+      // Scratch FP scalars used by the inline fmod expansion to
       // hold the intermediate quotient `x/y` while we trap on non-finite
       // results (spec §2.9 + §7.4 rule 6).  Always emitted alongside the
       // other __* scratch slots so every function has them — the WASM
@@ -520,7 +520,7 @@ namespace refractir {
       for (const auto &l: f.lets) {
         if (!locals_[l.name.name].isAggregate) {
           if (std::holds_alternative<VecType>(l.type->v)) {
-            // [v0.2.3] Register vec-lowering strategy: the strategy owns
+            // Register vec-lowering strategy: the strategy owns
             // the backing locals for this vector.
             vecLowering_->declareLocals(*this, l.name.name, std::get<VecType>(l.type->v));
           } else {
@@ -554,7 +554,7 @@ namespace refractir {
       }
 
       if (!vecLowering_->usesFrameMemory()) {
-        // [v0.2.3] Unpack pointer-ABI vector params into strategy storage.
+        // Unpack pointer-ABI vector params into strategy storage.
         for (const auto &p: f.params)
           if (std::holds_alternative<VecType>(p.type->v))
             vecLowering_->unpackParam(*this, p.name.name, std::get<VecType>(p.type->v));
@@ -565,7 +565,7 @@ namespace refractir {
           if (locals_[l.name.name].isAggregate) {
             emitInitVal(*l.init, l.type, locals_[l.name.name].offset);
           } else if (std::holds_alternative<VecType>(l.type->v)) {
-            // [v0.2.3] Register-strategy vector local.
+            // Register-strategy vector local.
             emitVecLocalInit(l.name.name, std::get<VecType>(l.type->v), *l.init);
           } else if (l.init->kind == InitVal::Kind::Int) {
             indent();
@@ -637,7 +637,7 @@ namespace refractir {
         }
       }
 
-      // [v0.2.3] Structured emission (--structured-lowering) rebuilds
+      // Structured emission (--structured-lowering) rebuilds
       // genuine block/loop/if from the reducible CFG; the default path
       // below is the $__pc + br_table dispatch loop, which also handles
       // irreducible control flow.
@@ -787,7 +787,7 @@ namespace refractir {
                 std::uint32_t elemSize = getTypeSize(vt.elem);
                 bool valIsFloat = std::holds_alternative<FloatType>(vt.elem->v);
                 uint32_t width = getIntWidth(vt.elem);
-                // [v0.2.3] `%v = call @f(...)` with a frame-memory
+                // `%v = call @f(...)` with a frame-memory
                 // lhs — write through sret straight into the lhs
                 // storage, no lane loop. Register-strategy lhs
                 // falls through: the call materializes once into
@@ -834,7 +834,7 @@ namespace refractir {
               } else if (!arg.lhs.accesses.empty() &&
                          std::holds_alternative<VecType>(info.refractirType->v) &&
                          !vecLowering_->usesFrameMemory()) {
-                // [v0.2.3] `%v[idx] = expr` on a register-strategy
+                // `%v[idx] = expr` on a register-strategy
                 // vector local: the strategy owns the lane write.
                 const auto &vt = std::get<VecType>(info.refractirType->v);
                 std::uint32_t width = getIntWidth(vt.elem);
@@ -986,7 +986,7 @@ namespace refractir {
   // `return`. Shared by both emitters likewise.
   void WasmBackend::emitReturn(const RetTerm &arg, const FunDecl &f) {
     if (arg.value && f.retType && std::holds_alternative<VecType>(f.retType->v)) {
-      // [v0.2.3] Vector return: copy the lanes into the
+      // Vector return: copy the lanes into the
       // caller's sret slot; the function has no WASM result.
       const auto &vt = std::get<VecType>(f.retType->v);
       std::uint32_t elemSize = getTypeSize(vt.elem);

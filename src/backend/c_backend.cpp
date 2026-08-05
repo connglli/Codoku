@@ -55,14 +55,14 @@ namespace refractir {
     return stripSigil(funcName) + "__" + stripSigil(symName);
   }
 
-  // [v0.2.2] Encode a leaf type as a C-identifier suffix used by
+  // Encode a leaf type as a C-identifier suffix used by
   // `arrayPtrTypedefName`.  Walks the leaf only — the array shape is
   // encoded separately by the caller.  Pointer and vector leaves are
   // encoded recursively (`p_<inner>`, `v<N>_<inner>`) so that distinct
-  // pointee / lane types do not collide on a shared catch-all name
-  // (the historical `"x"` collapse silently merged e.g. `[N] ptr i16`
-  // and `[N] ptr i32` into a single typedef, breaking rylink-merged
-  // multi-function bundles).
+  // pointee / lane types cannot collide on a shared catch-all name: a
+  // single tag for every pointer leaf would merge `[N] ptr i16` and
+  // `[N] ptr i32` into one typedef, which breaks any bundle that merges
+  // several functions into one translation unit.
   static std::string typedefLeafTag(const TypePtr &t) {
     if (!t)
       return "void";
@@ -89,7 +89,7 @@ namespace refractir {
     );
   }
 
-  // [v0.2.2] Generate a stable, C-identifier-safe typedef name for an
+  // Generate a stable, C-identifier-safe typedef name for an
   // `ArrayType` used as a RefractIR pointer pointee.  The shape is encoded
   // outer-to-inner with `x` between dimensions, and the leaf is one of
   // `iN`, `fN`, `S_<name>`.  Examples:
@@ -145,7 +145,7 @@ namespace refractir {
             // Arrays are emitted as C arrays in context, but here we emit the base type
             emitType(arg.elem);
           } else if constexpr (std::is_same_v<T, PtrType>) {
-            // [v0.2.2] When the pointee is an array (1D or nested), use
+            // When the pointee is an array (1D or nested), use
             // the typedef generated for that shape — `Elem (*)[N]…[M]`
             // is the proper C type and matches `&array` naturally,
             // unlike the flat `Elem *` collapse this branch used to do.
@@ -157,7 +157,7 @@ namespace refractir {
               out_ << " *";
             }
           } else if constexpr (std::is_same_v<T, VecType>) {
-            // [v0.2.1] Vector type — delegated to the lowering strategy.
+            // Vector type — delegated to the lowering strategy.
             // CVecLowering produces a C type-string (a typedef name for
             // vecext, a struct name for structscalars / structarray, etc.).
             out_ << vecLowering_->typeString(arg);
@@ -167,7 +167,7 @@ namespace refractir {
     );
   }
 
-  // [v0.2.2] Walk a type collecting every ArrayType that appears as the
+  // Walk a type collecting every ArrayType that appears as the
   // direct pointee of a PtrType.  Used to drive the array-pointer typedef
   // preamble — every `ptr [N] T` declaration needs a matching
   // `typedef T <name>[N]` so the assignment from `&array` type-checks.
@@ -224,7 +224,7 @@ namespace refractir {
     return out;
   }
 
-  // collectVecShapes moved to src/backend/vec_shapes.cpp ([v0.2.3]) —
+  // collectVecShapes moved to src/backend/vec_shapes.cpp () —
   // it is target-neutral and the python backend's vec-lowering
   // preamble needs it too.
 
@@ -233,7 +233,7 @@ namespace refractir {
   // C-side intrinsic code generation. See that file to add new intrinsics.
 
 
-  // [v0.2.2] §11.2 lowering for `decl`. Link-form decls become `extern`
+  // §11.2 lowering for `decl`. Link-form decls become `extern`
   // prototypes (linker resolves them). Contract-form decls also emit an
   // `extern` plus a `// contract:` summary comment.
   void CBackend::emitExtDecl(const ExtDecl &d) {
@@ -260,7 +260,7 @@ namespace refractir {
     out_ << ");\n\n";
   }
 
-  // [v0.2.2] Split emission: write common.h + one <stem>.c per
+  // Split emission: write common.h + one <stem>.c per
   // distinct source-file stem. Returns the list of written paths.
   std::vector<std::string> CBackend::emitSplit(
       const Program &prog, const std::string &outDir, const std::string &primaryStem
@@ -326,7 +326,7 @@ namespace refractir {
 
   void CBackend::emit(const Program &prog) {
     prog_ = &prog;
-    // [v0.2.2] Populate structFields_ before any emission so getLValueType
+    // Populate structFields_ before any emission so getLValueType
     // / getCoefType work whether or not we end up writing the preamble.
     // (The original code populated it inline at line ~365 below — we
     // hoist it up so it runs even when `suppressPreamble_` is set, in
@@ -342,7 +342,7 @@ namespace refractir {
     }
 
     if (suppressPreamble_) {
-      // [v0.2.2] Per-stem `.c` file: skip the include / pragma / struct
+      // Per-stem `.c` file: skip the include / pragma / struct
       // / extern preamble (it lives in `common.h`, which the caller is
       // responsible for `#include`-ing at the top of the file).
       out_ << "#include \"common.h\"\n\n";
@@ -382,7 +382,7 @@ namespace refractir {
       out_ << "#pragma STDC FP_CONTRACT OFF\n";
       out_ << "\n";
 
-      // [v0.2.1] Vector-lowering strategy. Default to vecext.
+      // Vector-lowering strategy. Default to vecext.
       if (!vecLowering_) {
         vecLowering_ = makeCVecLowering("vecext");
       }
@@ -416,7 +416,7 @@ namespace refractir {
       }
       out_ << "\n";
 
-      // [v0.2.2] 1a. Pointer-to-array typedefs.  Emit scalar / float
+      // 1a. Pointer-to-array typedefs.  Emit scalar / float
       // leaves first so they're available inside struct field
       // declarations.  Struct-leaf typedefs are emitted in §1c below
       // after the struct definitions are complete (a typedef of
@@ -478,7 +478,7 @@ namespace refractir {
         out_ << "};\n\n";
       }
 
-      // [v0.2.2] 1c. Pointer-to-array typedefs whose leaf is a struct.
+      // 1c. Pointer-to-array typedefs whose leaf is a struct.
       // Emit after struct definitions so `sizeof(struct S)` is known.
       bool emittedStructTypedef = false;
       for (const auto &arrTy: arrayShapes) {
@@ -490,7 +490,7 @@ namespace refractir {
       if (emittedStructTypedef)
         out_ << "\n";
 
-      // 1b. [v0.2.2] Emit intrinsic helpers and extern decls for link-form
+      // 1b. Emit intrinsic helpers and extern decls for link-form
       //     `decl`s. Contract-form `decl`s lower with extern + a structured
       //     comment summarizing the contract (§11.2).
       for (const auto &intr: prog.intrinsics) {
@@ -544,7 +544,7 @@ namespace refractir {
 
     // 3. Functions
     for (const auto &f: prog.funs) {
-      // [v0.2.2] In --split-by-source mode emit only funs whose
+      // In --split-by-source mode emit only funs whose
       // sourceStem matches this output file's stem. Two sentinel
       // values: "__refractir_no_fun_bodies__" skips every fun (used when
       // writing common.h); "__refractir_primary__" matches funs with an
@@ -584,7 +584,7 @@ namespace refractir {
         out_ << "\n";
 
       // 3b. Function signature
-      // [v0.2.3] FunDecl::Attributes hints. The backend reads only the
+      // FunDecl::Attributes hints. The backend reads only the
       // bits it knows how to express in C; the rest are silently dropped.
       // Skipped for `@main` because the C entry point is not a callee.
       // Each enabled bit becomes one attribute token. With both set we
@@ -628,7 +628,7 @@ namespace refractir {
       for (const auto &l: f.lets) {
         CtxGuard ctx(isDoubleCtx_, isOrContainsF64(l.type));
 
-        // [v0.2.1] Vector locals route through the strategy: emit the
+        // Vector locals route through the strategy: emit the
         // declaration (which can be `T v[N]`, `T v_0, v_1, …` for scalars,
         // or `struct ... v`), then emit per-lane initializers as separate
         // statements so every strategy converges on the same code shape.
@@ -661,7 +661,7 @@ namespace refractir {
                     vecLowering_->emitWholeCopy(out_, vName, srcName, vt);
                     out_ << ";\n";
                   } else {
-                    // [v0.2.1] Sym → extern function `funcName__symName(void)`.
+                    // Sym → extern function `funcName__symName(void)`.
                     // Every sym reference becomes a call (per symirc.md §"Symbol
                     // references become calls"). curFuncName_ tracks the enclosing
                     // function currently being emitted.
@@ -865,7 +865,7 @@ namespace refractir {
           using T = std::decay_t<decltype(arg)>;
           if constexpr (std::is_same_v<T, AssignInstr>) {
             CtxGuard ctx(isDoubleCtx_, isOrContainsF64(getLValueType(arg.lhs)));
-            // [v0.2.1] Vector LHS goes through strategy-aware paths.
+            // Vector LHS goes through strategy-aware paths.
             auto lhsTy = getLValueType(arg.lhs);
             if (lhsTy && std::holds_alternative<VecType>(lhsTy->v) && arg.lhs.accesses.empty()) {
               auto &vt = std::get<VecType>(lhsTy->v);
@@ -882,7 +882,7 @@ namespace refractir {
                   }
                 }
               }
-              // [v0.2.1] LShr can't be expressed inline on a vec-ext
+              // LShr can't be expressed inline on a vec-ext
               // type — the signed-to-unsigned reinterpret is illegal on
               // GCC vector types. Float `%` likewise has no inline form
               // (GCC vector types don't define `%` for floats, and the
@@ -905,7 +905,7 @@ namespace refractir {
               }
               // vecext: fall through to the inline expression path.
             }
-            // [v0.2.1] Scalar `cmp` assignment: emit `(l op r) ? 1 : 0`.
+            // Scalar `cmp` assignment: emit `(l op r) ? 1 : 0`.
             // CmpAtom can't lower as an inline expression (see emitAtom),
             // so we special-case it at AssignInstr level for scalars too.
             if (arg.rhs.rest.empty()) {
@@ -954,7 +954,7 @@ namespace refractir {
               emitExpr(arg.rhs);
               out_ << ";\n";
             }
-            // [v0.2.1] FP vector lanes: per-lane finite check (rule 21
+            // FP vector lanes: per-lane finite check (rule 21
             // lifted to FP rules 6/7 — any lane producing ±∞ or NaN
             // is UB). The native vec-ext division won't trap on its
             // own and UBSan doesn't catch SIMD div-by-zero, so we
@@ -971,7 +971,7 @@ namespace refractir {
                 }
               }
             }
-            // [v0.2.1] Scalar FP UB: any ±∞ or NaN result is UB
+            // Scalar FP UB: any ±∞ or NaN result is UB
             // (rules 6/7). UBSan catches some FP issues but not NaN
             // from 0.0/0.0; emit an explicit `isfinite` check after
             // FP assignments so the spec's semantics are enforced.

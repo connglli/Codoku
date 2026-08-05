@@ -9,7 +9,7 @@
 
 namespace refractir {
 
-  // [v0.2.2] §9.6.1 — symbolic interprocedural call. Phase 6: the
+  // §9.6.1 — symbolic interprocedural call. Phase 6: the
   // callee is restricted to straight-line CFG (single entry block whose
   // terminator is ret). Multi-block callees with conditional branches
   // would require a sub-path specification (deferred).
@@ -89,7 +89,7 @@ namespace refractir {
         throw std::runtime_error("CFG build failed for callee " + callee.name.name);
 
       std::size_t pcIdx = cfg.entry;
-      // [v0.2.2] Cap each block at a small number of visits so the
+      // Cap each block at a small number of visits so the
       // random-sampling walker terminates even on callees with CFG
       // back-edges. SPEC §13 reserves user-supplied sub-path syntax to
       // make the choice exact -- this bound is the interim.
@@ -121,7 +121,7 @@ namespace refractir {
                   if (currentReq_)
                     currentReq_->push_back(evalCond(arg.cond, solver, calleeStore, pc, ub));
                 } else if constexpr (std::is_same_v<T, StoreInstr>) {
-                  // [v0.2.2] §9.6.1 step 4 — callee `store`s must update
+                  // §9.6.1 step 4 — callee `store`s must update
                   // every reachable `let mut`, including caller-side
                   // ones whose addresses are exposed through pointer
                   // parameters.  Mirror the top-level handler's
@@ -183,7 +183,7 @@ namespace refractir {
                       auto cond = solver.make_term(smt::Kind::EQUAL, {ptrTerm, tagTerm});
                       storeMatchConds.push_back(cond);
                       sv.term = solver.make_term(smt::Kind::ITE, {cond, valTerm, sv.term});
-                      // [v0.2.2] Pointer pointee: provenance follows the value
+                      // Pointer pointee: provenance follows the value
                       // under `cond`, same as the top-level handler (see there).
                       if (std::get_if<PtrType>(&pointeeType->v)) {
                         auto zeroP = solver.make_bv_value_int64(bv64, 0);
@@ -268,7 +268,7 @@ namespace refractir {
                 if (!t.isConditional) {
                   pcIdx = cfg.indexOf.at(t.dest.name);
                 } else {
-                  // [v0.2.2] Conditional branch in callee: sample one
+                  // Conditional branch in callee: sample one
                   // path randomly. The chosen branch's cond is
                   // conjoined to PC so the SMT search stays consistent.
                   // SPEC §13 lists user-supplied sub-paths as planned
@@ -300,7 +300,7 @@ namespace refractir {
     }
   }
 
-  // [v0.2.2 Phase 8] §9.6.2 contract-form `decl` expansion.
+  // §9.6.2 contract-form `decl` expansion.
   SymbolicValue SymbolicExecutor::callContract(
       const ExtDecl &decl, const std::vector<std::shared_ptr<Expr>> &argExprs,
       std::vector<SymbolicValue> args, smt::ISolver &solver, SymbolicStore &callerStore,
@@ -314,7 +314,7 @@ namespace refractir {
     if (!decl.contract)
       throw std::runtime_error("Solver: callContract on non-contract decl");
 
-    // [v0.2.2 Phase 8] §9.6.2 step 4: havoc the storage backing every
+    // §9.6.2 step 4: havoc the storage backing every
     // pointer argument's provenance object before the post-state is
     // assumed. The contract may write through any pointer parameter,
     // so we replace the source local's symbolic value with a fresh

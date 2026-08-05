@@ -138,7 +138,7 @@ namespace refractir {
                    auto rt = getLValueType(arg.rval);
                    return rt && std::holds_alternative<IntType>(rt->v);
                  }()) {
-        // [v0.2.3] Scalar-integer remainder-by-zero guard (self-contained,
+        // Scalar-integer remainder-by-zero guard (self-contained,
         // so the emitted C traps without depending on downstream UBSan).
         // Signed-overflow (INT_MIN % -1) is deliberately left to UBSan.
         // Only scalar ints: a vecext whole-vector `%` can't take a scalar
@@ -160,7 +160,7 @@ namespace refractir {
                  auto rt = getLValueType(arg.rval);
                  return rt && std::holds_alternative<IntType>(rt->v);
                }()) {
-      // [v0.2.3] Integer division-by-zero guard (self-contained, so the
+      // Integer division-by-zero guard (self-contained, so the
       // emitted C traps without depending on downstream UBSan; float
       // division-by-zero is caught by the post-assignment isfinite
       // check instead). Signed-overflow (INT_MIN / -1) is left to UBSan.
@@ -207,7 +207,7 @@ namespace refractir {
 
   void CBackend::emitSelectAtom(const SelectAtom &arg) {
 
-    // [v0.2.1] Cond form lowers to C's `?:` directly. The mask form
+    // Cond form lowers to C's `?:` directly. The mask form
     // with a vector mask requires per-lane emission, special-cased
     // at AssignInstr level; with a scalar i1 mask it lowers to the
     // same `?:` after a `!= 0` predicate (so we don't depend on the
@@ -241,7 +241,7 @@ namespace refractir {
 
   void CBackend::emitCmpAtom(const CmpAtom & /*arg*/) {
 
-    // [v0.2.1] Same restriction: cmp returns a vector value that
+    // Same restriction: cmp returns a vector value that
     // needs lane-wise emission, handled at AssignInstr level.
     throw std::runtime_error("cmp must be the RHS of an assignment (inline use not yet supported)");
   }
@@ -255,7 +255,7 @@ namespace refractir {
 
   void CBackend::emitAddrAtom(const AddrAtom &arg) {
 
-    // [v0.2.2] With ptr-to-array typedefs in place, `&lv` has
+    // With ptr-to-array typedefs in place, `&lv` has
     // the right C type for every aggregate / scalar lv:
     // `int8_t (*)[3][3]` for a 2D array maps to the typedef
     // `_sym_arr_3x3_i8 *`, `struct S *` for a struct, plain
@@ -274,7 +274,7 @@ namespace refractir {
       return;
     }
 
-    // [v0.2.1] Rule 15b (typed-access mismatch): load through a
+    // Rule 15b (typed-access mismatch): load through a
     // pointer that doesn't have enough room for the pointee. Use
     // __builtin_object_size so we trap when the pointer has been
     // walked past its originating field/array.
@@ -301,14 +301,14 @@ namespace refractir {
       return;
     }
 
-    // [v0.2.1] ptrindex p, i → element pointer. Rule 17 (null nav),
+    // ptrindex p, i → element pointer. Rule 17 (null nav),
     // rule 18 (undef nav — relies on UBSan), rule 16 (index bounds).
     // We emit:  ({ if (!p) __builtin_trap();
     //              if ((uint64_t)i > N) __builtin_trap();
     //              (*p) + i; })
     // The N comes from the source pointer's array pointee.
     //
-    // [v0.2.2] The source pointer's C type is now `Elem (*)[N]…`
+    // The source pointer's C type is now `Elem (*)[N]…`
     // (typedef'd, see `arrayPtrTypedefName`).  Dereferencing
     // once gives the array, which decays to a pointer-to-
     // inner-element on `+ i`; the stride matches RefractIR's
@@ -342,7 +342,7 @@ namespace refractir {
       return;
     }
 
-    // [v0.2.1] ptrfield p, f → field pointer. Rule 17 (null nav)
+    // ptrfield p, f → field pointer. Rule 17 (null nav)
     // and rule 19 (one-past-end nav). The one-past-end check uses
     // __builtin_object_size: a valid struct pointer has at least
     // sizeof(struct) bytes of object remaining; one-past-end has
@@ -358,11 +358,11 @@ namespace refractir {
 
   void CBackend::emitCallAtom(const CallAtom &arg) {
 
-    // [v0.2.2] Lower `call @f(args...)` to a C call expression.
+    // Lower `call @f(args...)` to a C call expression.
     // For intrinsics, dispatch to the helper emitted in emit() §1b.
     // For other targets, use the mangled name directly (link-form
     // decls have extern prototypes; fun bodies are emitted later).
-    // [v0.2.2] Use the overload the type checker pinned onto the
+    // Use the overload the type checker pinned onto the
     // AST node — see CallAtom::resolvedIntrinsic. The fallback
     // path only runs for un-typechecked input.
     const IntrinsicDecl *intr = arg.resolvedIntrinsic;
@@ -397,7 +397,7 @@ namespace refractir {
     } else {
       out_ << mangleName(arg.callee.name);
     }
-    // [v0.2.3 V1] A reduction takes the N lanes of its vector argument as
+    // A reduction takes the N lanes of its vector argument as
     // scalar parameters, emitted per-lane here. This makes the helper
     // strategy-independent — it works even for `scalars` / `array`, which
     // cannot pass a vector across a C function boundary by value.
@@ -449,7 +449,7 @@ namespace refractir {
 
   void CBackend::emitCastAtom(const CastAtom &arg) {
 
-    // [v0.2.1] Vector cast: a C-style `(target_vec_t)(src_vec)`
+    // Vector cast: a C-style `(target_vec_t)(src_vec)`
     // is a *bitcast* in GCC vec-ext, not a per-lane conversion.
     // The right primitive is `__builtin_convertvector`.
     if (arg.dstType && std::holds_alternative<VecType>(arg.dstType->v)) {
@@ -470,7 +470,7 @@ namespace refractir {
       out_ << ")";
       return;
     }
-    // [v0.2.2 §2 / bug-mine fix] All `iN` types are SIGNED bit
+    // §2 All `iN` types are SIGNED bit
     // vectors. A narrow source (e.g. i1 = {0, -1}) stored in a
     // wider C type loses its sign bit at the iN boundary —
     // casting it directly with `(dst)(src)` zero-extends rather
@@ -487,7 +487,7 @@ namespace refractir {
     }
     const bool intDst = arg.dstType && std::holds_alternative<IntType>(arg.dstType->v);
     const bool needSext = intDst && srcBits.has_value() && *srcBits < 64 && *srcBits > 0;
-    // [P7] Narrowing to a CUSTOM destination width must truncate
+    // Narrowing to a custom destination width must truncate
     // mod 2^M and sign-extend from bit M-1 (SPEC §6.4). Native
     // widths get this for free from the C cast — `(int8_t)x`
     // keeps the low 8 bits — but a custom width's storage type

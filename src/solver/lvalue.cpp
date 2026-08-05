@@ -76,7 +76,7 @@ namespace refractir {
         smt::Term idx;
         if (auto lit = std::get_if<IntLit>(&ai->index)) {
           idx = solver.make_bv_value(solver.make_bv_sort(32), std::to_string(lit->value), 10);
-          // [v0.2.1] Out-of-range literal index is UB at compile time —
+          // Out-of-range literal index is UB at compile time —
           // emit the bounds constraint (it'll be false → UNSAT) without
           // crashing in arrayVal.at().
           if (lit->value < 0 || static_cast<uint64_t>(lit->value) >= array_size) {
@@ -114,7 +114,7 @@ namespace refractir {
         res = std::move(next);
       }
     }
-    // [v0.2.1] Strict UB rule 3: reading an `undef` scalar is UB. Add
+    // Strict UB rule 3: reading an `undef` scalar is UB. Add
     // is_defined as a path constraint. Suppressed on the LHS-eval of
     // an AssignInstr (the caller is about to overwrite the value).
     if (!forWrite && res.kind == SymbolicValue::Kind::Int && res.is_defined.internal)

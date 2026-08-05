@@ -1,4 +1,4 @@
-// [v0.2.2] WASM backend intrinsic helper emission.
+// WASM backend intrinsic helper emission.
 //
 // This file is the single source of truth for the WebAssembly Text Format
 // (WAT) code emitted for every built-in RefractIR intrinsic. The helpers use
@@ -60,7 +60,7 @@ namespace refractir {
 
   protected:
     static std::ostream &out(WasmBackend &backend);
-    static bool noUbGuards(WasmBackend &backend); // [v0.2.3]
+    static bool noUbGuards(WasmBackend &backend);
     static void indent(WasmBackend &backend);
     static void incrIndent(WasmBackend &backend);
     static void decrIndent(WasmBackend &backend);
@@ -115,7 +115,7 @@ namespace refractir {
     }
 
     static void unreachableIfTop(WasmBackend &backend) {
-      // [v0.2.3] --no-ub-guards: the UB precondition is already on the
+      // --no-ub-guards: the UB precondition is already on the
       // stack; discard it (no trap) instead of trapping. The guard's
       // condition computation is left as (dead) stack-neutral code.
       if (noUbGuards(backend)) {
@@ -332,7 +332,7 @@ namespace refractir {
       }
     };
 
-    // ── §12.3 Integer extras (v0.2.2 extra batch A) ────────────────────────────────
+    // ── §12.3 Integer extras ────────────────────────────────
 
     /**
      * @brief @abs_diff(a, b) = |a - b|, UB if not representable in iN.
@@ -482,7 +482,7 @@ namespace refractir {
           indent(backend);
           out(backend) << "i64.extend_i32_s\n";
         }
-        // [v0.2.2] @parity returns i1 (W=32); sextN(1, 32) yields 0/-1 for true.
+        // @parity returns i1 (W=32); sextN(1, 32) yields 0/-1 for true.
         sextN(backend, N, W, ity);
       }
     };
@@ -609,7 +609,7 @@ namespace refractir {
       }
     };
 
-    // ── §12.4 Bit-manipulation (v0.2.2 extra batch B) ──────────────────────────────
+    // ── §12.4 Bit-manipulation ──────────────────────────────
 
     class ParityIntrinsic final : public WasmIntrinsic {
     public:
@@ -905,7 +905,7 @@ namespace refractir {
         // AND the two i32 predicates → i32 holding 0 or 1
         indent(backend);
         out(backend) << "i32.and\n";
-        // [v0.2.2] @is_pow2 returns i1; sign-extend bit 0 → 0/-1.
+        // @is_pow2 returns i1; sign-extend bit 0 → 0/-1.
         sextN(backend, 1, 32, "i32");
         // Defensive widening if a future change makes W == 64. Sign-extending
         // i32 -1 → i64 -1 preserves the v0.2.2 i1 convention.
@@ -960,7 +960,7 @@ namespace refractir {
       }
     };
 
-    // ── §12.5 Integer overflow-aware family (v0.2.2 extra batch C) ────────
+    // ── §12.5 Integer overflow-aware family ────────
     //
     // The widening-and-mask discipline already supplies modular wrap, so
     // the @wrapping_* helpers are direct iW.{add,sub,mul,neg,shl,shr_s}
@@ -1838,7 +1838,7 @@ namespace refractir {
 
   } // namespace
 
-  // ── §12.6 Floating-point sign / bit ops (v0.2.2 extra batch D.1) ────
+  // ── §12.6 Floating-point sign / bit ops ────
 
   /**
    * @brief Abstract base for FP-touching WASM intrinsic emitters. Unlike
@@ -1879,7 +1879,7 @@ namespace refractir {
       return paramFpBits(intr, i) == 32 ? "f32" : "f64";
     }
 
-    // [v0.2.3] FP result-finiteness UB guard: trap unless the value in
+    // FP result-finiteness UB guard: trap unless the value in
     // local `$r` is finite (`|$r| < +inf`, false for ±inf and NaN).
     // Stack-neutral, so under --no-ub-guards the whole block is elided.
     // `ty` is the float WASM type ("f32"/"f64").
@@ -1906,7 +1906,7 @@ namespace refractir {
       out(backend) << "end\n";
     }
 
-    // [v0.2.2] i1-returning FP predicates produce an i32 0/1 from a WASM
+    // i1-returning FP predicates produce an i32 0/1 from a WASM
     // comparison. Convert to the RefractIR i1 storage convention (0 / -1) by
     // sign-extending bit 0.
     static void sextI1ToI32(WasmBackend &backend) {
@@ -2028,7 +2028,7 @@ namespace refractir {
           indent(backend);
           out(backend) << "i64.lt_s\n"; // result is already i32 0/1 (WASM rule)
         }
-        // [v0.2.2] @signbit returns i1; sign-extend bit 0 → 0/-1.
+        // @signbit returns i1; sign-extend bit 0 → 0/-1.
         sextI1ToI32(backend);
       }
     };
@@ -2112,7 +2112,7 @@ namespace refractir {
           indent(backend);
           out(backend) << "i32.and\n";
         }
-        // [v0.2.2] @is_normal returns i1; sign-extend bit 0 → 0/-1.
+        // @is_normal returns i1; sign-extend bit 0 → 0/-1.
         sextI1ToI32(backend);
       }
     };
@@ -2193,7 +2193,7 @@ namespace refractir {
           indent(backend);
           out(backend) << "i32.and\n";
         }
-        // [v0.2.2] @is_subnormal returns i1; sign-extend bit 0 → 0/-1.
+        // @is_subnormal returns i1; sign-extend bit 0 → 0/-1.
         sextI1ToI32(backend);
       }
     };
@@ -2415,12 +2415,12 @@ namespace refractir {
     return registry;
   }
 
-  // FP-aware, decl-based naming (v0.2.2 extra D.1): mirrors the C-backend rule.
+  // FP-aware, decl-based naming: mirrors the C-backend rule.
   std::string WasmBackend::intrinsicHelperName(const IntrinsicDecl &intr) const {
     std::string base = intr.name.name;
     if (!base.empty() && base[0] == '@')
       base.erase(0, 1);
-    // [v0.2.3 V1] Reductions overload on vector shape (lane count + element
+    // Reductions overload on vector shape (lane count + element
     // type); mangle by both so distinct declarations get distinct helpers.
     if (!intr.params.empty() && intr.params[0].type) {
       if (auto vt = std::get_if<VecType>(&intr.params[0].type->v)) {
@@ -2471,13 +2471,13 @@ namespace refractir {
   }
 
   void WasmBackend::emitIntrinsicHelper(const IntrinsicDecl &intr) {
-    // [v0.2.3 V1] Horizontal vector reductions (§12.4) have a vector
+    // Horizontal vector reductions (§12.4) have a vector
     // parameter and lower to a dedicated helper (see emitReductionHelper).
     if (auto k = getIntrinsicKind(intr.name.name); k && isReductionIntrinsic(*k)) {
       emitReductionHelper(intr);
       return;
     }
-    // FP-touching path (v0.2.2 extra D.1).
+    // FP-touching path.
     bool anyFp = (intr.retType && std::holds_alternative<FloatType>(intr.retType->v));
     for (const auto &p: intr.params)
       anyFp = anyFp || (p.type && std::holds_alternative<FloatType>(p.type->v));
@@ -2557,7 +2557,7 @@ namespace refractir {
     out_ << ")\n";
   }
 
-  // [v0.2.3 V1] Horizontal vector reduction helper (§12.4). The vector arg
+  // Horizontal vector reduction helper (§12.4). The vector arg
   // is passed by address (the frame-memory spill ABI is packed under every
   // vec-lowering strategy), so each lane is read directly with
   // `<elem>.load offset=k*sizeof(elem)` — the same layout the `scalars`

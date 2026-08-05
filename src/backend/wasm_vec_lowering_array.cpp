@@ -1,4 +1,4 @@
-// [v0.2.3] "array" WASM vec-lowering: a vector `<N> T` local is a
+// "array" WASM vec-lowering: a vector `<N> T` local is a
 // shadow-stack aggregate (the historical storage). The strategy object
 // only *classifies* — every access keeps the backend's frame-memory
 // address+load/store paths, so the lane hooks must never be reached.

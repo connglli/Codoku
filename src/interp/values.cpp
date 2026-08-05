@@ -39,7 +39,7 @@ namespace refractir {
   RuntimeValue Interpreter::makeUndef(const TypePtr &t) {
     RuntimeValue res;
     if (auto vt = TypeUtils::asVec(t)) {
-      // [v0.2.1] Undef vector: every lane is undef. A subsequent lane
+      // Undef vector: every lane is undef. A subsequent lane
       // write produces a defined value at that lane; remaining lanes
       // stay undef until a whole-vector copy assigns them (rule 22).
       res.kind = RuntimeValue::Kind::Vec;
@@ -133,7 +133,7 @@ namespace refractir {
       return v;
     }
     if (auto vt = TypeUtils::asVec(t)) {
-      // [v0.2.1] Broadcast init for vector: each lane gets a copy of `v`
+      // Broadcast init for vector: each lane gets a copy of `v`
       // canonicalized to the lane scalar type.
       RuntimeValue res;
       res.kind = RuntimeValue::Kind::Vec;
@@ -183,7 +183,7 @@ namespace refractir {
     if (iv.kind == InitVal::Kind::Aggregate) {
       const auto &elements = std::get<std::vector<InitValPtr>>(iv.value);
       if (auto vt = TypeUtils::asVec(t)) {
-        // [v0.2.1] Brace init for vector: each lane init is a scalar.
+        // Brace init for vector: each lane init is a scalar.
         RuntimeValue res;
         res.kind = RuntimeValue::Kind::Vec;
         for (size_t i = 0; i < elements.size(); ++i)
@@ -220,7 +220,7 @@ namespace refractir {
     } else if (iv.kind == InitVal::Kind::Sym) {
       v = store.at(std::get<SymId>(iv.value).name);
     } else if (iv.kind == InitVal::Kind::Atom) {
-      // [v0.2.1] §3.4.2 atom-form init — evaluate the atom against the
+      // §3.4.2 atom-form init — evaluate the atom against the
       // partially-built store. Inits are processed in declaration order
       // so any local the atom references must already be in the store.
       v = evalAtom(*std::get<AtomPtr>(iv.value), store);

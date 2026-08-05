@@ -37,7 +37,7 @@ namespace refractir {
 
     void setNoRequire(bool val) { noRequire_ = val; }
 
-    /// [v0.2.3] Omit the dynamic undefined-behavior guards (null/OOB
+    /// Omit the dynamic undefined-behavior guards (null/OOB
     /// pointer traps, FP finiteness traps, intrinsic preconditions).
     /// Sound only for known-UB-free programs: the guards never fire on
     /// such a program, so behavior is identical. Value semantics are
@@ -48,12 +48,12 @@ namespace refractir {
 
     void setNoMainMangle(bool val) { noMainMangle_ = val; }
 
-    /// [v0.2.3] Emit structured control flow (block/loop/if with named
+    /// Emit structured control flow (block/loop/if with named
     /// br labels) instead of the $__pc dispatch loop. The caller must
     /// have verified reducibility (ReducibilityCheck).
     void setStructuredLowering(bool val) { structuredLowering_ = val; }
 
-    /// [v0.2.3] Select the vector storage strategy (default: "array").
+    /// Select the vector storage strategy (default: "array").
     void setVecLowering(std::unique_ptr<WasmVecLowering> vl);
 
   private:
@@ -63,10 +63,10 @@ namespace refractir {
     std::unique_ptr<WasmVecLowering> vecLowering_; // set lazily to "array" in emit()
     bool noModuleTags_ = false;
     bool noRequire_ = false;
-    bool noUbGuards_ = false; // [v0.2.3] see setNoUbGuards
+    bool noUbGuards_ = false; // see setNoUbGuards
     bool noMainMangle_ = false;
-    bool structuredLowering_ = false; // [v0.2.3] see setStructuredLowering
-    const Program *prog_ = nullptr;   // [v0.2.2] for callee lookup in emitAtom
+    bool structuredLowering_ = false; // see setStructuredLowering
+    const Program *prog_ = nullptr;   // for callee lookup in emitAtom
 
     // Maps local/param names to their WASM local index or info
     struct LocalInfo {
@@ -96,7 +96,7 @@ namespace refractir {
 
     std::unordered_map<std::string, StructInfo> structLayouts_;
 
-    // [v0.2.3] Vectors cross the call boundary through caller-owned frame
+    // Vectors cross the call boundary through caller-owned frame
     // memory: every vector argument is spilled into a per-call-site
     // scratch slot and passed as an i32 address, and a vector return is
     // written by the callee through a hidden trailing `$__sret` address
@@ -130,7 +130,7 @@ namespace refractir {
     void emitReturn(const RetTerm &ret, const FunDecl &f);
 
     // --- Structured emission (src/backend/wasm_structured.cpp) ---
-    // [v0.2.3] Function-body emission for --structured-lowering:
+    // Function-body emission for --structured-lowering:
     // structure the (reducible) CFG and emit genuine block/loop/if
     // WASM. WASM's multi-level `br N` consumes the *unlowered* control
     // tree directly — no $__pc dispatch loop and no guard flags — with
@@ -175,9 +175,9 @@ namespace refractir {
     void emitSelectVal(const SelectVal &sv, std::uint32_t targetWidth, bool isFloat = false);
     void emitIndex(const Index &idx);
     void emitInitVal(const InitVal &iv, const TypePtr &type, std::uint32_t offset);
-    // [v0.2.2] Emit a WASM helper function for one intrinsic.
+    // Emit a WASM helper function for one intrinsic.
     void emitIntrinsicHelper(const IntrinsicDecl &intr);
-    // [v0.2.3 V1] Emit the helper for a horizontal vector reduction: the
+    // Emit the helper for a horizontal vector reduction: the
     // vector arg arrives by address (the always-packed frame-memory spill
     // ABI), so lanes are read directly with `<elem>.load offset=k*size`,
     // strategy-independently, then folded to a scalar.
@@ -232,7 +232,7 @@ namespace refractir {
     // Convert the elem-typed lane value on top of stack to targetWidth
     // (int extend/wrap, float promote/demote).
     void emitVecLaneConvert(const TypePtr &elemTy, std::uint32_t targetWidth);
-    // [v0.2.3] Initialize a *register-strategy* vector local (frame-memory
+    // Initialize a *register-strategy* vector local (frame-memory
     // vector locals go through emitInitVal like any aggregate).
     void emitVecLocalInit(const std::string &name, const VecType &vt, const InitVal &iv);
     void emitVecCoefLane(

@@ -36,7 +36,7 @@ namespace refractir {
           if constexpr (std::is_same_v<T, AssignInstr>) {
             auto lhsVal =
                 evalLValue(arg.lhs, solver, store, pathConstraints, ubGuards, /*forWrite=*/true);
-            // [v0.2.1] Vector LHS: evaluate RHS as a SymbolicValue::Vec.
+            // Vector LHS: evaluate RHS as a SymbolicValue::Vec.
             if (lhsVal.kind == SymbolicValue::Kind::Vec && arg.lhs.accesses.empty()) {
               // Find the LHS local's declared VecType.
               TypePtr lhsType;
@@ -68,7 +68,7 @@ namespace refractir {
                     : std::nullopt
             );
             setLValue(arg.lhs, rhs, solver, store, pathConstraints, ubGuards);
-            // [v0.2.1] Track ptr provenance for cross-object and one-
+            // Track ptr provenance for cross-object and one-
             // past-end UB checks. The LHS is either a whole-local ptr
             // or a ptr-typed struct field path (`%s.p1`); we mirror
             // the RHS atom's provenance (addr / ptrindex / ptrfield
@@ -162,7 +162,7 @@ namespace refractir {
                       return PtrProvenance{baseTag, size};
                     }
                     if (auto pi = std::get_if<PtrIndexAtom>(&a)) {
-                      // [v0.2.1 fix] Narrow provenance for ptrindex.
+                      // Narrow provenance for ptrindex.
                       // The result pointer's provenance = the array the
                       // source points to. Compute the narrowed sub-array
                       // range from the source's type (ptr [N] T).
@@ -233,7 +233,7 @@ namespace refractir {
             SymbolicValue ptrVal = evalExpr(arg.ptr, solver, store, pathConstraints, ubGuards);
             smt::Term ptrTerm = ptrVal.term;
 
-            // [v0.2.1] Rule 9/11: store through null or OOB is UB.
+            // Rule 9/11: store through null or OOB is UB.
             // The evalExpr above already pushes rule-10 OOB constraints
             // for ptr-arith expressions, but a bare `store %pa, v`
             // where %pa was set earlier still needs a null check.
@@ -294,7 +294,7 @@ namespace refractir {
                 auto cond = solver.make_term(smt::Kind::EQUAL, {ptrTerm, tagTerm});
                 storeMatchConds.push_back(cond);
                 sv.term = solver.make_term(smt::Kind::ITE, {cond, valTerm, sv.term});
-                // [v0.2.2] When the pointee is itself a pointer, the stored
+                // When the pointee is itself a pointer, the stored
                 // value carries its own provenance (base/size). The target's
                 // provenance must follow the value under the same `cond`,
                 // mirroring the select-arm ITE — otherwise a later store/load
@@ -344,7 +344,7 @@ namespace refractir {
               std::uint64_t baseTag = tagOfLocal(l.name.name);
               enumStore(l.type, store.at(l.name.name), baseTag, 0);
             }
-            // [v0.2.1] Rule 11/15b: the store must land on a valid
+            // Rule 11/15b: the store must land on a valid
             // T-typed cell — same as load's anyMatch constraint.
             if (!storeMatchConds.empty()) {
               smt::Term anyMatch = storeMatchConds[0];
@@ -392,7 +392,7 @@ namespace refractir {
     std::vector<smt::Term> ubGuards;
     std::vector<smt::Term> requirements;
 
-    // [v0.2.2 Phase 6] Make `requirements` reachable from nested callees.
+    // Make `requirements` reachable from nested callees.
     currentReq_ = &requirements;
 
     struct ReqGuard {
@@ -401,12 +401,12 @@ namespace refractir {
       ~ReqGuard() { *slot = nullptr; }
     } reqGuard{&currentReq_};
 
-    // [v0.2.2 Phase 6] Reset shared sym cache for each solve call so
+    // Reset shared sym cache for each solve call so
     // independent paths don't reuse stale sym constants. Clear at
     // start AND on scope exit so the smt::Term destructors fire while
     // their owning solver is still alive (declared above).
     calleeSyms_.clear();
-    // [v0.2.2] Seed the callee-branch RNG. Same seed reproduces.
+    // Seed the callee-branch RNG. Same seed reproduces.
     calleeRng_.seed(config_.seed ? config_.seed : 0xC0DEFACE);
 
     struct CacheGuard {
@@ -415,10 +415,10 @@ namespace refractir {
       ~CacheGuard() { cache.clear(); }
     } cacheGuard{calleeSyms_};
 
-    // [v0.2.1] Reset per-solve provenance tracking. Each call to solve()
+    // Reset per-solve provenance tracking. Each call to solve()
     // walks a fresh CFG path, so prior provenance state must not leak.
     prov_.clear();
-    // [v0.2.2] Local for the captured top-level RetTerm term. The
+    // Local for the captured top-level RetTerm term. The
     // path-traversal lambda captures by reference and writes into it
     // when it sees `ret <expr>;`. Lives on the stack of solve() so
     // the shared_ptr<bitwuzla::Term> goes away before the solver
@@ -431,7 +431,7 @@ namespace refractir {
       auto sv = createSymbolicValue(s.type, s.name.name, solver, &pathConstraints);
       store[s.name.name] = sv;
 
-      // [v0.2.1] Vector sym: collect the per-lane terms so the domain/fix
+      // Vector sym: collect the per-lane terms so the domain/fix
       // logic below can apply constraints per lane. For scalar sym this
       // is just `{sv.term}` (one element).
       std::vector<smt::Term> symLaneTerms;
@@ -530,7 +530,7 @@ namespace refractir {
     if (diags.hasErrors())
       throw std::runtime_error("CFG build failed");
 
-    // [v0.2.3] RequireNonterm: the path is a lasso whose final block is
+    // RequireNonterm: the path is a lasso whose final block is
     // the loop header (it must reappear earlier — its first occurrence is
     // the orbit entry). We snapshot the complete mutable state at the
     // header's entry on *every* arrival. Step 5 then asserts the last equals
@@ -543,7 +543,6 @@ namespace refractir {
     // exactly k — otherwise any shorter orbit (in particular a period-1 one,
     // which the additive corrections can always produce) would satisfy the
     // closing equality and silently downgrade the request.
-    // See docs/reify.md.
     std::string nontermHeader;
     std::vector<size_t> nontermVisits;
     bool nontermLasso = false;
@@ -609,10 +608,10 @@ namespace refractir {
                 throw std::runtime_error(
                     "Block " + label + " ends with ret but path has more blocks"
                 );
-              // [v0.2.1] Evaluate the return value's expression so that
+              // Evaluate the return value's expression so that
               // any UB checks it raises (div/mod by zero, signed overflow,
               // load OOB, read of undef, etc.) become path constraints.
-              // [v0.2.2] Stash the term into retTermSlot_ (set by the
+              // Stash the term into retTermSlot_ (set by the
               // caller of this lambda) so the SOLVED header can extract
               // its model value.
               if (term.value) {
@@ -655,7 +654,7 @@ namespace refractir {
       // then assert the complete mutable state at the header's entry recurs
       // after the orbit's k laps, and — for k > 1 — that it does not recur
       // any earlier. Determinism lifts the single safe orbit to an infinite,
-      // UB-free run. See docs/reify.md.
+      // UB-free run.
       for (auto g: ubGuards)
         solver.assert_formula(g);
 
@@ -777,7 +776,7 @@ namespace refractir {
 
       for (const auto &s: entry->syms) {
         const auto &sv = store.at(s.name.name);
-        // [v0.2.1] Vector sym: extract one model value per lane.
+        // Vector sym: extract one model value per lane.
         if (sv.kind == SymbolicValue::Kind::Vec) {
           std::vector<Result::ModelVal> lanes;
           lanes.reserve(sv.arrayVal.size());
@@ -789,7 +788,7 @@ namespace refractir {
         finalRes.model[s.name.name] = extractValue(sv.term);
       }
 
-      // [v0.2.2] Solved values for entry-fun params. We only handle
+      // Solved values for entry-fun params. We only handle
       // scalar Int/Float here — aggregate / pointer / vector params
       // are out of scope for the SOLVED header (printer leaves them
       // verbatim).

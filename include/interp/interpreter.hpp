@@ -31,10 +31,10 @@ namespace refractir {
   public:
     explicit Interpreter(const Program &prog);
     // Output sink for the `Result:` line and the `--dump-exec` trace.
-    // Defaults to std::cout via the single-arg ctor; callers that need to
-    // capture the output (e.g. the reify oracle) pass a local stream
-    // instead of redirecting the process-global std::cout, which is unsafe
-    // when other threads are running concurrently.
+    // Defaults to std::cout via the single-arg ctor; a caller that needs to
+    // capture the output passes a local stream instead of redirecting the
+    // process-global std::cout, which is unsafe when other threads are
+    // running concurrently.
     Interpreter(const Program &prog, std::ostream &out);
     /**
      * Executes the specified entry function with given symbolic bindings.
@@ -42,13 +42,13 @@ namespace refractir {
      * @param symBindings Mapping of symbolic identifiers to concrete values.
      * @param dumpExec Whether to print execution trace to stderr.
      */
-    // [v0.2.3] One binding is an ordered list of scalar values: a
+    // One binding is an ordered list of scalar values: a
     // single entry for scalar syms (or a vector splat), one entry per
     // lane for vector syms.
     using SymScalar = std::variant<std::int64_t, double>;
     using SymBindings = std::unordered_map<std::string, std::vector<SymScalar>>;
 
-    // [v0.2.2] `paramArgs` supplies one decimal-int / hex-float string
+    // `paramArgs` supplies one decimal-int / hex-float string
     // per parameter of the entry function. Empty when the entry is
     // parameterless (the common case).
     void
@@ -66,10 +66,11 @@ namespace refractir {
     // so interprocedural traces keep frames apart even when block labels
     // collide across functions. `memory` is the live memory model, so the
     // consumer can resolve pointer values to their provenance (originating
-    // local + byte offset). It is the low-level primitive behind reify's
-    // StateProfile, which records per-program-point concrete state so
-    // equivalence-preserving rewrites (e.g. rytwin) can reproduce the
-    // exact state a block sees under the generated input. No-op when unset.
+    // local + byte offset). It is the low-level primitive a per-program-point
+    // state profile is built on: recording the concrete state at each point
+    // lets a consumer reproduce the exact state a block sees under a given
+    // input, which is what an equivalence-preserving rewrite needs to check
+    // it against. No-op when unset.
     using StateHook = std::function<void(
         const std::string &funcName, std::uint64_t frameId, const std::string &blockLabel,
         int instrIdx, const Store &store, const Memory &memory
@@ -109,7 +110,7 @@ namespace refractir {
     // --- Runtime evaluation helpers ---
     RuntimeValue makeUndef(const TypePtr &t);
     RuntimeValue broadcast(const TypePtr &t, const RuntimeValue &v);
-    // [v0.2.3] Materialize one sym binding (scalar, vector splat, or
+    // Materialize one sym binding (scalar, vector splat, or
     // per-lane list). Shared by the entry and nested-call paths.
     RuntimeValue bindSymValue(const SymDecl &s, const std::vector<SymScalar> &vals);
     RuntimeValue evalInit(const InitVal &iv, const TypePtr &t, const Store &store);
@@ -119,27 +120,27 @@ namespace refractir {
         const FunDecl &f, const std::vector<RuntimeValue> &args, const SymBindings &symBindings
     );
 
-    // [v0.2.2] Nested function call (`call @fun(...)`). Evaluates the
+    // Nested function call (`call @fun(...)`). Evaluates the
     // callee's body with a fresh local frame and returns its `ret`
     // value. Heap state (objects, addresses) is preserved across the
     // call so pointer arguments remain valid. typeMap_ entries that
     // collide with callee parameter/local names are saved and restored.
     RuntimeValue callFunction(const FunDecl &f, std::vector<RuntimeValue> args);
 
-    // [v0.2.2] §9.6.1 step 5: after a callee returns, refresh caller-side
+    // §9.6.1 step 5: after a callee returns, refresh caller-side
     // Store entries for any local that was promoted to memory (addr was
     // taken). Reads through a pointer commit to `heap_`; without this
     // refresh, subsequent direct reads of the local from the caller's
     // Store would observe the stale pre-call value.
     void syncStoreFromHeap(Store &store);
 
-    // [v0.2.2] Run the body of a function whose Store has already been
+    // Run the body of a function whose Store has already been
     // populated. Used by both execFunction (top-level) and callFunction
     // (nested). When `outRet` is non-null, the ret value is written
     // there and no "Result:" line is printed.
     void runBlocks(const FunDecl &f, Store &store, RuntimeValue *outRet);
 
-    // [v0.2.2] Sym bindings live on the interpreter (so nested calls
+    // Sym bindings live on the interpreter (so nested calls
     // share the same SAT model). Captured in run() / execFunction.
     const SymBindings *symBindings_ = nullptr;
 
@@ -172,7 +173,7 @@ namespace refractir {
     RuntimeValue evalPtrFieldAtom(const PtrFieldAtom &arg, const Store &store);
     RuntimeValue evalCastAtom(const CastAtom &arg, const Store &store);
     RuntimeValue evalCallAtom(const CallAtom &arg, const Store &store);
-    // [v0.2.2] Execute a built-in intrinsic. Argument values are already
+    // Execute a built-in intrinsic. Argument values are already
     // evaluated. Result has the intrinsic's declared return bitwidth.
     // Implemented in src/interp/intrinsics.cpp — the single source of
     // truth for interpreter-side intrinsic semantics.

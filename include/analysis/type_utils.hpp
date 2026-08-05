@@ -68,12 +68,12 @@ namespace refractir {
     static bool isStruct(const TypePtr &t);
 
     /**
-     * [v0.2.1] Casts to VecType if possible, otherwise returns nullptr.
+     * Casts to VecType if possible, otherwise returns nullptr.
      */
     static const VecType *asVec(const TypePtr &t);
 
     /**
-     * [v0.2.1] True iff the type is a vector type `<N> T`.
+     * True iff the type is a vector type `<N> T`.
      */
     static bool isVec(const TypePtr &t);
 

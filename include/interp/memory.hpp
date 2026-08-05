@@ -19,13 +19,13 @@ namespace refractir {
     std::uint64_t end;      // base + totalSize (exclusive)
     std::uint64_t elemSize; // sizeof(element type) in bytes
     std::uint64_t count;    // number of elements
-    // [v0.2.1] For array-of-struct field cells: the element index of
+    // For array-of-struct field cells: the element index of
     // the containing struct (i.e. `%arr[k].fld`'s k). -1 / SIZE_MAX
     // when not array-nested. Used by StoreInstr to mirror the heap
     // write back into the right `store["%arr"].arrayVal[k]` cell.
     std::uint64_t arrayIdx = static_cast<std::uint64_t>(-1);
     std::uint64_t provId = 0; // unique provenance object ID
-    TypePtr type = nullptr;   // [v0.2.1] The static type of the object/field
+    TypePtr type = nullptr;   // The static type of the object/field
 
     ObjectInfo() = default;
 

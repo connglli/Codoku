@@ -1,6 +1,6 @@
 #pragma once
 
-// [v0.2.2] -I include-path resolution shared by symiri / symirc / symirsolve.
+// -I include-path resolution shared by symiri / symirc / symirsolve.
 // Inline because the implementation is small and trivial to inline.
 
 #include <filesystem>
@@ -24,7 +24,7 @@ namespace refractir {
    * alive for as long as references into it (e.g. via resolveLinkDecls)
    * are used.
    *
-   * [v0.2.2 bug fix] -I paths are canonicalised and deduped so the same
+   * -I paths are canonicalised and deduped so the same
    * directory passed twice doesn't double-load (which would otherwise
    * produce false ambiguity diagnostics).
    */
@@ -42,7 +42,7 @@ namespace refractir {
       }
       if (!seen.insert(canonical).second)
         continue;
-      // [v0.2.2 §11.1] Non-recursive scan: a sibling subdirectory of an
+      // §11.1 Non-recursive scan: a sibling subdirectory of an
       // `-I` path is invisible. Tests that need a specific subdir as a
       // library root must name it explicitly with its own `-I` flag.
       // Matches the literal spec wording and prevents fixture
@@ -62,7 +62,7 @@ namespace refractir {
           auto toks = lx.lexAll();
           Parser ps(std::move(toks));
           Program lib = ps.parseProgram();
-          // [v0.2.2] Tag every fun with its source-file stem so the
+          // Tag every fun with its source-file stem so the
           // C backend's --split-by-source mode knows where each fun
           // came from once they're merged into main.
           std::string stem = entry.path().stem().string();
@@ -86,7 +86,7 @@ namespace refractir {
    * Resolve every link-form `decl @name` in `main` against the loaded
    * library Programs.
    *
-   * [v0.2.2] §3.3 two-pass loading and §11.1 -I resolution:
+   * §3.3 two-pass loading and §11.1 -I resolution:
    *   1. Count every global-name binding (`fun`, link-form `decl`,
    *      contract-form `decl`, `intrinsic`) across primary + all libs.
    *   2. Diagnose duplicates that are not legal under the spec:

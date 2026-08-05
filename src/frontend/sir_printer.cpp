@@ -300,7 +300,7 @@ namespace refractir {
             if (arg.cond)
               printCond(*arg.cond);
             else if (arg.maskExpr)
-              printExpr(*arg.maskExpr); // [v0.2.1] mask form
+              printExpr(*arg.maskExpr); // mask form
             out_ << ", ";
             printSelectVal(arg.vtrue);
             out_ << ", ";

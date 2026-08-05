@@ -101,7 +101,7 @@ namespace refractir {
           }
         }
 
-        // [v0.2.1] Rule 10 (ptr arith OOB): for ptr ± int, result must stay in [base, base + size].
+        // Rule 10 (ptr arith OOB): for ptr ± int, result must stay in [base, base + size].
         if (isPtrIntArith) {
           if (res.prov_base.internal && res.prov_size.internal) {
             auto end = solver.make_term(smt::Kind::BV_ADD, {res.prov_base, res.prov_size});
@@ -331,7 +331,7 @@ namespace refractir {
     } else {
       throw std::runtime_error("SelectAtom: neither cond nor maskExpr set");
     }
-    // [v0.2.1] §6.4 select is lazy: only the chosen arm's UB
+    // §6.4 select is lazy: only the chosen arm's UB
     // constraints participate in the path condition. Evaluate
     // each arm into a private constraint list, then gate them
     // with the appropriate side of `cond` before pushing to pc.
@@ -800,7 +800,7 @@ namespace refractir {
       std::uint64_t baseTag = tagOfLocal(l.name.name);
       enumLoad(l.type, store.at(l.name.name), baseTag, 0);
     }
-    // [v0.2.2] SPEC §9.6.1 step 4: when this load fires inside a
+    // SPEC §9.6.1 step 4: when this load fires inside a
     // callee, a pointer parameter may point at a caller-owned
     // `let mut`.  Walk the caller frame too so the load sees
     // the caller's current value.
@@ -836,11 +836,11 @@ namespace refractir {
       std::vector<smt::Term> &ub
   ) {
 
-    // [v0.2.2] Phase 4 handles intrinsic calls only. Fun/decl
+    // Phase 4 handles intrinsic calls only. Fun/decl
     // targets are stubbed for Phases 6/7/8.
     // Evaluate arguments left-to-right first (§2.12 strict commit)
     // so we can match intrinsic overloads by argument type.
-    // [v0.2.2 D.3] When the typechecker pinned a resolved intrinsic
+    // When the typechecker pinned a resolved intrinsic
     // overload, propagate each parameter's sort to evalExpr so FP
     // literals (`@fmin(%?x, 2.0)`) bind at the param's precision
     // rather than the f32 default.  Without this, a literal arg
@@ -854,7 +854,7 @@ namespace refractir {
         expected = getSort(arg.resolvedIntrinsic->params[k].type, solver);
       argVals.push_back(evalExpr(*arg.args[k], solver, store, pc, ub, expected));
     }
-    // [v0.2.2] Honour the overload pinned by the type checker
+    // Honour the overload pinned by the type checker
     // when available. The width-comparison fallback below is
     // kept for un-typechecked inputs (raw unit tests).
     const IntrinsicDecl *intr = arg.resolvedIntrinsic;
@@ -882,14 +882,14 @@ namespace refractir {
       }
     }
     if (!intr) {
-      // [v0.2.2 Phase 6] `fun` target -- nested symbolic exec.
+      // `fun` target -- nested symbolic exec.
       // Hand the caller frame down so callee `store`s can land
       // on caller-side `let mut` targets per SPEC §9.6.1 step 4.
       for (const auto &f: prog_.funs)
         if (f.name.name == arg.callee.name) {
           return callFunction(f, std::move(argVals), solver, pc, ub, currentFun_, &store);
         }
-      // [v0.2.2 Phase 8] Contract-form `decl` target.
+      // Contract-form `decl` target.
       for (const auto &d: prog_.extDecls)
         if (d.name.name == arg.callee.name) {
           if (!d.contract)
@@ -900,7 +900,7 @@ namespace refractir {
         }
       throw std::runtime_error("Solver: call target not found: " + arg.callee.name);
     }
-    // [v0.2.2] Delegate to the dedicated intrinsics module so
+    // Delegate to the dedicated intrinsics module so
     // all solver-side intrinsic SMT lowering lives in one place.
     // See src/solver/intrinsics.cpp.
     return callBuiltinIntrinsicSMT(*intr, argVals, solver, pc, ub);
@@ -947,7 +947,7 @@ namespace refractir {
     SymbolicValue rhsVal = evalExpr(c.rhs, solver, store, pc, ub, solver.get_sort(lhs));
     smt::Term rhs = rhsVal.term;
 
-    // [v0.2.1] Dynamic Rule 14 Relational Comparison check
+    // Dynamic Rule 14 Relational Comparison check
     TypePtr lhsType = resolveExprType(c.lhs);
     TypePtr rhsType = resolveExprType(c.rhs);
     bool isLhsPtr = lhsType && std::holds_alternative<PtrType>(lhsType->v);

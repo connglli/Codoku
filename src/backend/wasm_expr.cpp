@@ -171,7 +171,7 @@ namespace refractir {
         emitY();                                  // y
         indent();
         out_ << prefix << "div\n"; // x/y
-        // [v0.2.2] Spec §2.9 intermediate-overflow trap: the inner
+        // Spec §2.9 intermediate-overflow trap: the inner
         // fp.div of the `%` encoding is subject to §7.4 rule 6.  If
         // x/y is ±∞ or NaN at the operand precision, the path is
         // UB.  Save the quotient into a scratch local and trap via
@@ -384,7 +384,7 @@ namespace refractir {
       }
     }
     out_ << opStr << "\n";
-    // [v0.2.2] cmp returns i1; sign-extend bit 0 so true is -1.
+    // cmp returns i1; sign-extend bit 0 so true is -1.
     emitSignExtend(1, (targetWidth > 32 ? 64 : 32));
   }
 
@@ -475,7 +475,7 @@ namespace refractir {
     out_ << "i32.add\n";
   }
 
-  // [v0.2.2] Use the overload the type checker pinned onto the AST
+  // Use the overload the type checker pinned onto the AST
   // node — see CallAtom::resolvedIntrinsic — with a width-based
   // fallback for un-annotated nodes.
   const IntrinsicDecl *WasmBackend::resolveIntrinsic(const CallAtom &arg) {
@@ -866,7 +866,7 @@ namespace refractir {
         out_ << (dstWidth == 32 ? "f32.convert_i64_s\n" : "f64.convert_i64_s\n");
     } else {
       // BV -> BV
-      // [v0.2.2] Spec §6.4: i1 is signed; widening sign-extends
+      // Spec §6.4: i1 is signed; widening sign-extends
       // bit 0.  Emit the i1 sign-extension *first* (in i32
       // space) so a subsequent i64.extend_i32_s, if any, sees
       // the already-sign-extended low half.  Otherwise the

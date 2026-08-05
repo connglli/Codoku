@@ -1,4 +1,4 @@
-// [v0.2.3] "array" python vec-lowering: a vector local is a plain
+// "array" python vec-lowering: a vector local is a plain
 // lane list — the historical representation, extracted verbatim so
 // the strategy seam is byte-identical for the default.
 

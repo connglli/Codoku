@@ -31,7 +31,7 @@ namespace refractir {
      */
     void emit(const Program &prog);
 
-    // [v0.2.2] Split emission: write `<outDir>/<stem>.c` for the
+    // Split emission: write `<outDir>/<stem>.c` for the
     // primary translation unit (stem = primaryStem) and one
     // `<outDir>/<libStem>.c` per distinct `FunDecl::sourceStem` that
     // arrived from an -I lib, plus `<outDir>/common.h` carrying
@@ -43,7 +43,7 @@ namespace refractir {
 
     void setNoRequire(bool val) { noRequire_ = val; }
 
-    /// [v0.2.3] Suppress the dynamic undefined-behavior guards
+    /// Suppress the dynamic undefined-behavior guards
     /// (null/OOB pointer traps, FP finiteness traps, integer div/rem
     /// zero traps, intrinsic-precondition traps, `unreachable`). Only
     /// sound when the program is known UB-free: on such a program the
@@ -54,34 +54,34 @@ namespace refractir {
 
     void setNoMainMangle(bool val) { noMainMangle_ = val; }
 
-    /// [v0.2.1] Set the vector-lowering strategy. Takes ownership. If
+    /// Set the vector-lowering strategy. Takes ownership. If
     /// never called, the backend defaults to "vecext" on first emit.
     void setVecLowering(std::unique_ptr<CVecLowering> vl) { vecLowering_ = std::move(vl); }
 
-    /// [v0.2.3] Emit structured control flow (while/if reconstructed
+    /// Emit structured control flow (while/if reconstructed
     /// from the lowered control tree) instead of labels+goto. The
     /// caller must have verified reducibility (ReducibilityCheck).
     void setStructuredLowering(bool val) { structuredLowering_ = val; }
 
   private:
     std::ostream &out_;
-    // [v0.2.2] When non-empty, restrict per-fun body emission to funs
+    // When non-empty, restrict per-fun body emission to funs
     // whose sourceStem matches; used by emitSplit() to write one .c
     // per source-file stem.
     std::string emitOnlySourceStem_;
-    // [v0.2.2] When true, suppress the global preamble (#include,
+    // When true, suppress the global preamble (#include,
     // struct typedefs, intrinsic helpers, extern prototypes). Used
     // when emitting a non-primary `.c` whose preamble lives in
     // `common.h`.
     bool suppressPreamble_ = false;
     int indent_level_ = 0;
     bool noRequire_ = false;
-    bool noUbGuards_ = false; // [v0.2.3] see setNoUbGuards
+    bool noUbGuards_ = false; // see setNoUbGuards
     bool noMainMangle_ = false;
-    bool structuredLowering_ = false; // [v0.2.3] see setStructuredLowering
-    const Program *prog_ = nullptr;   // [v0.2.2] for callee lookup in emitAtom
+    bool structuredLowering_ = false; // see setStructuredLowering
+    const Program *prog_ = nullptr;   // for callee lookup in emitAtom
     std::string curFuncName_;
-    std::unique_ptr<CVecLowering> vecLowering_; // [v0.2.1] strategy, see c_vec_lowering.hpp
+    std::unique_ptr<CVecLowering> vecLowering_; // strategy, see c_vec_lowering.hpp
     std::unordered_map<std::string, std::uint32_t> varWidths_;
     TypePtr curFuncRetType_;
     // ``isDoubleCtx_`` is the lowering-time evaluation context for float
@@ -106,7 +106,7 @@ namespace refractir {
     void emitRetTerm(const RetTerm &ret);
 
     // --- Structured emission (src/backend/c_structured.cpp) ---
-    // [v0.2.3] Function-body emission for --structured-lowering:
+    // Function-body emission for --structured-lowering:
     // structure the (reducible) CFG and print the lowered control
     // tree as genuine while/if statements — no labels, no goto.
     void emitStructuredBody(const FunDecl &f);
@@ -137,9 +137,9 @@ namespace refractir {
     void emitIndex(const Index &idx);
     void emitInitVal(const InitVal &iv, TypePtr expectedType = nullptr);
 
-    // [v0.2.2] Helpers for new top-level decls.
+    // Helpers for new top-level decls.
     void emitIntrinsicHelper(const IntrinsicDecl &intr);
-    // [v0.2.3 V1] Emit the helper for a horizontal vector reduction
+    // Emit the helper for a horizontal vector reduction
     // (@reduce_*): a `static inline` function taking the vector by the
     // vec-lowering strategy's cross-boundary representation and folding its
     // lanes to a scalar. Requires a boundary-crossing strategy.
@@ -166,7 +166,7 @@ namespace refractir {
     TypePtr getCoefType(const Coef &coef);
     TypePtr getInitValType(const InitVal &iv);
 
-    // [v0.2.1] Vector-specific statement-level emission. These handle the
+    // Vector-specific statement-level emission. These handle the
     // RHS atoms that need lane-wise C emission (loop or unroll) and so
     // can't be inlined as a C expression.
     void emitVecCmpAssign(const LValue &lhs, const CmpAtom &c, const VecType &vt);
@@ -174,7 +174,7 @@ namespace refractir {
     /// Per-lane C expression for a SelectVal at lane `kExpr`.
     std::string sirSelectValLane(const SelectVal &sv, const VecType &vt, const std::string &kExpr);
 
-    /// [v0.2.1] Lane-unroll: compute the C expression for lane k of the
+    /// Lane-unroll: compute the C expression for lane k of the
     /// value produced by an Atom / Expr that yields a vector. Used by
     /// the AssignInstr handler when the active strategy needs lane-wise
     /// statement emission (scalars / array / struct*).

@@ -1,4 +1,4 @@
-// [v0.2.3] "scalars" python vec-lowering: a vector `<N> T` local is
+// "scalars" python vec-lowering: a vector `<N> T` local is
 // stored as N separate variables `v_0 .. v_{N-1}`. Mirrors the C
 // "scalars" strategy — including the refusal of dynamic lane indices
 // (a runtime index cannot select a distinct variable). Compute values

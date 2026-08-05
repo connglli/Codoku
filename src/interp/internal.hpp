@@ -27,7 +27,7 @@ namespace refractir {
   inline std::int64_t canonicalize(std::int64_t val, std::uint32_t bits) {
     if (bits >= 64)
       return val;
-    // [v0.2.2] Spec §6.4: i1 is a signed 1-bit integer.  The two
+    // Spec §6.4: i1 is a signed 1-bit integer.  The two
     // representable values are 0 (false) and -1 (true) — bit
     // pattern 1 sign-extended.  `iN as iM` widening sign-extends, so
     // an i1 true widened to i32 is -1; matches what the C backend
