@@ -467,11 +467,24 @@ namespace refractir::reify {
     // block: computed once per function, since it is a fixpoint over the CFG.
     using InitAtEntry = std::unordered_map<std::string, std::unordered_set<std::string>>;
 
+    // The per-function analysis every planning step reads and none of them
+    // changes. All of it is computed once for the function, so threading it as
+    // one reference keeps the planners' own arguments to what actually varies
+    // between candidates.
+    struct PlanContext {
+      const FunDecl &fn;
+      const CFG &cfg;
+      const DomTree &dt;
+      const std::unordered_map<std::string, const Block *> &byLabel;
+      const StructMap &structs;
+      const TypeLayout &layout;
+      const InitAtEntry &inited;
+    };
+
     bool planRegion(
-        const FunDecl &fn, const std::vector<const Block *> &blocks, bool scanTerms,
+        const PlanContext &ctx, const std::vector<const Block *> &blocks, bool scanTerms,
         const std::vector<std::pair<std::string, StateValue>> &sVars,
         const std::vector<std::pair<std::string, StateValue>> &sPrimeVars, const StateMap &s,
-        const StructMap &structs, const TypeLayout &layout, const InitAtEntry &inited,
         TwinPlan &plan, std::string *why = nullptr
     ) {
       const Block &b = *blocks.front(); // the region entry
@@ -487,9 +500,9 @@ namespace refractir::reify {
       // is a question the frontend's must-init analysis already answers, and
       // asking it is what admits a root assigned anywhere that dominates the
       // region rather than only in the function's entry block.
-      auto initedHere = inited.find(b.label.name);
+      auto initedHere = ctx.inited.find(b.label.name);
       auto isInitialized = [&](const std::string &nm) {
-        return initedHere != inited.end() && initedHere->second.count(nm) > 0;
+        return initedHere != ctx.inited.end() && initedHere->second.count(nm) > 0;
       };
 
       ReadScan rs;
@@ -530,7 +543,7 @@ namespace refractir::reify {
       // root — and rejects the block otherwise.
       std::unordered_set<std::string> guarded;
       for (const auto &[name, val]: sVars) {
-        auto decl = findRoot(fn, name);
+        auto decl = findRoot(ctx.fn, name);
         // Why this root cannot cross into the guard, for the rejection
         // message: the name alone leaves a reader to guess which of half a
         // dozen reasons applied, and none of them is visible in the program.
@@ -551,7 +564,7 @@ namespace refractir::reify {
             if (!decl->isMutable) {
               guardable = false;
               why = "an immutable aggregate, which `addr` cannot take";
-            } else if (containsVec(decl->type, structs)) {
+            } else if (containsVec(decl->type, ctx.structs)) {
               guardable = false;
               why = "a vector inside an aggregate, which no pointer reaches";
             }
@@ -574,7 +587,8 @@ namespace refractir::reify {
           root = GuardRoot{name, decl->type, kind, decl->isParam, {}};
           for (auto &lf: leaves) {
             LeafRef ref{name, std::move(lf.path), lf.val, {}, {}};
-            if (ref.isPtr() && !fillPtrLeaf(ref, fn, structs, layout, decl->type, &why)) {
+            if (ref.isPtr() &&
+                !fillPtrLeaf(ref, ctx.fn, ctx.structs, ctx.layout, decl->type, &why)) {
               guardable = false;
               break;
             }
@@ -603,7 +617,7 @@ namespace refractir::reify {
       // leaves they wrote.
       std::map<std::string, LeafRef> defMap;
       for (const auto &[name, val]: sPrimeVars) {
-        auto decl = findRoot(fn, name);
+        auto decl = findRoot(ctx.fn, name);
         if (!decl)
           return reject("unknown exit root: " + name);
         std::vector<StateLeaf> leaves;
@@ -1093,20 +1107,17 @@ namespace refractir::reify {
     // or nullopt with a reason; a rejected region falls back to the one-block
     // window rooted at the same entry.
     std::optional<Cand> planCandidate(
-        const FunDecl &fn, const std::vector<const StatePoint *> &pts, std::size_t t,
-        const CFG &cfg, const DomTree &dt,
-        const std::unordered_map<std::string, const Block *> &byLabel,
-        const std::unordered_set<std::string> &claims, const StructMap &structs,
-        const TypeLayout &layout, const InitAtEntry &inited, std::string &why
+        const PlanContext &ctx, const std::vector<const StatePoint *> &pts, std::size_t t,
+        const std::unordered_set<std::string> &claims, std::string &why
     ) {
       const std::string &label = pts[t]->block;
       std::size_t tEnd = t + 1;
       {
-        const std::size_t eIdx = blockIndex(cfg, label);
+        const std::size_t eIdx = blockIndex(ctx.cfg, label);
         std::size_t j = t + 1, last = t + 1;
         while (j < pts.size() && pts[j]->frame == pts[t]->frame) {
-          const std::size_t bIdx = blockIndex(cfg, pts[j]->block);
-          if (eIdx == DomTree::kNone || bIdx == DomTree::kNone || !dt.dominates(eIdx, bIdx) ||
+          const std::size_t bIdx = blockIndex(ctx.cfg, pts[j]->block);
+          if (eIdx == DomTree::kNone || bIdx == DomTree::kNone || !ctx.dt.dominates(eIdx, bIdx) ||
               claims.count(pts[j]->block))
             break;
           last = j;
@@ -1114,8 +1125,8 @@ namespace refractir::reify {
         }
         if (j < pts.size() && pts[j]->frame == pts[t]->frame)
           tEnd = j;
-        else if (auto lb = byLabel.find(pts[last]->block);
-                 lb != byLabel.end() && std::holds_alternative<RetTerm>(lb->second->term))
+        else if (auto lb = ctx.byLabel.find(pts[last]->block);
+                 lb != ctx.byLabel.end() && std::holds_alternative<RetTerm>(lb->second->term))
           tEnd = last;
       }
       std::string note;
@@ -1125,8 +1136,8 @@ namespace refractir::reify {
         for (std::size_t k = t; k < end; ++k) {
           if (!seen.insert(pts[k]->block).second)
             continue;
-          auto b2 = byLabel.find(pts[k]->block);
-          if (b2 == byLabel.end()) {
+          auto b2 = ctx.byLabel.find(pts[k]->block);
+          if (b2 == ctx.byLabel.end()) {
             why = "block not found: " + pts[k]->block;
             return false;
           }
@@ -1142,8 +1153,8 @@ namespace refractir::reify {
           plan.regionLabels.push_back(bp->label.name);
         plan.exitLabel = pts[end]->block;
         if (!planRegion(
-                fn, blocks, /*scanTerms=*/true, pts[t]->vars, pts[end]->vars,
-                toStateMap(pts[t]->vars), structs, layout, inited, plan, &why
+                ctx, blocks, /*scanTerms=*/true, pts[t]->vars, pts[end]->vars,
+                toStateMap(pts[t]->vars), plan, &why
             ))
           return false;
         // The twin body is the executed trace, so it follows the window and
@@ -1153,12 +1164,12 @@ namespace refractir::reify {
         executed.reserve(end - t);
         for (std::size_t k = t; k < end; ++k)
           executed.push_back(pts[k]->block);
-        auto body = flattenTrace(executed, plan.exitLabel, byLabel, &why);
+        auto body = flattenTrace(executed, plan.exitLabel, ctx.byLabel, &why);
         if (!body)
           return false;
-        EntryState es = pointBox(fn, pts[t]->vars, structs, layout);
+        EntryState es = pointBox(ctx.fn, pts[t]->vars, ctx.structs, ctx.layout);
         const IntrinsicFold fold = intrinsicFold();
-        const IntervalVerdict iv = checkTrace(fn, structs, *body, es, &fold);
+        const IntervalVerdict iv = checkTrace(ctx.fn, ctx.structs, *body, es, &fold);
         note = iv.ok ? "ok" : iv.reason;
         plan.entry = std::move(es);
         plan.body = std::move(*body);
@@ -1499,9 +1510,8 @@ namespace refractir::reify {
                   byLabel.find(label) == byLabel.end() || !enumerated.insert(label).second)
                 continue;
               std::string why;
-              if (auto c = planCandidate(
-                      *fn, pts, t, cfg, dt, byLabel, noClaims, structs, layout, inited, why
-                  )) {
+              const PlanContext ctx{*fn, cfg, dt, byLabel, structs, layout, inited};
+              if (auto c = planCandidate(ctx, pts, t, noClaims, why)) {
                 CandidateInfo info = candidateInfo(*c, cfg); // features before moving `c`
                 pool.push_back({fnName, std::move(*c), info});
               } else

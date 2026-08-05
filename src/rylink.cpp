@@ -487,10 +487,15 @@ static bool generateOne(const FuncPool &pool, std::mt19937 &rng, const PerProgCo
     bool structured = reify::pickStructuredLowering(rng, cfg.structuredLowering);
     if (cfg.verbose && structured)
       std::cout << "  structured-lowering: true\n";
-    if (!emitCInProcess(
-            bundle, emitDir, emitStem, cfg.keepRequire, noUbGuards, vecLow, structured,
-            cfg.emitMain, cfg.splitBySource, cfg.verbose
-        )) {
+    reify::EmitOptions emitOpts;
+    emitOpts.keepRequire = cfg.keepRequire;
+    emitOpts.noUbGuards = noUbGuards;
+    emitOpts.vecLowering = vecLow;
+    emitOpts.structuredLowering = structured;
+    emitOpts.emitMain = cfg.emitMain;
+    emitOpts.splitBySource = cfg.splitBySource;
+    emitOpts.verbose = cfg.verbose;
+    if (!emitCInProcess(bundle, emitDir, emitStem, emitOpts)) {
       if (cfg.verbose)
         std::cerr << "  backend FAIL (" << failTag << ")\n";
       return false;
@@ -506,10 +511,14 @@ static bool generateOne(const FuncPool &pool, std::mt19937 &rng, const PerProgCo
     bool structured = reify::pickStructuredLowering(rng, cfg.structuredLowering);
     if (cfg.verbose && structured)
       std::cout << "  structured-lowering: true\n";
-    if (!emitWasmInProcess(
-            bundle, wasmOut, cfg.keepRequire, noUbGuards, vecLow, structured, cfg.emitMain,
-            cfg.verbose
-        )) {
+    reify::EmitOptions emitOpts;
+    emitOpts.keepRequire = cfg.keepRequire;
+    emitOpts.noUbGuards = noUbGuards;
+    emitOpts.vecLowering = vecLow;
+    emitOpts.structuredLowering = structured;
+    emitOpts.emitMain = cfg.emitMain;
+    emitOpts.verbose = cfg.verbose;
+    if (!emitWasmInProcess(bundle, wasmOut, emitOpts)) {
       if (cfg.verbose)
         std::cerr << "  backend FAIL (" << failTag << ")\n";
       return false;
@@ -522,9 +531,13 @@ static bool generateOne(const FuncPool &pool, std::mt19937 &rng, const PerProgCo
     std::string vecLow = reify::pickVecLowering(rng, cfg.vecLowering, "python");
     if (cfg.verbose && !vecLow.empty())
       std::cout << "  vec-lowering: " << vecLow << "\n";
-    if (!emitPyInProcess(
-            bundle, pyOut, cfg.keepRequire, noUbGuards, vecLow, cfg.emitMain, cfg.verbose
-        )) {
+    reify::EmitOptions emitOpts;
+    emitOpts.keepRequire = cfg.keepRequire;
+    emitOpts.noUbGuards = noUbGuards;
+    emitOpts.vecLowering = vecLow;
+    emitOpts.emitMain = cfg.emitMain;
+    emitOpts.verbose = cfg.verbose;
+    if (!emitPyInProcess(bundle, pyOut, emitOpts)) {
       if (cfg.verbose)
         std::cerr << "  backend FAIL (" << failTag << ")\n";
       return false;

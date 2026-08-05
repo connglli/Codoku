@@ -418,10 +418,12 @@ int main(int argc, char **argv) {
   if (target != "sir") {
     fs::path outCompiled = outputPath;
     outCompiled.replace_extension(target == "c" ? ".c" : ".wat");
-    if (!compileSirInProcess(
-            outputPath, target, outCompiled, keepRequire, noUbGuards, vecLowering,
-            /*structuredLowering=*/false, emitMain, /*verbose=*/false
-        )) {
+    reify::EmitOptions emitOpts;
+    emitOpts.keepRequire = keepRequire;
+    emitOpts.noUbGuards = noUbGuards;
+    emitOpts.vecLowering = vecLowering;
+    emitOpts.emitMain = emitMain;
+    if (!compileSirInProcess(outputPath, target, outCompiled, emitOpts)) {
       std::cerr << "rytwin: compile of p2 to " << target << " failed\n";
       return 1;
     }

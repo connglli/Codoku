@@ -366,120 +366,107 @@ namespace refractir::reify {
   }
 
   bool emitCInProcess(
-      Program &prog, const fs::path &outDir, const std::string &primaryStem, bool keepRequire,
-      bool noUbGuards, const std::string &vecLowering, bool structuredLowering, bool emitMain,
-      bool splitBySource, bool verbose
+      Program &prog, const fs::path &outDir, const std::string &primaryStem, const EmitOptions &opts
   ) {
-    if (!runAnalysisPasses(prog, verbose))
+    if (!runAnalysisPasses(prog, opts.verbose))
       return false;
-    if (structuredLowering && !allFunsReducible(prog, verbose))
+    if (opts.structuredLowering && !allFunsReducible(prog, opts.verbose))
       return false;
-    auto vl = makeCVecLowering(vecLowering.empty() ? "vecext" : vecLowering);
-    if (splitBySource) {
-      std::ofstream sink;
-      CBackend cb(sink);
-      cb.setNoRequire(!keepRequire);
-      cb.setNoUbGuards(noUbGuards);
-      cb.setNoMainMangle(emitMain);
-      cb.setStructuredLowering(structuredLowering);
-      cb.setVecLowering(std::move(vl));
-      try {
-        cb.emitSplit(prog, outDir.string(), primaryStem);
-      } catch (const std::exception &e) {
-        if (verbose)
-          std::cerr << "reify: CBackend failed: " << e.what() << "\n";
+
+    // The split and single-file forms differ only in where the output goes and
+    // which emit call makes it; how the backend lowers is identical. Under
+    // --split-by-source the backend opens its own files, so `sink` stays
+    // closed and unused.
+    std::ofstream sink;
+    if (!opts.splitBySource) {
+      fs::path outFile = outDir / (primaryStem + ".c");
+      sink.open(outFile);
+      if (!sink) {
+        if (opts.verbose)
+          std::cerr << "reify: cannot open " << outFile << "\n";
         return false;
       }
-      return true;
     }
-    fs::path outFile = outDir / (primaryStem + ".c");
-    std::ofstream ofs(outFile);
-    if (!ofs) {
-      if (verbose)
-        std::cerr << "reify: cannot open " << outFile << "\n";
-      return false;
-    }
-    CBackend cb(ofs);
-    cb.setNoRequire(!keepRequire);
-    cb.setNoUbGuards(noUbGuards);
-    cb.setNoMainMangle(emitMain);
-    cb.setStructuredLowering(structuredLowering);
-    cb.setVecLowering(std::move(vl));
+    CBackend cb(sink);
+    cb.setNoRequire(!opts.keepRequire);
+    cb.setNoUbGuards(opts.noUbGuards);
+    cb.setNoMainMangle(opts.emitMain);
+    cb.setStructuredLowering(opts.structuredLowering);
+    cb.setVecLowering(makeCVecLowering(opts.vecLowering.empty() ? "vecext" : opts.vecLowering));
     try {
-      cb.emit(prog);
+      if (opts.splitBySource)
+        cb.emitSplit(prog, outDir.string(), primaryStem);
+      else
+        cb.emit(prog);
     } catch (const std::exception &e) {
-      if (verbose)
+      if (opts.verbose)
         std::cerr << "reify: CBackend failed: " << e.what() << "\n";
       return false;
     }
     return true;
   }
 
-  bool emitWasmInProcess(
-      Program &prog, const fs::path &outFile, bool keepRequire, bool noUbGuards,
-      const std::string &vecLowering, bool structuredLowering, bool emitMain, bool verbose
-  ) {
-    if (!runAnalysisPasses(prog, verbose))
+  bool emitWasmInProcess(Program &prog, const fs::path &outFile, const EmitOptions &opts) {
+    if (!runAnalysisPasses(prog, opts.verbose))
       return false;
-    if (structuredLowering && !allFunsReducible(prog, verbose))
+    if (opts.structuredLowering && !allFunsReducible(prog, opts.verbose))
       return false;
     std::ofstream ofs(outFile);
     if (!ofs) {
-      if (verbose)
+      if (opts.verbose)
         std::cerr << "reify: cannot open " << outFile << "\n";
       return false;
     }
-    auto vl = makeWasmVecLowering(vecLowering.empty() ? "vecext" : vecLowering);
+    auto vl = makeWasmVecLowering(opts.vecLowering.empty() ? "vecext" : opts.vecLowering);
     if (!vl) {
-      if (verbose)
-        std::cerr << "reify: WASM target does not support vec-lowering '" << vecLowering << "'\n";
+      if (opts.verbose)
+        std::cerr << "reify: WASM target does not support vec-lowering '" << opts.vecLowering
+                  << "'\n";
       return false;
     }
     WasmBackend wb(ofs);
-    wb.setNoRequire(!keepRequire);
-    wb.setNoUbGuards(noUbGuards);
-    wb.setNoMainMangle(emitMain);
-    wb.setStructuredLowering(structuredLowering);
+    wb.setNoRequire(!opts.keepRequire);
+    wb.setNoUbGuards(opts.noUbGuards);
+    wb.setNoMainMangle(opts.emitMain);
+    wb.setStructuredLowering(opts.structuredLowering);
     wb.setVecLowering(std::move(vl));
     try {
       wb.emit(prog);
     } catch (const std::exception &e) {
-      if (verbose)
+      if (opts.verbose)
         std::cerr << "reify: WasmBackend failed: " << e.what() << "\n";
       return false;
     }
     return true;
   }
 
-  bool emitPyInProcess(
-      Program &prog, const fs::path &outFile, bool keepRequire, bool noUbGuards,
-      const std::string &vecLowering, bool emitMain, bool verbose
-  ) {
-    if (!runAnalysisPasses(prog, verbose))
+  bool emitPyInProcess(Program &prog, const fs::path &outFile, const EmitOptions &opts) {
+    if (!runAnalysisPasses(prog, opts.verbose))
       return false;
-    if (!allFunsReducible(prog, verbose))
+    if (!allFunsReducible(prog, opts.verbose))
       return false;
-    auto vl = makePyVecLowering(vecLowering.empty() ? "array" : vecLowering);
+    auto vl = makePyVecLowering(opts.vecLowering.empty() ? "array" : opts.vecLowering);
     if (!vl) {
-      if (verbose)
-        std::cerr << "reify: python target does not support vec-lowering '" << vecLowering << "'\n";
+      if (opts.verbose)
+        std::cerr << "reify: python target does not support vec-lowering '" << opts.vecLowering
+                  << "'\n";
       return false;
     }
     std::ofstream ofs(outFile);
     if (!ofs) {
-      if (verbose)
+      if (opts.verbose)
         std::cerr << "reify: cannot open " << outFile << "\n";
       return false;
     }
     PyBackend pb(ofs);
-    pb.setNoRequire(!keepRequire);
-    pb.setNoUbGuards(noUbGuards);
-    pb.setNoMainMangle(emitMain);
+    pb.setNoRequire(!opts.keepRequire);
+    pb.setNoUbGuards(opts.noUbGuards);
+    pb.setNoMainMangle(opts.emitMain);
     pb.setVecLowering(std::move(vl));
     try {
       pb.emit(prog);
     } catch (const std::exception &e) {
-      if (verbose)
+      if (opts.verbose)
         std::cerr << "reify: PyBackend failed: " << e.what() << "\n";
       return false;
     }
@@ -487,9 +474,8 @@ namespace refractir::reify {
   }
 
   bool compileSirInProcess(
-      const fs::path &sirPath, const std::string &target, const fs::path &outPath, bool keepRequire,
-      bool noUbGuards, const std::string &vecLowering, bool structuredLowering, bool emitMain,
-      bool verbose
+      const fs::path &sirPath, const std::string &target, const fs::path &outPath,
+      const EmitOptions &opts
   ) {
     // Keep the source alive past the try block: Lexer holds a string_view
     // into it. Read it separately so a missing file keeps its own message
@@ -498,7 +484,7 @@ namespace refractir::reify {
     try {
       src = readFile(sirPath);
     } catch (const std::exception &) {
-      if (verbose)
+      if (opts.verbose)
         std::cerr << "compileSirInProcess: Could not open file " << sirPath << "\n";
       return false;
     }
@@ -510,26 +496,21 @@ namespace refractir::reify {
       Program prog = ps.parseProgram();
 
       if (target == "c") {
-        return emitCInProcess(
-            prog, outPath.parent_path(), outPath.stem().string(), keepRequire, noUbGuards,
-            vecLowering, structuredLowering, emitMain, /*splitBySource=*/false, verbose
-        );
+        // This path emits one file, whatever the caller asked for.
+        EmitOptions single = opts;
+        single.splitBySource = false;
+        return emitCInProcess(prog, outPath.parent_path(), outPath.stem().string(), single);
       } else if (target == "wasm") {
-        return emitWasmInProcess(
-            prog, outPath, keepRequire, noUbGuards, vecLowering, structuredLowering, emitMain,
-            verbose
-        );
+        return emitWasmInProcess(prog, outPath, opts);
       } else if (target == "python") {
-        return emitPyInProcess(
-            prog, outPath, keepRequire, noUbGuards, vecLowering, emitMain, verbose
-        );
+        return emitPyInProcess(prog, outPath, opts);
       } else {
-        if (verbose)
+        if (opts.verbose)
           std::cerr << "compileSirInProcess: Unknown target " << target << "\n";
         return false;
       }
     } catch (const std::exception &e) {
-      if (verbose)
+      if (opts.verbose)
         std::cerr << "compileSirInProcess: Exception during compilation: " << e.what() << "\n";
       return false;
     }

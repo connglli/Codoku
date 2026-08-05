@@ -193,50 +193,79 @@ extractParamArgs(const FuncDescriptor::Realization &rz) {
   return args;
 }
 
+// Everything a leaf-generation attempt reads that is fixed for the whole run.
+// The three inputs that differ per leaf — its name, its variable-catalogue
+// config (which carries the function index) and its RNG — stay parameters of
+// generateLeaf.
+struct LeafGenConfig {
+  // CFG shape.
+  int nBbls = 0;
+  double pBranch = 0.0;
+  double pBackedge = 0.0;
+  bool requireReducible = false;
+
+  // Path sampling.
+  int maxLoopIter = 0;
+  int minLoopIter = 0;
+
+  // Function body.
+  int nStmts = 0;
+  double offPathMultiplier = 1.0;
+  bool enableInterestCoefs = false;
+  double pLargeCoef = 0.0;
+  std::int64_t largeCoefThreshold = 0;
+  std::int64_t coefLo = 0, coefHi = 0;
+  std::int64_t valueLo = 0, valueHi = 0;
+  std::int64_t indexLo = 0, indexHi = 0;
+  ExprGenConfig exprCfg;
+  bool enableIntrinsics = false;
+
+  // Solving.
+  std::uint32_t timeoutMs = 0;
+  SolvingMode solMode = SolvingMode::UBFree;
+
+  // Retry budget: `maxRetries` attempts per leaf, each solving `nInits`
+  // independent initializations.
+  int maxRetries = 0;
+  int nInits = 0;
+
+  // Output. `genId` is the run's 6-char generation id, which names the
+  // per-function descriptor; `emitDesc` writes the rylink-consumable
+  // func_<id>_<i>.json sidecar beside each concrete .sir.
+  fs::path outDir;
+  bool keepSymbolic = false;
+  bool verbose = false;
+  bool emitDesc = false;
+  bool emitMain = false;
+  bool noCrc32 = false;
+  std::string genId;
+
+  // Non-terminating mode: sample a lasso instead of an entry-to-exit path and
+  // splice cycle-closing corrections before solving. `maxLassoPeriod` caps the
+  // orbit's period k; each attempt draws k from [1, maxLassoPeriod], so a run
+  // mixes single-lap and multi-lap orbits.
+  bool requireNonterm = false;
+  int maxLassoPeriod = 1;
+};
+
+// `rng` is taken by value so the call can run in a detached thread.
 [[nodiscard]] static GenerateResult generateLeaf(
-    // CFG params
-    int nBbls, double pBranch, double pBackedge, bool requireReducible,
-    // Path params
-    int maxLoopIter, int minLoopIter,
-    // Var params (varCfg.typeConfig contains the type generation configuration)
-    const VarGenConfig &varCfg,
-    // Func params
-    const std::string &funcName, int nStmts, double offPathMultiplier, bool enableInterestCoefs,
-    double pLargeCoef, std::int64_t largeCoefThreshold, std::int64_t coefLo, std::int64_t coefHi,
-    std::int64_t valueLo, std::int64_t valueHi, std::int64_t indexLo, std::int64_t indexHi,
-    const ExprGenConfig &exprCfg, bool enableIntrinsics,
-    // Solver params
-    std::uint32_t timeoutMs, SolvingMode solMode,
-    // Retry params
-    int maxRetries, int nInits,
-    // IO
-    const fs::path &outDir, bool keepSymbolic, bool verbose,
-    // RNG (by value — safe to run in a detached thread)
-    std::mt19937 rng, std::uint32_t baseSeed,
-    // 6-char generation ID — used for the per-fn descriptor.
-    const std::string &genId,
-    // When true, write the rylink-consumable func_<id>_<i>.json
-    // sidecar next to each successful concrete .sir.
-    bool emitDesc, bool emitMain, bool noCrc32,
-    // Non-terminating mode: sample a lasso instead of an entry-to-
-    // exit path and splice cycle-closing corrections before solving.
-    // maxLassoPeriod caps the orbit's period k; each attempt draws k from
-    // [1, maxLassoPeriod], so a run mixes single-lap and multi-lap orbits.
-    bool requireNonterm, int maxLassoPeriod
+    const LeafGenConfig &opts, const VarGenConfig &varCfg, const std::string &funcName,
+    std::mt19937 rng, std::uint32_t baseSeed
 ) {
   // S1: CFG
   GenCFGParams cfgParams;
-  cfgParams.nBbls = nBbls;
-  cfgParams.pBranch = pBranch;
+  cfgParams.nBbls = opts.nBbls;
+  cfgParams.pBranch = opts.pBranch;
   // Non-terminating generation needs at least one loop; bias toward back
   // edges and regenerate until the CFG admits a lasso (see below).
-  cfgParams.pBackedge = requireNonterm ? std::max(pBackedge, 0.5) : pBackedge;
-  cfgParams.requireReducible = requireReducible;
+  cfgParams.pBackedge = opts.requireNonterm ? std::max(opts.pBackedge, 0.5) : opts.pBackedge;
+  cfgParams.requireReducible = opts.requireReducible;
   RyCFG cfg;
   for (int cfgTry = 0;; cfgTry++) {
     cfgParams.seed = rng();
     cfg = genCFG(cfgParams);
-    if (!requireNonterm)
+    if (!opts.requireNonterm)
       break;
     // A lasso requires a reachable loop header; retry a bounded number of
     // times if the repaired CFG has none (the attempt loop fails cleanly
@@ -247,47 +276,47 @@ extractParamArgs(const FuncDescriptor::Realization &rz) {
       break;
   }
 
-  if (verbose)
+  if (opts.verbose)
     std::cout << "[cfg] " << cfg.blocks.size() << " blocks\n";
 
   // Generate VarCatalogue (shared across all inits for the same CFG)
   VarCatalogue vars = genVarCatalogue(rng, varCfg);
 
-  if (verbose)
+  if (opts.verbose)
     std::cout << "[vars] " << vars.vars.size() << " vars, " << vars.structDecls.size()
               << " structs\n";
 
-  for (int attempt = 0; attempt <= maxRetries; attempt++) {
+  for (int attempt = 0; attempt <= opts.maxRetries; attempt++) {
     // Path sampling: a lasso for non-terminating generation, otherwise a
     // random entry-to-exit walk (loop iterations decay on retry).
     std::optional<std::vector<std::string>> maybePath;
-    if (requireNonterm) {
+    if (opts.requireNonterm) {
       SampleLassoParams lassoParams;
       lassoParams.seed = rng();
       // Draw the period per attempt: a k > 1 orbit is a strictly harder
       // constraint (the state must avoid the header state for k-1 laps), so
       // retrying re-rolls it rather than being stuck on one hard k.
       lassoParams.period =
-          maxLassoPeriod <= 1
+          opts.maxLassoPeriod <= 1
               ? 1
-              : static_cast<int>(std::uniform_int_distribution<int>(1, maxLassoPeriod)(rng));
+              : static_cast<int>(std::uniform_int_distribution<int>(1, opts.maxLassoPeriod)(rng));
       maybePath = sampleLasso(cfg, lassoParams);
     } else {
       SamplePathParams pathParams;
       pathParams.seed = rng();
       // Keep max ≥ min so retry decay can't violate the requested minimum.
-      pathParams.maxLoopIter = std::max(minLoopIter, maxLoopIter - attempt);
-      pathParams.minLoopIter = minLoopIter;
+      pathParams.maxLoopIter = std::max(opts.minLoopIter, opts.maxLoopIter - attempt);
+      pathParams.minLoopIter = opts.minLoopIter;
       maybePath = samplePath(cfg, pathParams);
     }
     if (!maybePath) {
-      if (verbose)
+      if (opts.verbose)
         std::cerr << "[sampler] attempt=" << attempt << " sample failed\n";
       continue;
     }
     const auto &path = *maybePath;
 
-    if (verbose)
+    if (opts.verbose)
       std::cout << "[sampler] attempt=" << attempt << " EP len=" << path.size() << "\n";
 
     // CFG/PATH comment header shared by every init of this attempt
@@ -304,7 +333,7 @@ extractParamArgs(const FuncDescriptor::Realization &rz) {
         }
         os << "\n";
       }
-      if (requireNonterm) {
+      if (opts.requireNonterm) {
         os << "// LASSO:";
       } else {
         os << "// PATH:";
@@ -314,26 +343,26 @@ extractParamArgs(const FuncDescriptor::Realization &rz) {
       os << "\n\n";
     };
 
-    // Generate nInits independently-seeded programs
+    // Generate opts.nInits independently-seeded programs
     std::vector<ConcreteFile> produced;
-    for (int initIdx = 0; initIdx < nInits; initIdx++) {
+    for (int initIdx = 0; initIdx < opts.nInits; initIdx++) {
       FuncGenConfig fcfg;
       fcfg.funcName = funcName;
       fcfg.seed = rng();
-      fcfg.nStmts = nStmts;
-      fcfg.offPathMultiplier = offPathMultiplier;
-      fcfg.enableInterestCoefs = enableInterestCoefs;
+      fcfg.nStmts = opts.nStmts;
+      fcfg.offPathMultiplier = opts.offPathMultiplier;
+      fcfg.enableInterestCoefs = opts.enableInterestCoefs;
       fcfg.enableInterestInits = true;
-      fcfg.enableIntrinsics = enableIntrinsics;
-      fcfg.pLargeCoef = pLargeCoef;
-      fcfg.largeCoefThreshold = largeCoefThreshold;
-      fcfg.exprCfg = exprCfg;
-      fcfg.coefLo = coefLo;
-      fcfg.coefHi = coefHi;
-      fcfg.valueLo = valueLo;
-      fcfg.valueHi = valueHi;
-      fcfg.indexLo = indexLo;
-      fcfg.indexHi = indexHi;
+      fcfg.enableIntrinsics = opts.enableIntrinsics;
+      fcfg.pLargeCoef = opts.pLargeCoef;
+      fcfg.largeCoefThreshold = opts.largeCoefThreshold;
+      fcfg.exprCfg = opts.exprCfg;
+      fcfg.coefLo = opts.coefLo;
+      fcfg.coefHi = opts.coefHi;
+      fcfg.valueLo = opts.valueLo;
+      fcfg.valueHi = opts.valueHi;
+      fcfg.indexLo = opts.indexLo;
+      fcfg.indexHi = opts.indexHi;
 
       auto [prog, pathLabels] = genFunction(cfg, path, vars, fcfg);
 
@@ -341,7 +370,7 @@ extractParamArgs(const FuncDescriptor::Realization &rz) {
       // the lasso's latch so the header-state fixed point is solvable. The
       // cycle spans the header (path.back()'s first occurrence) to the end;
       // the latch is the block just before the terminating header revisit.
-      if (requireNonterm) {
+      if (opts.requireNonterm) {
         const std::string &header = path.back();
         std::size_t firstHeaderIdx = 0;
         for (std::size_t j = 0; j < path.size(); ++j)
@@ -362,14 +391,14 @@ extractParamArgs(const FuncDescriptor::Realization &rz) {
       }
 
       // Optionally dump symbolic program
-      if (keepSymbolic) {
-        auto symPath =
-            outDir / (funcName + reify::rysmith::hp::kSymInfix + std::to_string(initIdx) + ".sir");
+      if (opts.keepSymbolic) {
+        auto symPath = opts.outDir / (funcName + reify::rysmith::hp::kSymInfix +
+                                      std::to_string(initIdx) + ".sir");
         std::ofstream ofs(symPath);
         writePathHeader(ofs);
         SIRPrinter printer(ofs);
         printer.print(prog);
-        if (verbose)
+        if (opts.verbose)
           std::cout << "  symbolic: " << symPath << "\n";
       }
 
@@ -379,7 +408,7 @@ extractParamArgs(const FuncDescriptor::Realization &rz) {
       pm.addModulePass(std::make_unique<SemChecker>());
       pm.addModulePass(std::make_unique<TypeChecker>());
       if (pm.run(prog) == PassResult::Error) {
-        if (verbose) {
+        if (opts.verbose) {
           std::cerr << "[validate] init " << initIdx << ": generated program failed validation\n";
           for (const auto &d: diags.diags)
             if (d.level == DiagLevel::Error)
@@ -390,23 +419,23 @@ extractParamArgs(const FuncDescriptor::Realization &rz) {
 
       // Solve
       SymbolicExecutor::Config solverCfg;
-      solverCfg.timeout_ms = timeoutMs;
+      solverCfg.timeout_ms = opts.timeoutMs;
       solverCfg.seed = baseSeed + static_cast<std::uint32_t>(attempt * 100 + initIdx);
       solverCfg.num_threads = 1;
       solverCfg.num_smt_threads = 1;
-      solverCfg.mode = solMode;
+      solverCfg.mode = opts.solMode;
 
       SymbolicExecutor executor(prog, solverCfg, makeSolverFactory());
       SymbolicExecutor::Result res;
       try {
         res = executor.solve("@" + funcName, pathLabels);
       } catch (const std::exception &e) {
-        if (verbose)
+        if (opts.verbose)
           std::cerr << "[solver] init " << initIdx << ": exception: " << e.what() << "\n";
         res.unknown = true;
         continue;
       } catch (...) {
-        if (verbose)
+        if (opts.verbose)
           std::cerr << "[solver] init " << initIdx << ": unknown exception\n";
         res.unknown = true;
         continue;
@@ -424,7 +453,7 @@ extractParamArgs(const FuncDescriptor::Realization &rz) {
         // and is dropped from the SOLVED header so the post-rewrite
         // symiri value can take its place below.
         std::size_t crcUpdates = 0;
-        if (!noCrc32) {
+        if (!opts.noCrc32) {
           crcUpdates = rewriteExitToCrc32Checksum(prog, funcName, res.letExitValues);
         }
         bool rewriteApplied = crcUpdates > 0;
@@ -433,11 +462,11 @@ extractParamArgs(const FuncDescriptor::Realization &rz) {
 
         // Init suffix is a lowercase letter a..z so descriptor
         // consumers (rylink) can address a specific concretization by
-        // `<funcName><letter>`. nInits is clamped to [1, 26] at CLI
+        // `<funcName><letter>`. opts.nInits is clamped to [1, 26] at CLI
         // parse time, so initIdx is always in range.
         char letter = static_cast<char>('a' + initIdx);
-        std::string outName = nInits > 1 ? funcName + letter + ".sir" : funcName + ".sir";
-        auto concretePath = outDir / outName;
+        std::string outName = opts.nInits > 1 ? funcName + letter + ".sir" : funcName + ".sir";
+        auto concretePath = opts.outDir / outName;
 
         // Locate the entry function in the rewritten prog. Snapshot
         // every piece of metadata we'll need (params, syms) into
@@ -500,7 +529,7 @@ extractParamArgs(const FuncDescriptor::Realization &rz) {
         std::string crcRetValue;
         if (rewriteApplied && entry) {
           Program miniProg = buildMiniCrc32Prog(prog, funcName, res.letExitValues);
-          auto tempPath = outDir / (outName + ".oracle.tmp");
+          auto tempPath = opts.outDir / (outName + ".oracle.tmp");
           {
             std::ofstream tofs(tempPath);
             if (tofs) {
@@ -512,7 +541,7 @@ extractParamArgs(const FuncDescriptor::Realization &rz) {
           [[maybe_unused]] std::error_code ec;
           fs::remove(tempPath, ec); // best-effort; safe to leave on disk
           if (!captured) {
-            if (verbose) {
+            if (opts.verbose) {
               std::cerr << "[oracle] init " << initIdx
                         << ": symiri capture failed for the minimal "
                            "checksum oracle of "
@@ -531,7 +560,7 @@ extractParamArgs(const FuncDescriptor::Realization &rz) {
         // still needs an expected checksum for @check_chksum. The entry call
         // never returns, so the check is unreachable at runtime and any
         // literal is sound; use a random i32 so the anchor value varies.
-        if (requireNonterm && emitMain && expectedRet.empty())
+        if (opts.requireNonterm && opts.emitMain && expectedRet.empty())
           expectedRet = std::to_string(static_cast<std::int32_t>(rng()));
 
         // Now that we have the expected return value we can build a faithful
@@ -539,7 +568,7 @@ extractParamArgs(const FuncDescriptor::Realization &rz) {
         // push_back invalidates `entry`, but every read we needed
         // from it has already been snapshotted into paramVals /
         // paramValuesCaptured / symValuesCaptured above.
-        if (emitMain && entry) {
+        if (opts.emitMain && entry) {
           FunDecl mainFn = buildMainFunction(prog, *entry, paramVals, expectedRet);
           prog.funs.push_back(std::move(mainFn));
           entry = nullptr; // do not use after realloc
@@ -586,30 +615,30 @@ extractParamArgs(const FuncDescriptor::Realization &rz) {
         // The lasso header is the path's final block; the bounded-replay
         // validation asserts its state recurs after the orbit's k laps, which
         // the path spells out as k+1 arrivals at that block.
-        if (requireNonterm) {
+        if (opts.requireNonterm) {
           cf.nontermHeader = pathLabels.back();
           cf.nontermPeriod =
               static_cast<int>(std::count(pathLabels.begin(), pathLabels.end(), cf.nontermHeader)) -
               1;
         }
         produced.push_back(std::move(cf));
-        if (emitDesc) {
+        if (opts.emitDesc) {
           std::vector<FuncDescriptor::Realization> realizations;
           realizations.reserve(produced.size());
           for (const auto &x: produced)
             realizations.push_back(x.rz);
-          auto descPath = outDir / (funcName + ".json");
+          auto descPath = opts.outDir / (funcName + ".json");
           FuncDescriptor::Outcome outcome =
-              solMode == SolvingMode::RequireUB        ? FuncDescriptor::Outcome::Trap
-              : solMode == SolvingMode::RequireNonterm ? FuncDescriptor::Outcome::Diverge
-                                                       : FuncDescriptor::Outcome::Return;
+              opts.solMode == SolvingMode::RequireUB        ? FuncDescriptor::Outcome::Trap
+              : opts.solMode == SolvingMode::RequireNonterm ? FuncDescriptor::Outcome::Diverge
+                                                            : FuncDescriptor::Outcome::Return;
           writeFuncDescriptorFromProgram(
-              descPath, funcName, prog, pathLabels, realizations, genId, outcome
+              descPath, funcName, prog, pathLabels, realizations, opts.genId, outcome
           );
         }
-        if (verbose)
+        if (opts.verbose)
           std::cout << "[emit] init " << initIdx << ": " << concretePath << "\n";
-      } else if (verbose) {
+      } else if (opts.verbose) {
         std::cerr << "[solver] init " << initIdx << ": " << (res.unsat ? "UNSAT" : "UNKNOWN")
                   << "\n";
       }
@@ -618,7 +647,7 @@ extractParamArgs(const FuncDescriptor::Realization &rz) {
     if (!produced.empty())
       return GenerateResult{std::move(produced)};
 
-    if (verbose)
+    if (opts.verbose)
       std::cerr << "[solver] attempt=" << attempt << ": all inits failed, retrying\n";
   }
 
@@ -961,6 +990,40 @@ int main(int argc, char **argv) {
   // compiled program downstream — so abort rather than silently emit
   // bad oracles. --validate's symiri usage rides on the same binary.
   // ---- Main loop -----------------------------------------------------------
+  LeafGenConfig leafCfg;
+  leafCfg.nBbls = nBbls;
+  leafCfg.pBranch = pBranch;
+  leafCfg.pBackedge = pBackedge;
+  leafCfg.requireReducible = requireReducible;
+  leafCfg.maxLoopIter = maxLoopIter;
+  leafCfg.minLoopIter = minLoopIter;
+  leafCfg.nStmts = nStmts;
+  leafCfg.offPathMultiplier = offPathMultiplier;
+  leafCfg.enableInterestCoefs = enableInterestCoefs;
+  leafCfg.pLargeCoef = pLargeCoef;
+  leafCfg.largeCoefThreshold = largeCoefThreshold;
+  leafCfg.coefLo = coefLo;
+  leafCfg.coefHi = coefHi;
+  leafCfg.valueLo = valueLo;
+  leafCfg.valueHi = valueHi;
+  leafCfg.indexLo = indexLo;
+  leafCfg.indexHi = indexHi;
+  leafCfg.exprCfg = exprCfg;
+  leafCfg.enableIntrinsics = enableIntrinsics;
+  leafCfg.timeoutMs = timeoutMs;
+  leafCfg.solMode = solMode;
+  leafCfg.maxRetries = maxRetries;
+  leafCfg.nInits = nInits;
+  leafCfg.outDir = outDir;
+  leafCfg.keepSymbolic = keepSymbolic;
+  leafCfg.verbose = verbose;
+  leafCfg.emitDesc = emitDesc;
+  leafCfg.emitMain = emitMain;
+  leafCfg.noCrc32 = noCrc32;
+  leafCfg.genId = genId;
+  leafCfg.requireNonterm = requireNonterm;
+  leafCfg.maxLassoPeriod = maxLassoPeriod;
+
   auto wallStart = std::chrono::steady_clock::now();
   int nOk = 0, nFail = 0;
 
@@ -989,13 +1052,7 @@ int main(int argc, char **argv) {
     fnVarCfg.funcIdx = i;
 
     std::thread t([&, state]() {
-      state->result = generateLeaf(
-          nBbls, pBranch, pBackedge, requireReducible, maxLoopIter, minLoopIter, fnVarCfg, funcName,
-          nStmts, offPathMultiplier, enableInterestCoefs, pLargeCoef, largeCoefThreshold, coefLo,
-          coefHi, valueLo, valueHi, indexLo, indexHi, exprCfg, enableIntrinsics, timeoutMs, solMode,
-          maxRetries, nInits, outDir, keepSymbolic, verbose, state->rng, funcSeed, genId, emitDesc,
-          emitMain, noCrc32, requireNonterm, maxLassoPeriod
-      );
+      state->result = generateLeaf(leafCfg, fnVarCfg, funcName, state->rng, funcSeed);
       state->done.store(true, std::memory_order_release);
     });
 
@@ -1041,9 +1098,14 @@ int main(int argc, char **argv) {
                           reify::pickStructuredLowering(rng, structuredLoweringOpt);
         if (verbose && structured)
           std::cout << "  structured-lowering: true\n";
-        bool ok = compileSirInProcess(
-            p, target, outPath, !noRequire, noUbGuards, vecLowering, structured, emitMain, verbose
-        );
+        reify::EmitOptions emitOpts;
+        emitOpts.keepRequire = !noRequire;
+        emitOpts.noUbGuards = noUbGuards;
+        emitOpts.vecLowering = vecLowering;
+        emitOpts.structuredLowering = structured;
+        emitOpts.emitMain = emitMain;
+        emitOpts.verbose = verbose;
+        bool ok = compileSirInProcess(p, target, outPath, emitOpts);
         if (ok)
           std::cout << "  compiled: " << outPath << "\n";
         else
