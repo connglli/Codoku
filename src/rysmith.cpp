@@ -27,17 +27,13 @@
 #include <utility>
 #include <vector>
 
-#include "analysis/pass_manager.hpp"
 #include "ast/sir_printer.hpp"
 #include "backend/py_vec_lowering.hpp"
 #include "backend/wasm_vec_lowering.hpp"
 #include "cxxopts.hpp"
 #include "error.hpp"
 #include "frontend/diagnostics.hpp"
-#include "frontend/lexer.hpp"
-#include "frontend/parser.hpp"
-#include "frontend/semchecker.hpp"
-#include "frontend/typechecker.hpp"
+#include "frontend/pipeline.hpp"
 #include "interp/interpreter.hpp"
 #include "reify/cfg_gen.hpp"
 #include "reify/checksum.hpp"
@@ -112,10 +108,7 @@ using namespace refractir::reify;
   ss << ifs.rdbuf();
   std::string src = ss.str();
   try {
-    Lexer lx(src);
-    auto toks = lx.lexAll();
-    Parser ps(std::move(toks));
-    Program prog = ps.parseProgram();
+    Program prog = parseSource(src);
 
     if (!runAnalysisPasses(prog, /*verbose=*/false))
       return false;
@@ -411,12 +404,14 @@ static void writePathHeader(
           std::cout << "  symbolic: " << symPath << "\n";
       }
 
-      // Validate AST
+      // Validate the still-symbolic AST before handing it to the solver.
+      // The module-level checks decide this: the per-function analyses only
+      // warn here, and a symbol the generator declared but did not place is
+      // an unused name they would report on every attempt.
       DiagBag diags;
-      PassManager pm(diags);
-      pm.addModulePass(std::make_unique<SemChecker>());
-      pm.addModulePass(std::make_unique<TypeChecker>());
-      if (pm.run(prog) == PassResult::Error) {
+      CheckOptions checkOpts;
+      checkOpts.functionAnalyses = false;
+      if (!checkProgram(prog, diags, checkOpts)) {
         if (opts.verbose) {
           std::cerr << "[validate] init " << initIdx << ": generated program failed validation\n";
           for (const auto &d: diags.diags)

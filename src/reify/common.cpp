@@ -16,12 +16,8 @@
 #include <unordered_map>
 #include <vector>
 
-#include "analysis/definite_init.hpp"
 #include "analysis/dominators.hpp"
-#include "analysis/pass_manager.hpp"
-#include "analysis/reachability.hpp"
 #include "analysis/reducibility.hpp"
-#include "analysis/unused_name.hpp"
 #include "ast/sir_printer.hpp"
 #include "backend/c_backend.hpp"
 #include "backend/c_vec_lowering.hpp"
@@ -29,10 +25,7 @@
 #include "backend/wasm_backend.hpp"
 #include "error.hpp"
 #include "frontend/diagnostics.hpp"
-#include "frontend/lexer.hpp"
-#include "frontend/parser.hpp"
-#include "frontend/semchecker.hpp"
-#include "frontend/typechecker.hpp"
+#include "frontend/pipeline.hpp"
 #include "interp/interpreter.hpp"
 #include "reify/ast_builder.hpp"
 #include "reify/state_profile.hpp"
@@ -172,22 +165,15 @@ namespace refractir::reify {
 
   bool runAnalysisPasses(Program &prog, bool verbose) {
     DiagBag diags;
-    PassManager pm(diags);
-    pm.addModulePass(std::make_unique<SemChecker>());
-    pm.addModulePass(std::make_unique<TypeChecker>());
-    pm.addFunctionPass(std::make_unique<ReachabilityAnalysis>());
-    pm.addFunctionPass(std::make_unique<DefiniteInitAnalysis>());
-    pm.addFunctionPass(std::make_unique<UnusedNameAnalysis>());
-    if (pm.run(prog) == PassResult::Error) {
-      if (verbose) {
-        std::cerr << "reify: analysis passes failed:\n";
-        for (const auto &d: diags.diags)
-          if (d.level == DiagLevel::Error)
-            std::cerr << "  error: " << d.message << "\n";
-      }
-      return false;
+    if (checkProgram(prog, diags))
+      return true;
+    if (verbose) {
+      std::cerr << "reify: analysis passes failed:\n";
+      for (const auto &d: diags.diags)
+        if (d.level == DiagLevel::Error)
+          std::cerr << "  error: " << d.message << "\n";
     }
-    return true;
+    return false;
   }
 
   std::optional<std::string> runSymiriCaptureResult(
@@ -195,13 +181,7 @@ namespace refractir::reify {
       const std::vector<std::string> &paramArgs, StateProfile *outProfile, StateGranularity gran
   ) {
     try {
-      // Keep the source alive for the whole block: Lexer holds a
-      // string_view into it.
-      std::string src = readFile(sirPath);
-      Lexer lx(src);
-      auto toks = lx.lexAll();
-      Parser ps(std::move(toks));
-      Program prog = ps.parseProgram();
+      Program prog = parseSource(readFile(sirPath));
 
       // Run semantics/type check passes first to ensure it's valid
       if (!runAnalysisPasses(prog, /*verbose=*/false))
@@ -251,13 +231,7 @@ namespace refractir::reify {
     if (headerLabel.empty())
       return false;
     try {
-      // Keep the source alive for the whole block: Lexer holds a
-      // string_view into it.
-      std::string src = readFile(sirPath);
-      Lexer lx(src);
-      auto toks = lx.lexAll();
-      Parser ps(std::move(toks));
-      Program prog = ps.parseProgram();
+      Program prog = parseSource(readFile(sirPath));
       if (!runAnalysisPasses(prog, /*verbose=*/false))
         return false;
       std::string canonical = funcName.empty() || funcName[0] == '@' ? funcName : "@" + funcName;
@@ -321,13 +295,7 @@ namespace refractir::reify {
       const std::vector<std::string> &paramArgs
   ) {
     try {
-      // Keep the source alive for the whole block: Lexer holds a
-      // string_view into it.
-      std::string src = readFile(sirPath);
-      Lexer lx(src);
-      auto toks = lx.lexAll();
-      Parser ps(std::move(toks));
-      Program prog = ps.parseProgram();
+      Program prog = parseSource(readFile(sirPath));
       if (!runAnalysisPasses(prog, /*verbose=*/false))
         return false;
       std::string canonical = funcName.empty() || funcName[0] == '@' ? funcName : "@" + funcName;
@@ -477,9 +445,8 @@ namespace refractir::reify {
       const fs::path &sirPath, const std::string &target, const fs::path &outPath,
       const EmitOptions &opts
   ) {
-    // Keep the source alive past the try block: Lexer holds a string_view
-    // into it. Read it separately so a missing file keeps its own message
-    // rather than surfacing as a compilation exception.
+    // Read separately so a missing file keeps its own message rather than
+    // surfacing as a compilation exception.
     std::string src;
     try {
       src = readFile(sirPath);
@@ -490,10 +457,7 @@ namespace refractir::reify {
     }
 
     try {
-      Lexer lx(src);
-      auto toks = lx.lexAll();
-      Parser ps(std::move(toks));
-      Program prog = ps.parseProgram();
+      Program prog = parseSource(src);
 
       if (target == "c") {
         // This path emits one file, whatever the caller asked for.

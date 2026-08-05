@@ -5,8 +5,7 @@
 
 #include "analysis/type_utils.hpp"
 #include "ast/sir_printer.hpp"
-#include "frontend/lexer.hpp"
-#include "frontend/parser.hpp"
+#include "frontend/pipeline.hpp"
 #include "reify/common.hpp"
 #include "reify/type_gen.hpp"
 
@@ -36,10 +35,7 @@ namespace refractir::reify {
     Program duplicate(const Program &prog) {
       std::ostringstream oss;
       SIRPrinter(oss).print(prog);
-      std::string txt = oss.str();
-      Lexer lx(txt);
-      Parser ps(lx.lexAll());
-      return ps.parseProgram();
+      return parseSource(oss.str());
     }
 
     // The `ret` value of a landing block. Never observed — the effect is

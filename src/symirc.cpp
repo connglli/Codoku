@@ -4,15 +4,10 @@
 #include <sstream>
 #include <string>
 
-#include "analysis/definite_init.hpp"
 #include "analysis/dominators.hpp"
 #include "analysis/loop_info.hpp"
-#include "analysis/pass_manager.hpp"
-#include "analysis/reachability.hpp"
-#include "analysis/reducibility.hpp"
 #include "analysis/structured_lowering.hpp"
 #include "analysis/structurizer.hpp"
-#include "analysis/unused_name.hpp"
 #include "ast/ast_dumper.hpp"
 #include "backend/c_backend.hpp"
 #include "backend/py_backend.hpp"
@@ -20,11 +15,8 @@
 #include "backend/wasm_vec_lowering.hpp"
 #include "cxxopts.hpp"
 #include "error.hpp"
-#include "frontend/lexer.hpp"
 #include "frontend/link_resolver.hpp"
-#include "frontend/parser.hpp"
-#include "frontend/semchecker.hpp"
-#include "frontend/typechecker.hpp"
+#include "frontend/pipeline.hpp"
 
 int main(int argc, char **argv) {
   using namespace refractir;
@@ -81,10 +73,7 @@ int main(int argc, char **argv) {
 
   try {
     // 1. Frontend
-    Lexer lx(src);
-    auto toks = lx.lexAll();
-    Parser ps(std::move(toks));
-    Program prog = ps.parseProgram();
+    Program prog = parseSource(src);
 
     // 1b. -I link-form resolution.
     std::vector<Program> libs;
@@ -102,26 +91,21 @@ int main(int argc, char **argv) {
     std::string target = result["target"].as<std::string>();
 
     // 2. Analysis
-    DiagBag diags;
-    refractir::PassManager pm(diags);
-    pm.addModulePass(std::make_unique<SemChecker>());
-    pm.addModulePass(std::make_unique<TypeChecker>());
-    pm.addFunctionPass(std::make_unique<ReachabilityAnalysis>());
-    pm.addFunctionPass(std::make_unique<DefiniteInitAnalysis>());
-    pm.addFunctionPass(std::make_unique<UnusedNameAnalysis>());
+    CheckOptions checkOpts;
     // The structurizer is only total on reducible CFGs, so the
     // control-tree dump flags, --structured-lowering, and the python
     // target (which has no goto to fall back on) imply the check.
-    if (result["require-reducible"].as<bool>() || result["structured-lowering"].as<bool>() ||
-        result["dump-control-tree"].as<bool>() || result["dump-lowered-tree"].as<bool>() ||
-        target == "python") {
-      pm.addFunctionPass(std::make_unique<ReducibilityCheck>());
-    }
+    checkOpts.reducibility = result["require-reducible"].as<bool>() ||
+                             result["structured-lowering"].as<bool>() ||
+                             result["dump-control-tree"].as<bool>() ||
+                             result["dump-lowered-tree"].as<bool>() || target == "python";
+    checkOpts.warningsAreErrors = result["Werror"].as<bool>();
 
-    bool werror = result["Werror"].as<bool>();
+    bool werror = checkOpts.warningsAreErrors;
     bool nowarn = result["w"].as<bool>();
 
-    if (pm.run(prog) == refractir::PassResult::Error || (werror && diags.hasWarnings())) {
+    DiagBag diags;
+    if (!checkProgram(prog, diags, checkOpts)) {
       std::cerr << "Errors:\n";
       for (const auto &d: diags.diags) {
         // Notes only ever accompany errors (e.g. ReducibilityCheck points

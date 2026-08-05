@@ -46,10 +46,7 @@
 #include "backend/wasm_vec_lowering.hpp"
 #include "cxxopts.hpp"
 #include "frontend/diagnostics.hpp"
-#include "frontend/lexer.hpp"
-#include "frontend/parser.hpp"
-#include "frontend/semchecker.hpp"
-#include "frontend/typechecker.hpp"
+#include "frontend/pipeline.hpp"
 #include "reify/antiopt_transform.hpp"
 #include "reify/call_realize.hpp"
 #include "reify/cg_gen.hpp"
@@ -75,11 +72,7 @@ using namespace refractir::reify;
 // these files itself and they're trusted well-formed.
 [[nodiscard]] static std::optional<Program> parseSir(const fs::path &p) {
   try {
-    std::string src = readFile(p);
-    Lexer lx(src);
-    auto toks = lx.lexAll();
-    Parser ps(std::move(toks));
-    return ps.parseProgram();
+    return parseSource(readFile(p));
   } catch (const std::exception &e) {
     std::cerr << "rylink: parse failed for " << p << ": " << e.what() << "\n";
     return std::nullopt;

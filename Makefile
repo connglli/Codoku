@@ -48,7 +48,7 @@ else
 endif
 
 COMMON_SRCS = src/frontend/lexer.cpp src/frontend/parser.cpp src/frontend/ast_dumper.cpp \
-              src/frontend/sir_printer.cpp src/ast/clone.cpp \
+              src/frontend/sir_printer.cpp src/frontend/pipeline.cpp src/ast/clone.cpp \
               src/analysis/cfgbuilder.cpp src/analysis/definite_init.cpp \
               src/analysis/dominators.cpp src/analysis/reducibility.cpp \
               src/analysis/loop_info.cpp src/analysis/structurizer.cpp \

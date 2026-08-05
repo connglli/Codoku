@@ -5,17 +5,10 @@
 #include <vector>
 
 #include "analysis/cfg.hpp"
-#include "analysis/definite_init.hpp"
-#include "analysis/pass_manager.hpp"
-#include "analysis/reachability.hpp"
-#include "analysis/unused_name.hpp"
 #include "cxxopts.hpp"
 #include "error.hpp"
-#include "frontend/lexer.hpp"
 #include "frontend/link_resolver.hpp"
-#include "frontend/parser.hpp"
-#include "frontend/semchecker.hpp"
-#include "frontend/typechecker.hpp"
+#include "frontend/pipeline.hpp"
 #include "interp/interpreter.hpp"
 
 int main(int argc, char **argv) {
@@ -111,10 +104,7 @@ int main(int argc, char **argv) {
 
   try {
     // 1. Frontend: Lex & Parse
-    Lexer lx(src);
-    auto toks = lx.lexAll();
-    Parser ps(std::move(toks));
-    Program prog = ps.parseProgram();
+    Program prog = parseSource(src);
 
     // 1b. Load -I libraries and resolve link-form `decl`s.
     std::vector<Program> libs;
@@ -123,19 +113,15 @@ int main(int argc, char **argv) {
     }
     resolveLinkDecls(prog, libs);
 
-    // 2. Analysis: Pass Manager orchestration
-    DiagBag diags;
-    refractir::PassManager pm(diags);
-    pm.addModulePass(std::make_unique<SemChecker>());
-    pm.addModulePass(std::make_unique<TypeChecker>());
-    pm.addFunctionPass(std::make_unique<ReachabilityAnalysis>());
-    pm.addFunctionPass(std::make_unique<DefiniteInitAnalysis>());
-    pm.addFunctionPass(std::make_unique<UnusedNameAnalysis>());
+    // 2. Analysis
+    CheckOptions checkOpts;
+    checkOpts.warningsAreErrors = result["Werror"].as<bool>();
 
-    bool werror = result["Werror"].as<bool>();
+    bool werror = checkOpts.warningsAreErrors;
     bool nowarn = result["w"].as<bool>();
 
-    if (pm.run(prog) == refractir::PassResult::Error || (werror && diags.hasWarnings())) {
+    DiagBag diags;
+    if (!checkProgram(prog, diags, checkOpts)) {
       std::cerr << "Errors:\n";
       for (const auto &d: diags.diags) {
         if (d.level == DiagLevel::Error || (werror && d.level == DiagLevel::Warning)) {

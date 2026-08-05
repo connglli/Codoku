@@ -19,8 +19,7 @@
 #include <unordered_set>
 #include <vector>
 
-#include "frontend/lexer.hpp"
-#include "frontend/parser.hpp"
+#include "frontend/pipeline.hpp"
 #include "internal.hpp"
 #include "reify/common.hpp"
 #include "reify/twin_probe.hpp"
@@ -51,9 +50,7 @@ namespace refractir::reify {
     }
 
     std::optional<Program> parseHarness(const std::string &src) {
-      Lexer lx(src);
-      Parser ps(lx.lexAll());
-      Program prog = ps.parseProgram();
+      Program prog = parseSource(src);
       if (prog.funs.empty() || prog.funs.front().blocks.empty())
         return std::nullopt;
       // The checkers, so the example is a program and not merely text — and so

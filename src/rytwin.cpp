@@ -32,8 +32,7 @@
 #include "backend/wasm_vec_lowering.hpp"
 #include "cxxopts.hpp"
 #include "error.hpp"
-#include "frontend/lexer.hpp"
-#include "frontend/parser.hpp"
+#include "frontend/pipeline.hpp"
 #include "reify/antiopt.hpp"
 #include "reify/common.hpp"
 #include "reify/func_desc.hpp"
@@ -236,15 +235,13 @@ int main(int argc, char **argv) {
     return 2;
   }
 
-  // 1. Load p1. Keep the source alive: Lexer holds a std::string_view into
-  // it, so a temporary would dangle.
+  // 1. Load p1. The source text is kept past the parse for its `// SOLVED:`
+  // header, which supplies the entry's input when no descriptor does.
   Program prog;
   std::string src;
   try {
     src = readFile(inputPath);
-    Lexer lx(src);
-    Parser ps(lx.lexAll());
-    prog = ps.parseProgram();
+    prog = parseSource(src);
   } catch (const std::exception &e) {
     std::cerr << "rytwin: failed to parse " << inputPath << ": " << e.what() << "\n";
     return 1;

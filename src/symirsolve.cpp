@@ -9,11 +9,8 @@
 #include "ast/sir_printer.hpp"
 #include "cxxopts.hpp"
 #include "error.hpp"
-#include "frontend/lexer.hpp"
 #include "frontend/link_resolver.hpp"
-#include "frontend/parser.hpp"
-#include "frontend/semchecker.hpp"
-#include "frontend/typechecker.hpp"
+#include "frontend/pipeline.hpp"
 #include "solver/solver.hpp"
 #if defined(USE_ALIVESMT)
 #include "solver/alive_impl.hpp"
@@ -105,10 +102,7 @@ int main(int argc, char **argv) {
   std::string src = ss.str();
 
   try {
-    Lexer lx(src);
-    auto toks = lx.lexAll();
-    Parser ps(std::move(toks));
-    Program prog = ps.parseProgram();
+    Program prog = parseSource(src);
 
     // -I link-form resolution.
     std::vector<Program> libs;
@@ -117,11 +111,14 @@ int main(int argc, char **argv) {
     }
     resolveLinkDecls(prog, libs);
 
+    // The symbolic executor needs a well-typed program, not a tidy one: it
+    // explores one path at a time, so an unreachable block is never visited
+    // and an uninitialized read is caught as UB along the path that makes it.
+    CheckOptions checkOpts;
+    checkOpts.functionAnalyses = false;
+
     DiagBag diags;
-    PassManager pm(diags);
-    pm.addModulePass(std::make_unique<SemChecker>());
-    pm.addModulePass(std::make_unique<TypeChecker>());
-    if (pm.run(prog) == PassResult::Error) {
+    if (!checkProgram(prog, diags, checkOpts)) {
       std::cerr << "Errors in input program:" << std::endl;
       for (const auto &d: diags.diags) {
         if (d.level == DiagLevel::Error)
