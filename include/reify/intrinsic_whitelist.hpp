@@ -1,11 +1,29 @@
 #pragma once
 
+#include <compare>
+#include <cstdint>
 #include <set>
 #include <vector>
 #include "analysis/intrinsics.hpp"
+#include "analysis/type_utils.hpp"
 #include "ast/ast.hpp"
 
 namespace refractir::reify {
+
+  // Key for tracking which intrinsic instantiations have been used, so
+  // genFunction can emit one IntrinsicDecl per distinct signature. Scalar
+  // intrinsics vary only by element width; the horizontal-reduction family
+  // (§12.4) is additionally parameterised by lane count and element domain,
+  // because `@reduce_add(<4> i32) : i32` and `@reduce_add(<8> f64) : f64`
+  // are distinct overloads that each need their own declaration.
+  struct IntrinsicUseKey {
+    IntrinsicKind kind;
+    std::uint32_t elemBits; // scalar element width (32 for i32/f32, 64 for i64/f64)
+    bool elemIsFloat;       // element domain: false = iN, true = fN
+    std::uint32_t lanes;    // 0 = scalar intrinsic; N = reduce over <N> T
+
+    auto operator<=>(const IntrinsicUseKey &) const = default;
+  };
 
   /**
    * The curated set of intrinsic kinds rysmith is allowed to generate as
@@ -63,6 +81,45 @@ namespace refractir::reify {
         K::ReduceXor,
     };
     return list;
+  }
+
+  // Declare `name` in `prog.intrinsics` unless that exact signature is already
+  // there. Idempotent, so a caller may re-declare on every emission without
+  // checking first.
+  //
+  // Signature identity is the whole signature, return type and parameter types
+  // included, not just the name: RefractIR admits overloaded intrinsics, and
+  // the generators use them (`@popcount` is emitted at both i32 and i64), so
+  // matching on name alone would drop the second width on the floor.
+  inline void ensureIntrinsicDecl(
+      Program &prog, const std::string &name, TypePtr retType,
+      const std::vector<std::pair<std::string, TypePtr>> &params
+  ) {
+    for (const auto &id: prog.intrinsics) {
+      if (id.name.name != name || id.params.size() != params.size())
+        continue;
+      if (!TypeUtils::areTypesEqual(id.retType, retType))
+        continue;
+      bool sameParams = true;
+      for (std::size_t i = 0; i < params.size(); ++i) {
+        if (!TypeUtils::areTypesEqual(id.params[i].type, params[i].second)) {
+          sameParams = false;
+          break;
+        }
+      }
+      if (sameParams)
+        return;
+    }
+    IntrinsicDecl decl;
+    decl.name = GlobalId{name, {}};
+    decl.retType = std::move(retType);
+    for (const auto &[pName, pType]: params) {
+      ParamDecl pd;
+      pd.name = LocalId{pName, {}};
+      pd.type = pType;
+      decl.params.push_back(std::move(pd));
+    }
+    prog.intrinsics.push_back(std::move(decl));
   }
 
   // Append one IntrinsicDecl per used instantiation. This is the single

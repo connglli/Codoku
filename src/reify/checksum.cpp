@@ -1,5 +1,6 @@
 #include "reify/checksum.hpp"
-#include "reify/ast_builder.hpp"
+#include "ast/build.hpp"
+#include "reify/intrinsic_whitelist.hpp"
 
 #include "analysis/type_utils.hpp"
 
@@ -48,16 +49,12 @@ namespace refractir::reify {
 
   namespace {
 
-    // Build a single-atom Expr — used to wrap the state/val operands as
-    // Expr arguments to the @crc32_update call.
-    Expr atomToExpr(Atom a) { return Expr{std::move(a), {}, {}}; }
-
     // Build an Expr that reads `%_chk`. Both the state arg of @crc32_update
     // and the LHS-side `%_chk = ...` reference the same accumulator local.
     Expr chkReadExpr() {
       LValue lv = LValue{LocalId{"%_chk", {}}, {}, {}};
-      Atom a = Atom{RValueAtom{std::move(lv), {}}, {}};
-      return atomToExpr(std::move(a));
+      Atom a = buildRValAtom(std::move(lv));
+      return buildExpr(std::move(a));
     }
 
     // True when `a` is `RValueAtom(%_chk)` with no accesses — the marker we
@@ -95,7 +92,7 @@ namespace refractir::reify {
     // matching signature is already present.
     void ensureCrc32UpdateDecl(Program &prog) {
       ensureIntrinsicDecl(
-          prog, "@crc32_update", makeI32(), {{"%state", makeI32()}, {"%val", makeI32()}}
+          prog, "@crc32_update", buildI32(), {{"%state", buildI32()}, {"%val", buildI32()}}
       );
     }
 
@@ -190,8 +187,8 @@ namespace refractir::reify {
       CallAtom ca;
       ca.callee = GlobalId{"@crc32_update", {}};
       ca.args.push_back(std::make_shared<Expr>(chkReadExpr()));
-      ca.args.push_back(std::make_shared<Expr>(atomToExpr(std::move(*addendPtr))));
-      ai->rhs = atomToExpr(Atom{std::move(ca), {}});
+      ca.args.push_back(std::make_shared<Expr>(buildExpr(std::move(*addendPtr))));
+      ai->rhs = buildExpr(Atom{std::move(ca), {}});
       ++updates;
     }
 
@@ -254,23 +251,23 @@ namespace refractir::reify {
           la.rval = std::move(pLV);
           AssignInstr load;
           load.lhs = LValue{LocalId{slotName, {}}, {}, {}};
-          load.rhs = atomToExpr(Atom{std::move(la), {}});
+          load.rhs = buildExpr(Atom{std::move(la), {}});
           exit->instrs.push_back(Instr{std::move(load)});
         }
         // valAtom = (%_pld_n as i32)
         CastAtom cast;
         cast.src = LValue{LocalId{slotName, {}}, {}, {}};
-        cast.dstType = makeI32();
+        cast.dstType = buildI32();
         valAtom = Atom{std::move(cast), {}};
       }
       // %_chk = call @crc32_update(%_chk, valAtom);
       CallAtom call;
       call.callee = GlobalId{"@crc32_update", {}};
       call.args.push_back(std::make_shared<Expr>(chkReadExpr()));
-      call.args.push_back(std::make_shared<Expr>(atomToExpr(std::move(valAtom))));
+      call.args.push_back(std::make_shared<Expr>(buildExpr(std::move(valAtom))));
       AssignInstr chkUpd;
-      chkUpd.lhs = localLV("%_chk");
-      chkUpd.rhs = atomToExpr(Atom{std::move(call), {}});
+      chkUpd.lhs = buildLValue("%_chk");
+      chkUpd.rhs = buildExpr(Atom{std::move(call), {}});
       exit->instrs.push_back(Instr{std::move(chkUpd)});
       ++updates;
     }
@@ -416,7 +413,7 @@ namespace refractir::reify {
 
     FunDecl mini;
     mini.name = GlobalId{"@minimal_" + funcName, {}};
-    mini.retType = makeI32();
+    mini.retType = buildI32();
     mini.params = entry->params;
 
     // Lets: same declarations, but scalar / aggregate inits rewritten
@@ -525,7 +522,7 @@ namespace refractir::reify {
         continue; // truly unresolvable — leave %p undef
       AssignInstr ai;
       ai.lhs = LValue{LocalId{letd.name.name, {}}, {}, {}};
-      ai.rhs = Expr{Atom{AddrAtom{std::move(addrSrc), {}}, {}}, {}, {}};
+      ai.rhs = buildAddrExpr(std::move(addrSrc));
       entryBlk.instrs.push_back(Instr{std::move(ai)});
     }
     BrTerm br;

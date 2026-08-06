@@ -86,7 +86,7 @@ namespace refractir::reify::antiopt {
       if (!ty || !intRange(ty))
         return std::nullopt;
       const std::string t = ctx.names.fresh(ty, ctx.lets);
-      out.push_back(assignInstr(localLV(t), simpleExpr(notAtom(x))));
+      out.push_back(buildAssign(buildLValue(t), buildExpr(buildNotAtom(x))));
       return t;
     }
 
@@ -94,16 +94,16 @@ namespace refractir::reify::antiopt {
 
     // B1  x ^ y  ==  (x | y) - (x & y)
     std::vector<Instr> emitXorAsOrSubAnd(const Operands &o, AntiOptContext &) {
-      Expr e = simpleExpr(binAtom(o.x, AtomOpKind::Or, o.y));
-      addTail(e, AddOp::Minus, binAtom(o.x, AtomOpKind::And, o.y));
-      return list(assignInstr(localLV(o.d), std::move(e)));
+      Expr e = buildExpr(buildBinAtom(o.x, AtomOpKind::Or, o.y));
+      appendTail(e, AddOp::Minus, buildBinAtom(o.x, AtomOpKind::And, o.y));
+      return list(buildAssign(buildLValue(o.d), std::move(e)));
     }
 
     // B2  x | y  ==  (x ^ y) + (x & y)
     std::vector<Instr> emitOrAsXorAddAnd(const Operands &o, AntiOptContext &) {
-      Expr e = simpleExpr(binAtom(o.x, AtomOpKind::Xor, o.y));
-      addTail(e, AddOp::Plus, binAtom(o.x, AtomOpKind::And, o.y));
-      return list(assignInstr(localLV(o.d), std::move(e)));
+      Expr e = buildExpr(buildBinAtom(o.x, AtomOpKind::Xor, o.y));
+      appendTail(e, AddOp::Plus, buildBinAtom(o.x, AtomOpKind::And, o.y));
+      return list(buildAssign(buildLValue(o.d), std::move(e)));
     }
 
     // B4  x + y  ==  (x ^ y) + 2 * (x & y)
@@ -112,11 +112,11 @@ namespace refractir::reify::antiopt {
       if (!ty || !intRange(ty))
         return {};
       const std::string t = ctx.names.fresh(ty, ctx.lets);
-      Expr e = simpleExpr(binAtom(o.x, AtomOpKind::Xor, o.y));
-      addTail(e, AddOp::Plus, opAtom(Coef{IntLit{2, {}}}, AtomOpKind::Mul, t));
+      Expr e = buildExpr(buildBinAtom(o.x, AtomOpKind::Xor, o.y));
+      appendTail(e, AddOp::Plus, buildOpAtom(Coef{IntLit{2, {}}}, AtomOpKind::Mul, t));
       return list(
-          assignInstr(localLV(t), opExpr(o.x, AtomOpKind::And, o.y)),
-          assignInstr(localLV(o.d), std::move(e))
+          buildAssign(buildLValue(t), buildOpExpr(o.x, AtomOpKind::And, o.y)),
+          buildAssign(buildLValue(o.d), std::move(e))
       );
     }
 
@@ -126,17 +126,17 @@ namespace refractir::reify::antiopt {
       auto ny = complementOf(o.y, ctx, out);
       if (!ny)
         return {};
-      Expr e = simpleExpr(localAtom(o.x));
-      addTail(e, AddOp::Minus, binAtom(o.x, AtomOpKind::And, *ny));
-      out.push_back(assignInstr(localLV(o.d), std::move(e)));
+      Expr e = buildExpr(buildLocalAtom(o.x));
+      appendTail(e, AddOp::Minus, buildBinAtom(o.x, AtomOpKind::And, *ny));
+      out.push_back(buildAssign(buildLValue(o.d), std::move(e)));
       return out;
     }
 
     // B7  x & y  ==  (x | y) - (x ^ y)
     std::vector<Instr> emitAndAsOrSubXor(const Operands &o, AntiOptContext &) {
-      Expr e = simpleExpr(binAtom(o.x, AtomOpKind::Or, o.y));
-      addTail(e, AddOp::Minus, binAtom(o.x, AtomOpKind::Xor, o.y));
-      return list(assignInstr(localLV(o.d), std::move(e)));
+      Expr e = buildExpr(buildBinAtom(o.x, AtomOpKind::Or, o.y));
+      appendTail(e, AddOp::Minus, buildBinAtom(o.x, AtomOpKind::Xor, o.y));
+      return list(buildAssign(buildLValue(o.d), std::move(e)));
     }
 
     // B6  x | y  ==  x + y - (x & y)
@@ -145,12 +145,12 @@ namespace refractir::reify::antiopt {
       if (!ty || !intRange(ty))
         return {};
       const std::string t = ctx.names.fresh(ty, ctx.lets);
-      Expr e = simpleExpr(localAtom(o.x));
-      addTail(e, AddOp::Plus, localAtom(o.y));
-      addTail(e, AddOp::Minus, localAtom(t));
+      Expr e = buildExpr(buildLocalAtom(o.x));
+      appendTail(e, AddOp::Plus, buildLocalAtom(o.y));
+      appendTail(e, AddOp::Minus, buildLocalAtom(t));
       return list(
-          assignInstr(localLV(t), opExpr(o.x, AtomOpKind::And, o.y)),
-          assignInstr(localLV(o.d), std::move(e))
+          buildAssign(buildLValue(t), buildOpExpr(o.x, AtomOpKind::And, o.y)),
+          buildAssign(buildLValue(o.d), std::move(e))
       );
     }
 
@@ -162,10 +162,10 @@ namespace refractir::reify::antiopt {
         return {};
       TypePtr ty = typeOf(ctx, o.y);
       const std::string borrow = ctx.names.fresh(ty, ctx.lets);
-      out.push_back(assignInstr(localLV(borrow), opExpr(*nx, AtomOpKind::And, o.y)));
-      Expr e = simpleExpr(binAtom(o.x, AtomOpKind::Xor, o.y));
-      addTail(e, AddOp::Minus, opAtom(Coef{IntLit{2, {}}}, AtomOpKind::Mul, borrow));
-      out.push_back(assignInstr(localLV(o.d), std::move(e)));
+      out.push_back(buildAssign(buildLValue(borrow), buildOpExpr(*nx, AtomOpKind::And, o.y)));
+      Expr e = buildExpr(buildBinAtom(o.x, AtomOpKind::Xor, o.y));
+      appendTail(e, AddOp::Minus, buildOpAtom(Coef{IntLit{2, {}}}, AtomOpKind::Mul, borrow));
+      out.push_back(buildAssign(buildLValue(o.d), std::move(e)));
       return out;
     }
 
@@ -175,13 +175,14 @@ namespace refractir::reify::antiopt {
       if (!ty || !intRange(ty))
         return {};
       const std::string both = ctx.names.fresh(ty, ctx.lets);
-      std::vector<Instr> out = list(assignInstr(localLV(both), opExpr(o.x, AtomOpKind::And, o.y)));
+      std::vector<Instr> out =
+          list(buildAssign(buildLValue(both), buildOpExpr(o.x, AtomOpKind::And, o.y)));
       auto nboth = complementOf(both, ctx, out);
       if (!nboth)
         return {};
       const std::string either = ctx.names.fresh(ty, ctx.lets);
-      out.push_back(assignInstr(localLV(either), opExpr(o.x, AtomOpKind::Or, o.y)));
-      out.push_back(assignInstr(localLV(o.d), opExpr(either, AtomOpKind::And, *nboth)));
+      out.push_back(buildAssign(buildLValue(either), buildOpExpr(o.x, AtomOpKind::Or, o.y)));
+      out.push_back(buildAssign(buildLValue(o.d), buildOpExpr(either, AtomOpKind::And, *nboth)));
       return out;
     }
 
@@ -195,8 +196,8 @@ namespace refractir::reify::antiopt {
         return {};
       TypePtr ty = typeOf(ctx, o.x);
       const std::string joined = ctx.names.fresh(ty, ctx.lets);
-      out.push_back(assignInstr(localLV(joined), opExpr(*nx, Dual, *ny)));
-      out.push_back(assignInstr(localLV(o.d), simpleExpr(notAtom(joined))));
+      out.push_back(buildAssign(buildLValue(joined), buildOpExpr(*nx, Dual, *ny)));
+      out.push_back(buildAssign(buildLValue(o.d), buildExpr(buildNotAtom(joined))));
       return out;
     }
 
@@ -219,13 +220,14 @@ namespace refractir::reify::antiopt {
       const std::string high = ctx.names.fresh(ty, ctx.lets);
       const std::string low = ctx.names.fresh(ty, ctx.lets);
 
-      Expr sum = simpleExpr(localAtom(high));
-      addTail(sum, AddOp::Plus, localAtom(low));
+      Expr sum = buildExpr(buildLocalAtom(high));
+      appendTail(sum, AddOp::Plus, buildLocalAtom(low));
       return list(
-          cloneInstr(*o.src), assignInstr(localLV(high), opExpr(o.d, AtomOpKind::LShr, amount)),
-          assignInstr(localLV(high), opExpr(high, AtomOpKind::Shl, amount)),
-          assignInstr(localLV(low), opExpr(o.d, AtomOpKind::And, mask)),
-          assignInstr(localLV(o.d), std::move(sum))
+          cloneInstr(*o.src),
+          buildAssign(buildLValue(high), buildOpExpr(o.d, AtomOpKind::LShr, amount)),
+          buildAssign(buildLValue(high), buildOpExpr(high, AtomOpKind::Shl, amount)),
+          buildAssign(buildLValue(low), buildOpExpr(o.d, AtomOpKind::And, mask)),
+          buildAssign(buildLValue(o.d), std::move(sum))
       );
     }
 

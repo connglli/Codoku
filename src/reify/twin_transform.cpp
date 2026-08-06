@@ -1,5 +1,5 @@
 #include "reify/twin_transform.hpp"
-#include "reify/ast_builder.hpp"
+#include "ast/build.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -45,8 +45,8 @@ namespace refractir::reify {
       return std::make_shared<Type>(Type{PtrType{std::move(pointee), {}}, {}});
     }
 
-    Instr assignInstr(const std::string &lhs, Expr rhs) {
-      return Instr{AssignInstr{localLV(lhs), std::move(rhs), {}}};
+    Instr buildAssign(const std::string &lhs, Expr rhs) {
+      return Instr{AssignInstr{buildLValue(lhs), std::move(rhs), {}}};
     }
 
     // `%dst = cmp == %a, %b` — both operands are same-typed locals, so the
@@ -55,17 +55,17 @@ namespace refractir::reify {
     cmpRelInstr(const std::string &dst, const std::string &a, RelOp op, const std::string &b) {
       CmpAtom c;
       c.op = op;
-      c.lhs = SelectVal{RValue{localLV(a)}};
-      c.rhs = SelectVal{RValue{localLV(b)}};
-      return assignInstr(dst, simpleExpr(Atom{std::move(c), {}}));
+      c.lhs = SelectVal{RValue{buildLValue(a)}};
+      c.rhs = SelectVal{RValue{buildLValue(b)}};
+      return buildAssign(dst, buildExpr(Atom{std::move(c), {}}));
     }
 
     Instr cmpEqInstr(const std::string &dst, const std::string &a, const std::string &b) {
       CmpAtom c;
       c.op = RelOp::EQ;
-      c.lhs = SelectVal{RValue{localLV(a)}};
-      c.rhs = SelectVal{RValue{localLV(b)}};
-      return assignInstr(dst, simpleExpr(Atom{std::move(c), {}}));
+      c.lhs = SelectVal{RValue{buildLValue(a)}};
+      c.rhs = SelectVal{RValue{buildLValue(b)}};
+      return buildAssign(dst, buildExpr(Atom{std::move(c), {}}));
     }
 
     // `%dst = %left <op> %right` — the left operand is an id (coef), the
@@ -77,8 +77,8 @@ namespace refractir::reify {
       OpAtom o;
       o.op = op;
       o.coef = Coef{LocalOrSymId{LocalId{left, {}}}};
-      o.rval = localLV(right);
-      return assignInstr(dst, simpleExpr(Atom{std::move(o), {}}));
+      o.rval = buildLValue(right);
+      return buildAssign(dst, buildExpr(Atom{std::move(o), {}}));
     }
 
     Instr andInstr(const std::string &acc, const std::string &cur) {
@@ -99,7 +99,7 @@ namespace refractir::reify {
       Cond c;
       c.lhs = std::move(cond);
       c.op = RelOp::NE;
-      c.rhs = simpleExpr(coefAtom(Coef{IntLit{0, {}}}));
+      c.rhs = buildExpr(buildCoefAtom(Coef{IntLit{0, {}}}));
       BrTerm b;
       b.cond = std::move(c);
       b.thenLabel = BlockLabel{thenL, {}};
@@ -296,8 +296,8 @@ namespace refractir::reify {
     // The RHS that reproduces a pointer leaf: `addr <target>` or `null`.
     Atom ptrRhsAtom(const LeafRef &leaf) {
       if (leaf.ptrTarget)
-        return Atom{AddrAtom{*leaf.ptrTarget, {}}, {}};
-      return coefAtom(Coef{NullLit{}});
+        return buildAddrAtom(*leaf.ptrTarget);
+      return buildCoefAtom(Coef{NullLit{}});
     }
 
     // --- twin planning ----------------------------------------------------
@@ -750,21 +750,23 @@ namespace refractir::reify {
           std::string nxt = getScratch(ptrScratch, makePtr(nextT), "%__p", true);
           Atom nav =
               std::holds_alternative<AccessField>(acc)
-                  ? Atom{PtrFieldAtom{localLV(cur), std::get<AccessField>(acc).field, {}}, {}}
+                  ? Atom{PtrFieldAtom{buildLValue(cur), std::get<AccessField>(acc).field, {}}, {}}
                   : Atom{
                         PtrIndexAtom{
-                            localLV(cur),
+                            buildLValue(cur),
                             Index{std::get<IntLit>(std::get<AccessIndex>(acc).index)},
                             {}
                         },
                         {}
                     };
-          e.instrs.push_back(assignInstr(nxt, simpleExpr(std::move(nav))));
+          e.instrs.push_back(buildAssign(nxt, buildExpr(std::move(nav))));
           cur = nxt;
           curT = nextT;
         }
         std::string operand = getScratch(loadScratch, curT, "%__v", false);
-        e.instrs.push_back(assignInstr(operand, simpleExpr(Atom{LoadAtom{localLV(cur), {}}, {}})));
+        e.instrs.push_back(
+            buildAssign(operand, buildExpr(Atom{LoadAtom{buildLValue(cur), {}}, {}}))
+        );
         leafT = curT;
         return operand;
       }
@@ -826,18 +828,18 @@ namespace refractir::reify {
 
       FunDecl build(const std::string &name) {
         g.name = GlobalId{name, {}};
-        g.retType = makeI1();
+        g.retType = buildI1();
         appendParams();
 
         // i1 is a signed 1-bit type: true is all-ones (-1), so the neutral
         // AND accumulator starts at -1.
-        addLet("%__acc", makeI1(), intInit(-1), /*mut=*/true);
-        addLet("%__c", makeI1(), intInit(0), /*mut=*/true);
+        addLet("%__acc", buildI1(), intInit(-1), /*mut=*/true);
+        addLet("%__c", buildI1(), intInit(0), /*mut=*/true);
 
         e.label = BlockLabel{"^entry", {}};
         eIdx = 0;
         emitLeafChecks();
-        e.term = Terminator{RetTerm{simpleExpr(rvalAtom(localLV("%__acc"))), {}}};
+        e.term = Terminator{RetTerm{buildExpr(buildRValAtom(buildLValue("%__acc"))), {}}};
         g.blocks.push_back(std::move(e));
         return std::move(g);
       }
@@ -859,27 +861,29 @@ namespace refractir::reify {
         switch (root.kind) {
           case GuardRoot::Kind::Scalar:
           case GuardRoot::Kind::Ptr:
-            args.push_back(std::make_shared<Expr>(simpleExpr(rvalAtom(localLV(root.name)))));
+            args.push_back(
+                std::make_shared<Expr>(buildExpr(buildRValAtom(buildLValue(root.name))))
+            );
             break;
           case GuardRoot::Kind::Vec:
             for (const auto &leaf: root.leaves) {
               if (leafIsFree(plan.box, root, leaf))
                 continue;
-              LValue lane = localLV(root.name);
+              LValue lane = buildLValue(root.name);
               lane.accesses.push_back(leaf.path.front());
-              args.push_back(std::make_shared<Expr>(simpleExpr(rvalAtom(std::move(lane)))));
+              args.push_back(std::make_shared<Expr>(buildExpr(buildRValAtom(std::move(lane)))));
             }
             break;
           case GuardRoot::Kind::Agg:
             args.push_back(
-                std::make_shared<Expr>(simpleExpr(Atom{AddrAtom{localLV(root.name), {}}, {}}))
+                std::make_shared<Expr>(buildExpr(buildAddrAtom(buildLValue(root.name))))
             );
             break;
         }
         // Expected pointers, mirroring buildGuardFun's `%__e<n>` params.
         for (const auto &leaf: root.leaves)
           if (leaf.isPtr())
-            args.push_back(std::make_shared<Expr>(simpleExpr(ptrRhsAtom(leaf))));
+            args.push_back(std::make_shared<Expr>(buildExpr(ptrRhsAtom(leaf))));
       }
       return args;
     }
@@ -1584,7 +1588,7 @@ namespace refractir::reify {
         CallAtom call;
         call.callee = GlobalId{guardName, {}};
         call.args = buildGuardArgs(plan);
-        guard.term = brIfExpr(simpleExpr(Atom{std::move(call), {}}), twinL, origL);
+        guard.term = brIfExpr(buildExpr(Atom{std::move(call), {}}), twinL, origL);
         return guard;
       }
 

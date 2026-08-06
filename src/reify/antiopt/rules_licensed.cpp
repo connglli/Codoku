@@ -193,7 +193,9 @@ namespace refractir::reify::antiopt {
         Instr user = cloneInstr(stmts[pos.stmt]);
         renameReads(user, hit->local, tmp);
         std::vector<Instr> out;
-        out.push_back(assignInstr(localLV(tmp), opExpr(hit->local, AtomOpKind::And, mask)));
+        out.push_back(
+            buildAssign(buildLValue(tmp), buildOpExpr(hit->local, AtomOpKind::And, mask))
+        );
         out.push_back(std::move(user));
         return out;
       }
@@ -282,18 +284,18 @@ namespace refractir::reify::antiopt {
 
         // `%x >= lo`, which the facts say holds everywhere the guard does.
         auto cond = std::make_unique<Cond>();
-        cond->lhs = simpleExpr(localAtom(hit->local));
+        cond->lhs = buildExpr(buildLocalAtom(hit->local));
         cond->op = RelOp::GE;
-        cond->rhs = simpleExpr(localAtom(bound));
+        cond->rhs = buildExpr(buildLocalAtom(bound));
 
         SelectAtom sel;
         sel.cond = std::move(cond);
-        sel.vtrue = SelectVal{RValue{localLV(kept)}};
+        sel.vtrue = SelectVal{RValue{buildLValue(kept)}};
         sel.vfalse = SelectVal{Coef{IntLit{junk, {}}}};
 
         std::vector<Instr> out;
-        out.push_back(assignInstr(localLV(kept), cloneExpr(ai.rhs)));
-        out.push_back(assignInstr(ai.lhs, simpleExpr(Atom{std::move(sel), {}})));
+        out.push_back(buildAssign(buildLValue(kept), cloneExpr(ai.rhs)));
+        out.push_back(buildAssign(ai.lhs, buildExpr(Atom{std::move(sel), {}})));
         return out;
       }
 
@@ -366,8 +368,8 @@ namespace refractir::reify::antiopt {
         const std::string d = ai.lhs.base.name;
         std::vector<Instr> out;
         out.push_back(cloneInstr(stmts[pos.stmt]));
-        out.push_back(assignInstr(localLV(d), opExpr(d, AtomOpKind::Xor, *leaf)));
-        out.push_back(assignInstr(localLV(d), opExpr(d, AtomOpKind::Xor, *leaf)));
+        out.push_back(buildAssign(buildLValue(d), buildOpExpr(d, AtomOpKind::Xor, *leaf)));
+        out.push_back(buildAssign(buildLValue(d), buildOpExpr(d, AtomOpKind::Xor, *leaf)));
         return out;
       }
 
@@ -433,7 +435,9 @@ namespace refractir::reify::antiopt {
         writeCoef(std::get<AssignInstr>(out), hit->site, Coef{LocalOrSymId{LocalId{tmp, {}}}});
 
         std::vector<Instr> res;
-        res.push_back(assignInstr(localLV(tmp), opExpr(hit->local, AtomOpKind::LShr, amount)));
+        res.push_back(
+            buildAssign(buildLValue(tmp), buildOpExpr(hit->local, AtomOpKind::LShr, amount))
+        );
         res.push_back(std::move(out));
         return res;
       }

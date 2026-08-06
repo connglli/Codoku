@@ -1,43 +1,12 @@
+#include "ast/build.hpp"
 #include "internal.hpp"
-#include "reify/ast_builder.hpp"
 
 #include <variant>
 
 #include "analysis/type_utils.hpp"
+#include "reify/type_gen.hpp"
 
 namespace refractir::reify::antiopt {
-
-  Instr assignInstr(const LValue &lhs, Expr rhs) {
-    return Instr{AssignInstr{lhs, std::move(rhs), {}}};
-  }
-
-  Atom localAtom(const std::string &n) {
-    return Atom{CoefAtom{Coef{LocalOrSymId{LocalId{n, {}}}}, {}}, {}};
-  }
-
-  Atom intAtom(std::int64_t v) { return Atom{CoefAtom{Coef{IntLit{v, {}}}, {}}, {}}; }
-
-  Atom opAtom(Coef left, AtomOpKind op, const std::string &right) {
-    OpAtom o;
-    o.op = op;
-    o.coef = std::move(left);
-    o.rval = localLV(right);
-    return Atom{std::move(o), {}};
-  }
-
-  Atom binAtom(const std::string &left, AtomOpKind op, const std::string &right) {
-    return opAtom(Coef{LocalOrSymId{LocalId{left, {}}}}, op, right);
-  }
-
-  Expr opExpr(const std::string &left, AtomOpKind op, const std::string &right) {
-    return simpleExpr(binAtom(left, op, right));
-  }
-
-  Atom notAtom(const std::string &x) {
-    return Atom{UnaryAtom{UnaryOpKind::Not, localLV(x), {}}, {}};
-  }
-
-  void addTail(Expr &e, AddOp op, Atom a) { e.rest.push_back(Expr::Tail{op, std::move(a), {}}); }
 
   TypePtr localType(const FunDecl &fn, const std::vector<LetDecl> &extra, const std::string &nm) {
     for (const auto &p: fn.params)

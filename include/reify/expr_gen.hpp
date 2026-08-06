@@ -10,25 +10,11 @@
 #include <vector>
 #include "analysis/intrinsics.hpp"
 #include "ast/ast.hpp"
+#include "reify/intrinsic_whitelist.hpp"
 #include "reify/type_gen.hpp"
 #include "reify/var_catalogue.hpp"
 
 namespace refractir::reify {
-
-  // Key for tracking which intrinsic instantiations have been used, so
-  // genFunction can emit one IntrinsicDecl per distinct signature. Scalar
-  // intrinsics vary only by element width; the horizontal-reduction family
-  // (§12.4) is additionally parameterised by lane count and element domain,
-  // because `@reduce_add(<4> i32) : i32` and `@reduce_add(<8> f64) : f64`
-  // are distinct overloads that each need their own declaration.
-  struct IntrinsicUseKey {
-    IntrinsicKind kind;
-    std::uint32_t elemBits; // scalar element width (32 for i32/f32, 64 for i64/f64)
-    bool elemIsFloat;       // element domain: false = iN, true = fN
-    std::uint32_t lanes;    // 0 = scalar intrinsic; N = reduce over <N> T
-
-    auto operator<=>(const IntrinsicUseKey &) const = default;
-  };
 
   // ---------------------------------------------------------------------------
   // SymCounter — tracks generated symbols, produces declarations

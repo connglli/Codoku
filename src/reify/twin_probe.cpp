@@ -3,6 +3,7 @@
 #include <unordered_set>
 
 #include "analysis/type_utils.hpp"
+#include "ast/build.hpp"
 #include "ast/clone.hpp"
 #include "reify/common.hpp"
 #include "reify/type_gen.hpp"
@@ -30,10 +31,10 @@ namespace refractir::reify {
     // harness's return type.
     Expr zeroOf(const TypePtr &ty) {
       if (TypeUtils::isPtr(ty))
-        return Expr{Atom{CoefAtom{Coef{NullLit{}}, {}}, {}}, {}, {}};
+        return buildNullExpr();
       if (TypeUtils::getFloatBitWidth(ty))
-        return Expr{Atom{CoefAtom{Coef{FloatLit{0.0, {}}}, {}}, {}}, {}, {}};
-      return Expr{Atom{CoefAtom{Coef{IntLit{0, {}}}, {}}, {}}, {}, {}};
+        return buildFloatExpr(0.0);
+      return buildIntExpr(0);
     }
 
     // Point every out-of-region target at its landing block, recording the

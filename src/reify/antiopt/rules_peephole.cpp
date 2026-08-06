@@ -57,8 +57,8 @@ namespace refractir::reify::antiopt {
 
         std::vector<Instr> out;
         out.push_back(cloneInstr(stmts[pos.stmt]));
-        out.push_back(assignInstr(localLV(d), opExpr(d, AtomOpKind::Xor, k)));
-        out.push_back(assignInstr(localLV(d), opExpr(d, AtomOpKind::Xor, k)));
+        out.push_back(buildAssign(buildLValue(d), buildOpExpr(d, AtomOpKind::Xor, k)));
+        out.push_back(buildAssign(buildLValue(d), buildOpExpr(d, AtomOpKind::Xor, k)));
         return out;
       }
 
@@ -127,8 +127,7 @@ namespace refractir::reify::antiopt {
         const AddOp op = out.rhs.rest[*idx].op;
         std::get<CoefAtom>(out.rhs.rest[*idx].atom.v).coef = Coef{IntLit{a, {}}};
         out.rhs.rest.insert(
-            out.rhs.rest.begin() + (long) (*idx + 1),
-            Expr::Tail{op, Atom{CoefAtom{Coef{IntLit{b, {}}}, {}}, {}}, {}}
+            out.rhs.rest.begin() + (long) (*idx + 1), Expr::Tail{op, buildIntAtom(b), {}}
         );
         std::vector<Instr> res;
         res.push_back(Instr{std::move(out)});
@@ -246,14 +245,14 @@ namespace refractir::reify::antiopt {
 
         std::vector<Instr> out;
         if (!plusOne_) {
-          out.push_back(assignInstr(localLV(d), opExpr(x, AtomOpKind::Shl, amount)));
+          out.push_back(buildAssign(buildLValue(d), buildOpExpr(x, AtomOpKind::Shl, amount)));
           return out;
         }
         const std::string t = ctx.names.fresh(ty, ctx.lets);
-        out.push_back(assignInstr(localLV(t), opExpr(x, AtomOpKind::Shl, amount)));
-        Expr sum = simpleExpr(localAtom(t));
-        addTail(sum, AddOp::Plus, localAtom(x));
-        out.push_back(assignInstr(localLV(d), std::move(sum)));
+        out.push_back(buildAssign(buildLValue(t), buildOpExpr(x, AtomOpKind::Shl, amount)));
+        Expr sum = buildExpr(buildLocalAtom(t));
+        appendTail(sum, AddOp::Plus, buildLocalAtom(x));
+        out.push_back(buildAssign(buildLValue(d), std::move(sum)));
         return out;
       }
 
@@ -310,11 +309,11 @@ namespace refractir::reify::antiopt {
         std::string d, x;
         if (!read(stmts[pos.stmt], d, x))
           return {};
-        Expr e = simpleExpr(intAtom(0));
-        addTail(e, AddOp::Minus, localAtom(x));
-        addTail(e, AddOp::Minus, intAtom(1));
+        Expr e = buildExpr(buildIntAtom(0));
+        appendTail(e, AddOp::Minus, buildLocalAtom(x));
+        appendTail(e, AddOp::Minus, buildIntAtom(1));
         std::vector<Instr> out;
-        out.push_back(assignInstr(localLV(d), std::move(e)));
+        out.push_back(buildAssign(buildLValue(d), std::move(e)));
         return out;
       }
 
@@ -361,13 +360,13 @@ namespace refractir::reify::antiopt {
         const std::string t = ctx.names.fresh(ty, ctx.lets);
 
         std::vector<Instr> out;
-        out.push_back(assignInstr(
-            localLV(t), simpleExpr(Atom{UnaryAtom{UnaryOpKind::Not, localLV(y), {}}, {}})
+        out.push_back(buildAssign(
+            buildLValue(t), buildExpr(Atom{UnaryAtom{UnaryOpKind::Not, buildLValue(y), {}}, {}})
         ));
-        Expr sum = simpleExpr(localAtom(x));
-        addTail(sum, AddOp::Plus, localAtom(t));
-        addTail(sum, AddOp::Plus, intAtom(1));
-        out.push_back(assignInstr(localLV(d), std::move(sum)));
+        Expr sum = buildExpr(buildLocalAtom(x));
+        appendTail(sum, AddOp::Plus, buildLocalAtom(t));
+        appendTail(sum, AddOp::Plus, buildIntAtom(1));
+        out.push_back(buildAssign(buildLValue(d), std::move(sum)));
         return out;
       }
 
@@ -410,9 +409,9 @@ namespace refractir::reify::antiopt {
         if (!read(stmts[pos.stmt], d, x))
           return {};
         std::vector<Instr> out;
-        out.push_back(
-            assignInstr(localLV(d), simpleExpr(opAtom(Coef{IntLit{2, {}}}, AtomOpKind::Mul, x)))
-        );
+        out.push_back(buildAssign(
+            buildLValue(d), buildExpr(buildOpAtom(Coef{IntLit{2, {}}}, AtomOpKind::Mul, x))
+        ));
         return out;
       }
 
@@ -523,10 +522,10 @@ namespace refractir::reify::antiopt {
         std::vector<Instr> out;
         out.push_back(cloneInstr(stmts[pos.stmt]));
         out.push_back(
-            assignInstr(localLV(t), simpleExpr(Atom{CastAtom{localLV(d), wide, {}}, {}}))
+            buildAssign(buildLValue(t), buildExpr(Atom{CastAtom{buildLValue(d), wide, {}}, {}}))
         );
         out.push_back(
-            assignInstr(localLV(d), simpleExpr(Atom{CastAtom{localLV(t), narrow, {}}, {}}))
+            buildAssign(buildLValue(d), buildExpr(Atom{CastAtom{buildLValue(t), narrow, {}}, {}}))
         );
         return out;
       }

@@ -4,9 +4,10 @@
 //
 // One file per family (see reify/antiopt.hpp for what a family is), each
 // registering its rules through the declarations at the bottom. This header
-// carries only what more than one family needs: the small AST builders that
-// respect RefractIR's operand rules, and the dependence scan that decides
-// whether two statements may trade places.
+// carries only what more than one family needs: the lookups a rule makes
+// about the body it is rewriting, and the dependence scan that decides whether
+// two statements may trade places. The AST node constructors are shared with
+// the rest of the toolchain and live in ast/build.hpp.
 
 #include <optional>
 #include <string>
@@ -15,30 +16,12 @@
 
 #include <limits>
 #include "ast/ast.hpp"
+#include "ast/build.hpp"
 #include "reify/antiopt.hpp"
-#include "reify/ast_builder.hpp"
 
 namespace refractir::reify::antiopt {
 
-  // --- builders -------------------------------------------------------------
-
-  Instr assignInstr(const LValue &lhs, Expr rhs);
-
-  Atom localAtom(const std::string &n);
-  Atom intAtom(std::int64_t v);
-
-  // `<left> OP %right`. RefractIR takes an id or a literal on the left of a
-  // binary atom and *requires* an lvalue on the right (spec §5.3), so a
-  // constant that belongs on the right has to be a local first.
-  Atom opAtom(Coef left, AtomOpKind op, const std::string &right);
-  Atom binAtom(const std::string &left, AtomOpKind op, const std::string &right);
-  Expr opExpr(const std::string &left, AtomOpKind op, const std::string &right);
-
-  // `~%x`, the only unary operator there is.
-  Atom notAtom(const std::string &x);
-
-  // `<e> +/- <atom>`, appended to the flat chain a statement already is.
-  void addTail(Expr &e, AddOp op, Atom a);
+  // --- lookups --------------------------------------------------------------
 
   // The declared type of a local, looked up in the function and in whatever
   // declarations the rewriting has added so far.

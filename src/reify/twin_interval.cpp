@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "analysis/type_utils.hpp"
+#include "ast/build.hpp"
 #include "ast/clone.hpp"
 #include "reify/hyperparameters.hpp"
 #include "reify/twin_mini.hpp"
@@ -536,7 +537,7 @@ namespace refractir::reify {
                 return readFloat(x.rval);
               } else if constexpr (std::is_same_v<T, LoadAtom>) {
                 Expr p;
-                p.first = Atom{RValueAtom{x.rval, {}}, {}};
+                p.first = buildRValAtom(x.rval);
                 auto cell = deref(p, "load");
                 if (!cell)
                   return bad = !reason_.empty(), std::nullopt;
@@ -741,7 +742,7 @@ namespace refractir::reify {
                 return evalOp(x, bits);
               else if constexpr (std::is_same_v<T, LoadAtom>) {
                 Expr p;
-                p.first = Atom{RValueAtom{x.rval, {}}, {}};
+                p.first = buildRValAtom(x.rval);
                 auto cell = deref(p, "load");
                 if (!cell)
                   return reason_.empty() ? std::optional<Interval>(unknownOf()) : std::nullopt;

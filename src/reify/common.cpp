@@ -18,6 +18,7 @@
 
 #include "analysis/dominators.hpp"
 #include "analysis/reducibility.hpp"
+#include "ast/build.hpp"
 #include "ast/sir_printer.hpp"
 #include "backend/c_backend.hpp"
 #include "backend/c_vec_lowering.hpp"
@@ -27,7 +28,7 @@
 #include "frontend/diagnostics.hpp"
 #include "frontend/pipeline.hpp"
 #include "interp/interpreter.hpp"
-#include "reify/ast_builder.hpp"
+#include "reify/intrinsic_whitelist.hpp"
 #include "reify/state_profile.hpp"
 
 namespace fs = std::filesystem;
@@ -81,7 +82,7 @@ namespace refractir::reify {
 
   void ensureCheckChksumDecl(Program &prog) {
     ensureIntrinsicDecl(
-        prog, "@check_chksum", makeI32(), {{"%expected", makeI32()}, {"%actual", makeI32()}}
+        prog, "@check_chksum", buildI32(), {{"%expected", buildI32()}, {"%actual", buildI32()}}
     );
   }
 
@@ -91,7 +92,7 @@ namespace refractir::reify {
   ) {
     FunDecl mainFn;
     mainFn.name = GlobalId{"@main", {}};
-    mainFn.retType = makeI32();
+    mainFn.retType = buildI32();
 
     // `%r` holds the entry-function return value. Its declared type matches
     // entryFn so a float-returning entry doesn't trip the typechecker; the
@@ -114,13 +115,13 @@ namespace refractir::reify {
       const auto &p = entryFn.params[i];
       const std::string &valStr = paramValues[i];
       Atom arg = p.type && std::holds_alternative<FloatType>(p.type->v)
-                     ? coefAtom(Coef{FloatLit{parseFloatLiteral(valStr), {}}})
-                     : coefAtom(Coef{IntLit{parseIntegerLiteral(valStr), {}}});
-      ca.args.push_back(std::make_shared<Expr>(simpleExpr(std::move(arg))));
+                     ? buildCoefAtom(Coef{FloatLit{parseFloatLiteral(valStr), {}}})
+                     : buildCoefAtom(Coef{IntLit{parseIntegerLiteral(valStr), {}}});
+      ca.args.push_back(std::make_shared<Expr>(buildExpr(std::move(arg))));
     }
     AssignInstr callAssign;
-    callAssign.lhs = localLV("%r");
-    callAssign.rhs = simpleExpr(Atom{std::move(ca), {}});
+    callAssign.lhs = buildLValue("%r");
+    callAssign.rhs = buildExpr(Atom{std::move(ca), {}});
     b.instrs.push_back(std::move(callAssign));
 
     // %r = call @check_chksum(EXPECTED, %r);  (skipped when retValue is
@@ -138,15 +139,15 @@ namespace refractir::reify {
       check.callee = GlobalId{"@check_chksum", {}};
       check.args.push_back(
           std::make_shared<Expr>(
-              simpleExpr(coefAtom(Coef{IntLit{parseIntegerLiteral(retValue), {}}}))
+              buildExpr(buildCoefAtom(Coef{IntLit{parseIntegerLiteral(retValue), {}}}))
           )
       );
       check.args.push_back(
-          std::make_shared<Expr>(simpleExpr(rvalAtom(RValue{LocalId{"%r", {}}, {}, {}})))
+          std::make_shared<Expr>(buildExpr(buildRValAtom(RValue{LocalId{"%r", {}}, {}, {}})))
       );
       AssignInstr checkAssign;
-      checkAssign.lhs = localLV("%r");
-      checkAssign.rhs = simpleExpr(Atom{std::move(check), {}});
+      checkAssign.lhs = buildLValue("%r");
+      checkAssign.rhs = buildExpr(Atom{std::move(check), {}});
       b.instrs.push_back(std::move(checkAssign));
       ensureCheckChksumDecl(prog);
     }
@@ -154,7 +155,7 @@ namespace refractir::reify {
     // Always exit with 0 on the happy path. Any mismatch above unwinds
     // through @check_chksum's abort() before this terminator is reached.
     RetTerm ret;
-    ret.value = simpleExpr(coefAtom(Coef{IntLit{0, {}}}));
+    ret.value = buildExpr(buildCoefAtom(Coef{IntLit{0, {}}}));
     b.term = std::move(ret);
 
     b.span = {};

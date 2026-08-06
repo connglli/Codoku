@@ -1,6 +1,6 @@
 #include "reify/func_gen.hpp"
 #include "analysis/type_utils.hpp"
-#include "reify/ast_builder.hpp"
+#include "ast/build.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -134,12 +134,12 @@ namespace refractir::reify {
   // rather than an SMT obligation.
   static std::vector<Instr> buildSumChecksum(const VarCatalogue &vars) {
     std::vector<Instr> instrs;
-    auto i32 = makeI32();
+    auto i32 = buildI32();
 
     // %_chk = 0;
     {
-      Expr zero = simpleExpr(coefAtom(IntLit{0, {}}));
-      instrs.push_back(Instr{AssignInstr{localLV("%_chk"), std::move(zero), {}}});
+      Expr zero = buildExpr(buildCoefAtom(IntLit{0, {}}));
+      instrs.push_back(Instr{AssignInstr{buildLValue("%_chk"), std::move(zero), {}}});
     }
 
     // Emit `%_chk = cast_atom + %_chk` (cast first) or `%_chk = %_chk + rval`.
@@ -148,18 +148,18 @@ namespace refractir::reify {
       Expr rhs;
       if (isCast) {
         rhs.first = std::move(valueAtom);
-        rhs.rest.push_back({AddOp::Plus, rvalAtom(localLV("%_chk")), {}});
+        rhs.rest.push_back({AddOp::Plus, buildRValAtom(buildLValue("%_chk")), {}});
       } else {
-        rhs.first = rvalAtom(localLV("%_chk"));
+        rhs.first = buildRValAtom(buildLValue("%_chk"));
         rhs.rest.push_back({AddOp::Plus, std::move(valueAtom), {}});
       }
-      instrs.push_back(Instr{AssignInstr{localLV("%_chk"), std::move(rhs), {}}});
+      instrs.push_back(Instr{AssignInstr{buildLValue("%_chk"), std::move(rhs), {}}});
     };
 
     // Emit a scalar LValue into the checksum, casting to i32 when needed.
     auto emitScalarLV = [&](LValue lv, const TypePtr &t) {
       if (TypeUtils::isInt(t) && intBitWidth(t) == 32) {
-        emitChkAccum(rvalAtom(std::move(lv)), /*isCast=*/false);
+        emitChkAccum(buildRValAtom(std::move(lv)), /*isCast=*/false);
       } else if (TypeUtils::isScalar(t)) {
         CastAtom ca;
         ca.src = std::move(lv);
@@ -229,7 +229,7 @@ namespace refractir::reify {
     // and the generator places them last but they take the same code
     // path here).
     for (const auto &v: vars.vars) {
-      emitTypeHash(localLV(v.name), v.type);
+      emitTypeHash(buildLValue(v.name), v.type);
     }
 
     return instrs;
@@ -303,7 +303,7 @@ namespace refractir::reify {
         for (auto &ci: chkInstrs)
           block.instrs.push_back(std::move(ci));
 
-        Expr retVal = simpleExpr(rvalAtom(localLV("%_chk")));
+        Expr retVal = buildExpr(buildRValAtom(buildLValue("%_chk")));
         block.term = Terminator{RetTerm{std::move(retVal), {}}};
 
       } else {
@@ -319,17 +319,17 @@ namespace refractir::reify {
               continue;
 
             // %p = addr %target
-            LValue lhs = localLV(v.name);
-            Expr rhs = simpleExpr(Atom{AddrAtom{localLV(*v.ptrTarget), {}}, {}});
+            LValue lhs = buildLValue(v.name);
+            Expr rhs = buildExpr(buildAddrAtom(buildLValue(*v.ptrTarget)));
             block.instrs.push_back(Instr{AssignInstr{std::move(lhs), std::move(rhs), {}}});
           }
 
           // Interest-init: require inputSym != 0
           if (fcfg.enableInterestInits) {
             RequireInstr req;
-            req.cond.lhs = simpleExpr(coefAtom(LocalOrSymId{SymId{inputSym, {}}}));
+            req.cond.lhs = buildExpr(buildCoefAtom(LocalOrSymId{SymId{inputSym, {}}}));
             req.cond.op = RelOp::NE;
-            req.cond.rhs = simpleExpr(coefAtom(IntLit{0, {}}));
+            req.cond.rhs = buildExpr(buildCoefAtom(IntLit{0, {}}));
             req.message = "nonzero input";
             block.instrs.push_back(Instr{std::move(req)});
           }
@@ -375,7 +375,7 @@ namespace refractir::reify {
           block.term = Terminator{std::move(br)};
         } else {
           // Dead-end non-exit (shouldn't happen in well-formed CFG)
-          Expr zero = simpleExpr(coefAtom(IntLit{0, {}}));
+          Expr zero = buildExpr(buildCoefAtom(IntLit{0, {}}));
           block.term = Terminator{RetTerm{std::move(zero), {}}};
         }
       }
@@ -399,7 +399,7 @@ namespace refractir::reify {
 
     FunDecl fun;
     fun.name = GlobalId{"@" + fcfg.funcName, {}};
-    fun.retType = makeI32();
+    fun.retType = buildI32();
     fun.syms = sym.makeDecls();
 
     // Split VarCatalogue entries: isParam → FunDecl.params,
@@ -436,7 +436,7 @@ namespace refractir::reify {
       LetDecl let;
       let.isMutable = true;
       let.name = LocalId{"%_chk", {}};
-      let.type = makeI32();
+      let.type = buildI32();
       InitVal iv;
       iv.kind = InitVal::Kind::Int;
       iv.value = IntLit{0, {}};
@@ -570,8 +570,8 @@ namespace refractir::reify {
         fun->syms.push_back(std::move(d));
 
         Expr rhs;
-        rhs.first = rvalAtom(lv); // read the leaf
-        rhs.rest.push_back({AddOp::Plus, coefAtom(LocalOrSymId{SymId{symName, {}}}), {}});
+        rhs.first = buildRValAtom(lv); // read the leaf
+        rhs.rest.push_back({AddOp::Plus, buildCoefAtom(LocalOrSymId{SymId{symName, {}}}), {}});
         latch->instrs.push_back(Instr{AssignInstr{std::move(lv), std::move(rhs), {}}});
         return;
       }
@@ -606,7 +606,7 @@ namespace refractir::reify {
     };
 
     for (const auto &nm: touched)
-      correctLeaves(localLV(nm), letTypes[nm]);
+      correctLeaves(buildLValue(nm), letTypes[nm]);
 
     // For a period-k orbit (k > 1), plant a modular counter. The additive
     // corrections above can only ever close a period-1 orbit: closing after k
@@ -642,16 +642,20 @@ namespace refractir::reify {
       addLet(kNontermModulusVar, period);
 
       Expr inc;
-      inc.first = rvalAtom(localLV(kNontermPeriodVar));
-      inc.rest.push_back({AddOp::Plus, coefAtom(IntLit{1, {}}), {}});
-      latch->instrs.push_back(Instr{AssignInstr{localLV(kNontermPeriodVar), std::move(inc), {}}});
+      inc.first = buildRValAtom(buildLValue(kNontermPeriodVar));
+      inc.rest.push_back({AddOp::Plus, buildCoefAtom(IntLit{1, {}}), {}});
+      latch->instrs.push_back(
+          Instr{AssignInstr{buildLValue(kNontermPeriodVar), std::move(inc), {}}}
+      );
 
       OpAtom mod;
       mod.op = AtomOpKind::Mod;
       mod.coef = LocalOrSymId{LocalId{kNontermPeriodVar, {}}};
-      mod.rval = RValue{localLV(kNontermModulusVar)};
+      mod.rval = RValue{buildLValue(kNontermModulusVar)};
       latch->instrs.push_back(
-          Instr{AssignInstr{localLV(kNontermPeriodVar), simpleExpr(Atom{std::move(mod), {}}), {}}}
+          Instr{
+              AssignInstr{buildLValue(kNontermPeriodVar), buildExpr(Atom{std::move(mod), {}}), {}}
+          }
       );
     }
 
@@ -680,8 +684,8 @@ namespace refractir::reify {
       }
       CallAtom ca;
       ca.callee = GlobalId{"@observe", {}};
-      ca.args.push_back(std::make_shared<Expr>(simpleExpr(rvalAtom(obsLv))));
-      Expr obsRhs = simpleExpr(Atom{std::move(ca), {}});
+      ca.args.push_back(std::make_shared<Expr>(buildExpr(buildRValAtom(obsLv))));
+      Expr obsRhs = buildExpr(Atom{std::move(ca), {}});
       latch->instrs.push_back(Instr{AssignInstr{obsLv, std::move(obsRhs), {}}});
     }
   }

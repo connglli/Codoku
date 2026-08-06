@@ -1,6 +1,6 @@
 #include "reify/expr_gen.hpp"
 #include "analysis/type_utils.hpp"
-#include "reify/ast_builder.hpp"
+#include "ast/build.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -35,7 +35,7 @@ namespace refractir::reify {
 
   static Coef floatCoef(double v) { return FloatLit{v, {}}; }
 
-  static Atom opAtom(AtomOpKind op, Coef c, RValue rv) {
+  static Atom buildOpAtom(AtomOpKind op, Coef c, RValue rv) {
     return Atom{OpAtom{op, std::move(c), std::move(rv), {}}, {}};
   }
 
@@ -144,9 +144,9 @@ namespace refractir::reify {
 
   std::string SymCounter::nextCoef(const TypePtr &type) { return next(SymKind::Coef, type); }
 
-  std::string SymCounter::nextValue() { return next(SymKind::Value, makeI32()); }
+  std::string SymCounter::nextValue() { return next(SymKind::Value, buildI32()); }
 
-  std::string SymCounter::nextIndex() { return next(SymKind::Index, makeI32()); }
+  std::string SymCounter::nextIndex() { return next(SymKind::Index, buildI32()); }
 
   int SymCounter::countOfKind(SymKind kind) const {
     int c = 0;
@@ -256,9 +256,9 @@ namespace refractir::reify {
       // random so the magnitude distribution covers both signs.
       bool positive = (posViable && negViable) ? (side(rng) == 0) : posViable;
       RequireInstr req;
-      req.cond.lhs = simpleExpr(coefAtom(symCoef(e.name)));
+      req.cond.lhs = buildExpr(buildCoefAtom(symCoef(e.name)));
       req.cond.op = positive ? RelOp::GT : RelOp::LT;
-      req.cond.rhs = simpleExpr(coefAtom(intCoef(positive ? posT : negT)));
+      req.cond.rhs = buildExpr(buildCoefAtom(intCoef(positive ? posT : negT)));
       req.message = positive ? "coef large positive" : "coef large negative";
       instrs.push_back(Instr{std::move(req)});
     }
@@ -321,13 +321,13 @@ namespace refractir::reify {
 
   // Generate a random concrete integer literal in [lo, hi] of the given bitwidth.
   static Atom genConcreteIntAtom(std::mt19937 &rng, const TypePtr &targetType) {
-    return coefAtom(intCoef(pickConcreteIntLit(rng, targetType)));
+    return buildCoefAtom(intCoef(pickConcreteIntLit(rng, targetType)));
   }
 
   // Generate a concrete float atom
   static Atom genConcreteFloatAtom(std::mt19937 &rng) {
     std::uniform_int_distribution<std::size_t> d(0, rysmith::hp::kFloatLitPoolSize - 1);
-    return coefAtom(floatCoef(rysmith::hp::kFloatLitPool[d(rng)]));
+    return buildCoefAtom(floatCoef(rysmith::hp::kFloatLitPool[d(rng)]));
   }
 
   // Build a SelectVal of targetType: either a same-typed scalar local or a
@@ -379,7 +379,7 @@ namespace refractir::reify {
     auto allScalars = excluding(vars.allScalars(), excludeName);
     if (!allScalars.empty()) {
       auto *vL = pickOne(rng, allScalars);
-      cond.lhs = simpleExpr(rvalAtom(localLV(vL->name)));
+      cond.lhs = buildExpr(buildRValAtom(buildLValue(vL->name)));
       // RHS literal of the lhs var's type. On-path (sym != null) it stays 0
       // so the path constraint is a simple sign test; off-path it is
       // drawn from the per-width pool — the threshold value is opaque to
@@ -391,14 +391,14 @@ namespace refractir::reify {
           std::uniform_int_distribution<std::size_t> d(0, rysmith::hp::kFloatLitPoolSize - 1);
           f = rysmith::hp::kFloatLitPool[d(rng)];
         }
-        cond.rhs = simpleExpr(coefAtom(floatCoef(f)));
+        cond.rhs = buildExpr(buildCoefAtom(floatCoef(f)));
       } else {
         int64_t i = sym ? 0 : pickConcreteIntLit(rng, vL->type);
-        cond.rhs = simpleExpr(coefAtom(intCoef(i)));
+        cond.rhs = buildExpr(buildCoefAtom(intCoef(i)));
       }
     } else {
-      cond.lhs = simpleExpr(coefAtom(intCoef(0)));
-      cond.rhs = simpleExpr(coefAtom(intCoef(0)));
+      cond.lhs = buildExpr(buildCoefAtom(intCoef(0)));
+      cond.rhs = buildExpr(buildCoefAtom(intCoef(0)));
     }
     static const RelOp relops[] = {RelOp::EQ, RelOp::NE, RelOp::LT,
                                    RelOp::LE, RelOp::GT, RelOp::GE};
@@ -482,7 +482,7 @@ namespace refractir::reify {
     }
 
     if (cands.empty())
-      return isFloat ? genConcreteFloatAtom(ctx.rng) : coefAtom(intCoef(0));
+      return isFloat ? genConcreteFloatAtom(ctx.rng) : buildCoefAtom(intCoef(0));
 
     const auto &c =
         cands[std::uniform_int_distribution<int>(0, static_cast<int>(cands.size()) - 1)(ctx.rng)];
@@ -544,22 +544,22 @@ namespace refractir::reify {
     auto pickRval = [&]() -> RValue {
       assert(hasRval);
       auto *v = pickOne(ctx.rng, scalarsOfT);
-      return localLV(v->name);
+      return buildLValue(v->name);
     };
 
     if (s < rysmith::hp::kIntOnPath_CoefBareEnd) {
       // Standalone coef sym
-      return coefAtom(symCoef(ctx.sym->nextCoef(targetType)));
+      return buildCoefAtom(symCoef(ctx.sym->nextCoef(targetType)));
     }
     if (s < rysmith::hp::kIntOnPath_MulEnd && hasRval) {
       // Linear: sym * rval
-      return opAtom(AtomOpKind::Mul, symCoef(ctx.sym->nextCoef(targetType)), pickRval());
+      return buildOpAtom(AtomOpKind::Mul, symCoef(ctx.sym->nextCoef(targetType)), pickRval());
     }
     if (s < rysmith::hp::kIntOnPath_BitwiseEnd && ctx.cfg.enableAllOps && hasRval) {
       // Bitwise
       static const AtomOpKind bops[] = {AtomOpKind::And, AtomOpKind::Or, AtomOpKind::Xor};
       std::uniform_int_distribution<int> opPick(0, 2);
-      return opAtom(bops[opPick(ctx.rng)], symCoef(ctx.sym->nextCoef(targetType)), pickRval());
+      return buildOpAtom(bops[opPick(ctx.rng)], symCoef(ctx.sym->nextCoef(targetType)), pickRval());
     }
     if (s < rysmith::hp::kIntOnPath_ShiftEnd && ctx.cfg.enableAllOps && hasRval) {
       // Shift: OpAtom{Shl/Shr/LShr, coef, rval} = coef SHIFT rval.
@@ -567,7 +567,7 @@ namespace refractir::reify {
       // For i32 targets we use an index sym as the shifted value and
       // pick an i32 var for the amount; for non-i32 targets we fall
       // through to a standalone coef sym (no cross-width rval available).
-      auto i32scalars = excluding(ctx.vars.scalarsOf(makeI32()), ctx.excludeName);
+      auto i32scalars = excluding(ctx.vars.scalarsOf(buildI32()), ctx.excludeName);
       if (!i32scalars.empty() || TypeUtils::isInt(targetType)) {
         static const AtomOpKind sops[] = {AtomOpKind::Shl, AtomOpKind::Shr, AtomOpKind::LShr};
         std::uniform_int_distribution<int> opPick(0, 2);
@@ -575,14 +575,14 @@ namespace refractir::reify {
         if (intBitWidth(targetType) == 32) {
           if (!i32scalars.empty()) {
             auto *shiftAmt = pickOne(ctx.rng, i32scalars);
-            return opAtom(sops[opPick(ctx.rng)], symCoef(idxSym), localLV(shiftAmt->name));
+            return buildOpAtom(sops[opPick(ctx.rng)], symCoef(idxSym), buildLValue(shiftAmt->name));
           }
         } else {
           (void) idxSym; // index sym was consumed, drop it
-          return coefAtom(symCoef(ctx.sym->nextCoef(targetType)));
+          return buildCoefAtom(symCoef(ctx.sym->nextCoef(targetType)));
         }
       }
-      return coefAtom(symCoef(ctx.sym->nextCoef(targetType)));
+      return buildCoefAtom(symCoef(ctx.sym->nextCoef(targetType)));
     }
     if (s < rysmith::hp::kIntOnPath_UnaryNotEnd && hasRval) {
       // Unary NOT
@@ -605,19 +605,19 @@ namespace refractir::reify {
       std::string symName = ctx.sym->nextCoef(targetType);
       // Add require: rval != 0
       RequireInstr req;
-      req.cond.lhs = simpleExpr(rvalAtom(localLV(rv->name)));
+      req.cond.lhs = buildExpr(buildRValAtom(buildLValue(rv->name)));
       req.cond.op = RelOp::NE;
-      req.cond.rhs = simpleExpr(coefAtom(intCoef(0)));
+      req.cond.rhs = buildExpr(buildCoefAtom(intCoef(0)));
       req.message = "div nonzero";
       ctx.extraRequires.push_back(Instr{std::move(req)});
-      return opAtom(op, symCoef(symName), localLV(rv->name));
+      return buildOpAtom(op, symCoef(symName), buildLValue(rv->name));
     }
     if (s < rysmith::hp::kIntOnPath_LoadEnd) {
       // Load from a ptr T var if any exist
       auto ptrs = excluding(ctx.vars.ptrsOf(targetType), ctx.excludeName);
       if (!ptrs.empty()) {
         auto *pv = pickOne(ctx.rng, ptrs);
-        return Atom{LoadAtom{localLV(pv->name), {}}, {}};
+        return Atom{LoadAtom{buildLValue(pv->name), {}}, {}};
       }
     }
     if (s < rysmith::hp::kIntOnPath_SelectEnd && ctx.cfg.enableSelect) {
@@ -627,7 +627,7 @@ namespace refractir::reify {
       return genIntrinsicCallAtom(ctx, targetType);
     }
     // Fallback: standalone sym
-    return coefAtom(symCoef(ctx.sym->nextCoef(targetType)));
+    return buildCoefAtom(symCoef(ctx.sym->nextCoef(targetType)));
   }
 
   // Off-path OpAtom coefficient: a same-type LocalId with probability
@@ -687,18 +687,18 @@ namespace refractir::reify {
     }
     if (s < rysmith::hp::kIntOffPath_MulEnd) {
       auto *v = pickOne(rng, scalarsOfT);
-      return opAtom(
+      return buildOpAtom(
           AtomOpKind::Mul, pickOffPathIntCoef(rng, vars, targetType, excludeName, false),
-          localLV(v->name)
+          buildLValue(v->name)
       );
     }
     if (s < rysmith::hp::kIntOffPath_BitwiseEnd && cfg.enableAllOps) {
       auto *v = pickOne(rng, scalarsOfT);
       static const AtomOpKind bops[] = {AtomOpKind::And, AtomOpKind::Or, AtomOpKind::Xor};
       std::uniform_int_distribution<int> op(0, 2);
-      return opAtom(
+      return buildOpAtom(
           bops[op(rng)], pickOffPathIntCoef(rng, vars, targetType, excludeName, false),
-          localLV(v->name)
+          buildLValue(v->name)
       );
     }
     if (s < rysmith::hp::kIntOffPath_ShiftEnd && cfg.enableAllOps) {
@@ -709,9 +709,9 @@ namespace refractir::reify {
       auto *v = pickOne(rng, scalarsOfT);
       static const AtomOpKind sops[] = {AtomOpKind::Shl, AtomOpKind::Shr, AtomOpKind::LShr};
       std::uniform_int_distribution<int> op(0, 2);
-      return opAtom(
+      return buildOpAtom(
           sops[op(rng)], pickOffPathIntCoef(rng, vars, targetType, excludeName, false),
-          localLV(v->name)
+          buildLValue(v->name)
       );
     }
     if (s < rysmith::hp::kIntOffPath_CastEnd && !otherIntScalars.empty()) {
@@ -727,20 +727,20 @@ namespace refractir::reify {
       auto *v = pickOne(rng, scalarsOfT);
       std::uniform_int_distribution<int> dm(0, 1);
       AtomOpKind op = dm(rng) ? AtomOpKind::Mod : AtomOpKind::Div;
-      return opAtom(
-          op, pickOffPathIntCoef(rng, vars, targetType, excludeName, true), localLV(v->name)
+      return buildOpAtom(
+          op, pickOffPathIntCoef(rng, vars, targetType, excludeName, true), buildLValue(v->name)
       );
     }
     if (s < rysmith::hp::kIntOffPath_PlainRvalEnd) {
       auto *v = pickOne(rng, scalarsOfT);
-      return rvalAtom(localLV(v->name));
+      return buildRValAtom(buildLValue(v->name));
     }
     if (s < rysmith::hp::kIntOffPath_LoadEnd) {
       // Load from a ptr T var if available
       auto ptrs = excluding(vars.ptrsOf(targetType), excludeName);
       if (!ptrs.empty()) {
         auto *pv = pickOne(rng, ptrs);
-        return Atom{LoadAtom{localLV(pv->name), {}}, {}};
+        return Atom{LoadAtom{buildLValue(pv->name), {}}, {}};
       }
     }
     if (s < rysmith::hp::kIntOffPath_SelectEnd && cfg.enableSelect) {
@@ -760,7 +760,7 @@ namespace refractir::reify {
       const ExprGenConfig &cfg, const std::optional<std::string> &excludeName = std::nullopt
   ) {
     auto fpVars = excluding(vars.scalarsOf(targetType), excludeName);
-    auto i32scalars = excluding(vars.scalarsOf(makeI32()), excludeName);
+    auto i32scalars = excluding(vars.scalarsOf(buildI32()), excludeName);
 
     std::uniform_int_distribution<int> slot(0, 99);
     int s = slot(rng);
@@ -777,8 +777,8 @@ namespace refractir::reify {
       // Multiply by concrete float literal
       auto *v = pickOne(rng, fpVars);
       std::uniform_int_distribution<std::size_t> ld(0, rysmith::hp::kFloatMulCoefPoolSize - 1);
-      return opAtom(
-          AtomOpKind::Mul, floatCoef(rysmith::hp::kFloatMulCoefPool[ld(rng)]), localLV(v->name)
+      return buildOpAtom(
+          AtomOpKind::Mul, floatCoef(rysmith::hp::kFloatMulCoefPool[ld(rng)]), buildLValue(v->name)
       );
     }
     if (s < rysmith::hp::kFloatOnPath_CastFromVarEnd && !i32scalars.empty()) {
@@ -829,23 +829,23 @@ namespace refractir::reify {
     }
     if (s < rysmith::hp::kFloatOffPath_ReadEnd) {
       auto *v = pickOne(rng, fpVars);
-      return rvalAtom(localLV(v->name));
+      return buildRValAtom(buildLValue(v->name));
     }
     // Floats admit Mul / Div / Mod (fmod) per the typechecker; the
     // div-by-zero / overflow UB these can hit at runtime never fires in an
     // off-path block, and bit-exactness is moot for code that never
     // executes — it only has to compile.
-    auto pickVar = [&]() { return localLV(pickOne(rng, fpVars)->name); };
+    auto pickVar = [&]() { return buildLValue(pickOne(rng, fpVars)->name); };
     if (s < rysmith::hp::kFloatOffPath_MulEnd)
-      return opAtom(
+      return buildOpAtom(
           AtomOpKind::Mul, pickOffPathFpCoef(rng, vars, targetType, excludeName), pickVar()
       );
     if (s < rysmith::hp::kFloatOffPath_DivEnd)
-      return opAtom(
+      return buildOpAtom(
           AtomOpKind::Div, pickOffPathFpCoef(rng, vars, targetType, excludeName), pickVar()
       );
     if (s < rysmith::hp::kFloatOffPath_ModEnd)
-      return opAtom(
+      return buildOpAtom(
           AtomOpKind::Mod, pickOffPathFpCoef(rng, vars, targetType, excludeName), pickVar()
       );
     if (s < rysmith::hp::kFloatOffPath_IntrinsicEnd && cfg.enableIntrinsics) {
@@ -874,7 +874,7 @@ namespace refractir::reify {
       if (nameExcluded(v->name))
         continue;
       if (TypeUtils::areTypesEqual(v->type, ptee)) {
-        options.push_back(Atom{AddrAtom{localLV(v->name), {}}, {}});
+        options.push_back(buildAddrAtom(buildLValue(v->name)));
       }
     }
 
@@ -886,7 +886,7 @@ namespace refractir::reify {
     std::function<void(const LValue &, const TypePtr &)> collectSub = [&](const LValue &lv,
                                                                           const TypePtr &t) {
       if (TypeUtils::areTypesEqual(t, ptee))
-        options.push_back(Atom{AddrAtom{lv, {}}, {}});
+        options.push_back(buildAddrAtom(lv));
       if (auto *at = std::get_if<ArrayType>(&t->v)) {
         for (uint64_t i = 0; i < at->size; i++) {
           LValue sub = lv;
@@ -915,14 +915,14 @@ namespace refractir::reify {
     for (auto *pv: vars.ptrsOf(ptee)) {
       if (nameExcluded(pv->name))
         continue;
-      options.push_back(rvalAtom(localLV(pv->name)));
+      options.push_back(buildRValAtom(buildLValue(pv->name)));
     }
 
     // load from a ptr ptr T var to materialise a ptr T value
     for (auto *ppv: vars.ptrsOf(targetType)) {
       if (nameExcluded(ppv->name))
         continue;
-      options.push_back(Atom{LoadAtom{localLV(ppv->name), {}}, {}});
+      options.push_back(Atom{LoadAtom{buildLValue(ppv->name), {}}, {}});
     }
 
     // PtrIndexAtom: if ptee is scalar and there exists a
@@ -940,7 +940,7 @@ namespace refractir::reify {
         if (TypeUtils::areTypesEqual(at.elem, ptee)) {
           std::uniform_int_distribution<int64_t> idxd(0, (int64_t) at.size - 1);
           PtrIndexAtom pi;
-          pi.rval = localLV(v.name);
+          pi.rval = buildLValue(v.name);
           pi.index = Index{IntLit{idxd(rng), {}}};
           options.push_back(Atom{std::move(pi), {}});
         }
@@ -964,7 +964,7 @@ namespace refractir::reify {
         for (const auto &f: sd.fields) {
           if (TypeUtils::areTypesEqual(f.type, ptee)) {
             PtrFieldAtom pf;
-            pf.rval = localLV(v.name);
+            pf.rval = buildLValue(v.name);
             pf.field = f.name;
             options.push_back(Atom{std::move(pf), {}});
           }
@@ -976,7 +976,7 @@ namespace refractir::reify {
       std::uniform_int_distribution<int> d(0, (int) options.size() - 1);
       return std::move(options[d(rng)]);
     }
-    return coefAtom(NullLit{{}});
+    return buildCoefAtom(NullLit{{}});
   }
 
   // ---------------------------------------------------------------------------
@@ -1080,19 +1080,21 @@ namespace refractir::reify {
     Atom nav;
     if (c.isStruct) {
       PtrFieldAtom pf;
-      pf.rval = localLV(c.src);
+      pf.rval = buildLValue(c.src);
       pf.field = c.runFields[(std::size_t) b];
       nav = Atom{std::move(pf), {}};
     } else {
       PtrIndexAtom pi;
-      pi.rval = localLV(c.src);
+      pi.rval = buildLValue(c.src);
       pi.index = Index{IntLit{b, {}}};
       nav = Atom{std::move(pi), {}};
     }
 
     Expr rhs;
     rhs.first = std::move(nav);
-    rhs.rest.push_back({d > 0 ? AddOp::Plus : AddOp::Minus, coefAtom(intCoef(d > 0 ? d : -d)), {}});
+    rhs.rest.push_back(
+        {d > 0 ? AddOp::Plus : AddOp::Minus, buildCoefAtom(intCoef(d > 0 ? d : -d)), {}}
+    );
     return rhs;
   }
 
@@ -1235,11 +1237,11 @@ namespace refractir::reify {
     int64_t d = r - an.i;
 
     Expr step;
-    step.first = rvalAtom(localLV(an.ptr));
+    step.first = buildRValAtom(buildLValue(an.ptr));
     step.rest.push_back(
-        {d > 0 ? AddOp::Plus : AddOp::Minus, coefAtom(intCoef(d > 0 ? d : -d)), {}}
+        {d > 0 ? AddOp::Plus : AddOp::Minus, buildCoefAtom(intCoef(d > 0 ? d : -d)), {}}
     );
-    result.push_back(Instr{AssignInstr{localLV(lhsName), std::move(step), {}}});
+    result.push_back(Instr{AssignInstr{buildLValue(lhsName), std::move(step), {}}});
     return true;
   }
 
@@ -1366,19 +1368,19 @@ namespace refractir::reify {
         Atom nav;
         if (st.isField) {
           PtrFieldAtom pf;
-          pf.rval = localLV(cur);
+          pf.rval = buildLValue(cur);
           pf.field = st.field;
           nav = Atom{std::move(pf), {}};
         } else {
           PtrIndexAtom pi;
-          pi.rval = localLV(cur);
+          pi.rval = buildLValue(cur);
           pi.index =
               Index{IntLit{std::uniform_int_distribution<int64_t>(0, st.arraySize - 1)(rng), {}}};
           nav = Atom{std::move(pi), {}};
         }
         Expr e;
         e.first = std::move(nav);
-        result.push_back(Instr{AssignInstr{localLV(dst), std::move(e), {}}});
+        result.push_back(Instr{AssignInstr{buildLValue(dst), std::move(e), {}}});
         cur = dst;
       }
       return true;
@@ -1443,15 +1445,15 @@ namespace refractir::reify {
         int64_t c = d(rng);
         if (c == 0)
           c = 2; // a 0 coef folds the term and drops the read
-        return opAtom(AtomOpKind::Mul, intCoef(c), localLV(v->name));
+        return buildOpAtom(AtomOpKind::Mul, intCoef(c), buildLValue(v->name));
       }
       if (mul && TypeUtils::isFloat(targetType)) {
         std::uniform_int_distribution<std::size_t> d(0, rysmith::hp::kFloatMulCoefPoolSize - 1);
-        return opAtom(
-            AtomOpKind::Mul, floatCoef(rysmith::hp::kFloatMulCoefPool[d(rng)]), localLV(v->name)
+        return buildOpAtom(
+            AtomOpKind::Mul, floatCoef(rysmith::hp::kFloatMulCoefPool[d(rng)]), buildLValue(v->name)
         );
       }
-      return rvalAtom(localLV(v->name));
+      return buildRValAtom(buildLValue(v->name));
     }
     auto scalarWidth = [](const TypePtr &t) -> uint32_t {
       if (TypeUtils::isInt(t))
@@ -1481,7 +1483,7 @@ namespace refractir::reify {
     auto ptrs = excluding(vars.ptrsOf(targetType), excludeName);
     if (!ptrs.empty()) {
       auto *pv = pickOne(rng, ptrs);
-      return Atom{LoadAtom{localLV(pv->name), {}}, {}};
+      return Atom{LoadAtom{buildLValue(pv->name), {}}, {}};
     }
     return std::nullopt;
   }
@@ -1629,20 +1631,22 @@ namespace refractir::reify {
             int s = slot(rng);
             if (s < rysmith::hp::kVecCopyEnd) {
               auto *v = pickOne(rng, vecs);
-              a = rvalAtom(localLV(v->name));
+              a = buildRValAtom(buildLValue(v->name));
             } else if (s < rysmith::hp::kVecSymMulEnd && onPath && sym) {
               auto *v = pickOne(rng, vecs);
-              a = opAtom(AtomOpKind::Mul, symCoef(sym->nextCoef(vt.elem)), localLV(v->name));
+              a = buildOpAtom(
+                  AtomOpKind::Mul, symCoef(sym->nextCoef(vt.elem)), buildLValue(v->name)
+              );
             } else if (s < rysmith::hp::kVecConcMulEnd) {
               auto *v = pickOne(rng, vecs);
               int64_t c = std::uniform_int_distribution<
                   int64_t>(rysmith::hp::kVecConcMulLo, rysmith::hp::kVecConcMulHi)(rng);
               if (c == 0)
                 c = 1;
-              a = opAtom(AtomOpKind::Mul, intCoef(c), localLV(v->name));
+              a = buildOpAtom(AtomOpKind::Mul, intCoef(c), buildLValue(v->name));
             } else {
               auto *v = pickOne(rng, vecs);
-              a = rvalAtom(localLV(v->name));
+              a = buildRValAtom(buildLValue(v->name));
             }
           } else {
             // No vec vars — shouldn't happen for whole-vec assign (guarded
@@ -1658,7 +1662,7 @@ namespace refractir::reify {
           if (ts < rysmith::hp::kVecTailCopyEnd && !vecs.empty()) {
             // Vec copy (lane-wise +/- with another vec var).
             auto *v = pickOne(rng, vecs);
-            a = rvalAtom(localLV(v->name));
+            a = buildRValAtom(buildLValue(v->name));
           } else if (ts < rysmith::hp::kVecTailOpEnd && !vecs.empty()) {
             // OpAtom on vec var.
             auto *v = pickOne(rng, vecs);
@@ -1666,7 +1670,7 @@ namespace refractir::reify {
                 int64_t>(rysmith::hp::kVecConcMulLo, rysmith::hp::kVecConcMulHi)(rng);
             if (c == 0)
               c = 1;
-            a = opAtom(AtomOpKind::Mul, intCoef(c), localLV(v->name));
+            a = buildOpAtom(AtomOpKind::Mul, intCoef(c), buildLValue(v->name));
           } else {
             // Broadcast scalar literal (valid in +/- tail position). The
             // int draw uses the same per-width concrete pool as bare
@@ -1685,7 +1689,7 @@ namespace refractir::reify {
         }
       } else {
         // Unknown type (e.g. struct) — fallback to i32 concrete atom
-        a = genConcreteIntAtom(rng, makeI32());
+        a = genConcreteIntAtom(rng, buildI32());
       }
       atoms.push_back(std::move(a));
     }
@@ -1737,7 +1741,7 @@ namespace refractir::reify {
     if (!scalarsOfT.empty()) {
       // RValueAtom: type is determined by the variable's declared type
       auto *v = pickOne(rng, scalarsOfT);
-      return rvalAtom(localLV(v->name));
+      return buildRValAtom(buildLValue(v->name));
     }
     if (!otherIntScalars.empty()) {
       // CastAtom: explicitly typed by dstType
@@ -1777,7 +1781,7 @@ namespace refractir::reify {
       std::uniform_int_distribution<int> coin(0, 1);
       if (coin(rng)) {
         auto *v = pickOne(rng, scalarsOfT);
-        return rvalAtom(localLV(v->name));
+        return buildRValAtom(buildLValue(v->name));
       }
     }
     // CastAtom{SymId, targetType}: prints as "<solved_value> as <type>"
@@ -1846,17 +1850,19 @@ namespace refractir::reify {
           if (onPath && sym) {
             std::uniform_int_distribution<int> slot(0, 1);
             if (slot(rng) == 0)
-              a = rvalAtom(localLV(v->name));
+              a = buildRValAtom(buildLValue(v->name));
             else
-              a = opAtom(AtomOpKind::Mul, symCoef(sym->nextCoef(vt.elem)), localLV(v->name));
+              a = buildOpAtom(
+                  AtomOpKind::Mul, symCoef(sym->nextCoef(vt.elem)), buildLValue(v->name)
+              );
           } else {
-            a = rvalAtom(localLV(v->name));
+            a = buildRValAtom(buildLValue(v->name));
           }
         } else if (i > 0 && !vecs.empty()) {
           std::uniform_int_distribution<int> ts(0, 1);
           if (ts(rng) == 0) {
             auto *v = pickOne(rng, vecs);
-            a = rvalAtom(localLV(v->name));
+            a = buildRValAtom(buildLValue(v->name));
           } else {
             CoefAtom ca;
             if (TypeUtils::isFloat(vt.elem))
@@ -1872,7 +1878,7 @@ namespace refractir::reify {
         }
       } else {
         // Struct type — generate i32 concrete (struct assignments handled specially)
-        a = genConcreteIntAtom(rng, makeI32());
+        a = genConcreteIntAtom(rng, buildI32());
       }
       atoms.push_back(std::move(a));
     }
@@ -1960,7 +1966,7 @@ namespace refractir::reify {
   ) {
     // Pick a random integer scalar type from available vars for the condition
     auto scalars = vars.allScalars();
-    TypePtr condType = makeI32(); // default
+    TypePtr condType = buildI32(); // default
     if (!scalars.empty()) {
       // Filter to int types only (can't compare floats with relational ops in RefractIR)
       std::vector<const VarEntry *> intScalars;
@@ -2013,7 +2019,7 @@ namespace refractir::reify {
   static std::optional<AssignTarget>
   pickAssignTarget(std::mt19937 &rng, const VarCatalogue &vars, const VarEntry &lhsVar) {
     if (TypeUtils::isScalar(lhsVar.type))
-      return AssignTarget{localLV(lhsVar.name), lhsVar.type};
+      return AssignTarget{buildLValue(lhsVar.name), lhsVar.type};
 
     if (std::holds_alternative<ArrayType>(lhsVar.type->v)) {
       const auto &at = std::get<ArrayType>(lhsVar.type->v);
@@ -2060,7 +2066,7 @@ namespace refractir::reify {
         if (scalars.empty())
           return std::nullopt;
         auto *sv = pickOne(rng, scalars);
-        return AssignTarget{localLV(sv->name), sv->type};
+        return AssignTarget{buildLValue(sv->name), sv->type};
       }
       std::uniform_int_distribution<int> fpick(0, (int) sd->fields.size() - 1);
       const auto &f = sd->fields[fpick(rng)];
@@ -2090,10 +2096,10 @@ namespace refractir::reify {
       bool canWholeVec = !sameVecs.empty();
       std::uniform_int_distribution<int> vslot(0, 99);
       if (canWholeVec && vslot(rng) >= rysmith::hp::kVecLaneWriteProb)
-        return AssignTarget{localLV(lhsVar.name), lhsVar.type};
+        return AssignTarget{buildLValue(lhsVar.name), lhsVar.type};
       // Lane write: %vec[i] = scalar_expr
       std::uniform_int_distribution<int64_t> ld(0, (int64_t) vt.size - 1);
-      LValue lhs = localLV(lhsVar.name);
+      LValue lhs = buildLValue(lhsVar.name);
       lhs.accesses.push_back(AccessIndex{Index{IntLit{ld(rng), {}}}, {}});
       return AssignTarget{std::move(lhs), vt.elem};
     }
@@ -2109,7 +2115,7 @@ namespace refractir::reify {
       std::vector<Instr> &out, std::mt19937 &rng, const VarCatalogue &vars, const VarEntry &lhsVar,
       bool onPath, const ExprGenConfig &cfg
   ) {
-    LValue lhs = localLV(lhsVar.name);
+    LValue lhs = buildLValue(lhsVar.name);
 
     // First try the pointer-arithmetic slot: an in-bounds element step off an
     // aggregate the LHS pointee lives in. genPtrArithRhs covers both
@@ -2142,7 +2148,9 @@ namespace refractir::reify {
         if (!(ca && std::holds_alternative<NullLit>(ca->coef))) {
           std::uniform_int_distribution<int64_t> mag(1, rysmith::hp::kOffPathPtrStrideMax);
           bool minus = std::uniform_int_distribution<int>(0, 1)(rng) == 1;
-          rhs.rest.push_back({minus ? AddOp::Minus : AddOp::Plus, coefAtom(intCoef(mag(rng))), {}});
+          rhs.rest.push_back(
+              {minus ? AddOp::Minus : AddOp::Plus, buildCoefAtom(intCoef(mag(rng))), {}}
+          );
         }
         out.push_back(Instr{AssignInstr{std::move(lhs), std::move(rhs), {}}});
         emitted = true;
@@ -2178,7 +2186,7 @@ namespace refractir::reify {
       // plain ptr copy is a useful, semantically distinct shape, and adding
       // `+ 1` to an arbitrary scalar-ptr source would step past its
       // single-element `addr %scalar` object and make any later `load %p` UB.
-      Expr rhs = simpleExpr(genPtrAtom(rng, vars, lhsVar.type, lhsVar.name));
+      Expr rhs = buildExpr(genPtrAtom(rng, vars, lhsVar.type, lhsVar.name));
       out.push_back(Instr{AssignInstr{std::move(lhs), std::move(rhs), {}}});
     }
   }
@@ -2214,7 +2222,7 @@ namespace refractir::reify {
         return false;
       auto *pv = pickOne(rng, ptrVars);
       TypePtr ptee = TypeUtils::pointee(pv->type);
-      Expr ptrExpr = simpleExpr(rvalAtom(localLV(pv->name)));
+      Expr ptrExpr = buildExpr(buildRValAtom(buildLValue(pv->name)));
       Expr valExpr;
       if (TypeUtils::isInt(ptee) || TypeUtils::isFloat(ptee)) {
         auto [ve, reqs] = genExprWithRequires(rng, sym, vars, ptee, onPath, cfg);
@@ -2227,7 +2235,7 @@ namespace refractir::reify {
         // yields a single valid pointer atom (addr / ptr-copy / load /
         // ptrindex / ptrfield); the solver models the stored provenance, so
         // a later load through the slot reads the right object on-path.
-        valExpr = simpleExpr(genPtrAtom(rng, vars, ptee));
+        valExpr = buildExpr(genPtrAtom(rng, vars, ptee));
       } else {
         // Aggregate pointee — no whole-aggregate store (SPEC: navigate to a
         // scalar/pointer leaf first).

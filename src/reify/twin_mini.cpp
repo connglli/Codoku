@@ -1,5 +1,5 @@
 #include "reify/twin_mini.hpp"
-#include "reify/ast_builder.hpp"
+#include "ast/build.hpp"
 
 namespace refractir::reify {
 
@@ -10,9 +10,9 @@ namespace refractir::reify {
       return std::make_shared<Type>(Type{ft, {}});
     }
     if (v.bits == 32)
-      return makeI32();
+      return buildI32();
     if (v.bits == 64)
-      return makeI64();
+      return buildI64();
     return std::make_shared<Type>(
         Type{IntType{IntType::Kind::ICustom, static_cast<int>(v.bits), {}}, {}}
     );
@@ -45,16 +45,10 @@ namespace refractir::reify {
     return k;
   }
 
-  LValue leafLV(const std::string &root, const std::vector<Access> &path) {
-    return LValue{LocalId{root, {}}, path, {}};
-  }
-
-  Expr rvalExpr(LValue lv) { return Expr{Atom{RValueAtom{std::move(lv), {}}, {}}, {}, {}}; }
-
   Expr ptrFixExpr(const std::optional<LValue> &target) {
     if (target)
-      return Expr{Atom{AddrAtom{*target, {}}, {}}, {}, {}};
-    return Expr{Atom{CoefAtom{Coef{NullLit{}}, {}}, {}}, {}, {}};
+      return buildAddrExpr(*target);
+    return buildNullExpr();
   }
 
   InitVal stateToInit(const StateValue &v, const TypePtr &ty, const StructMap &structs) {
@@ -138,7 +132,9 @@ namespace refractir::reify {
     for (const auto &r: roots)
       for (const auto &fx: r.ptrFixes)
         if (fx.initTarget)
-          out.push_back(Instr{AssignInstr{leafLV(r.name, fx.path), ptrFixExpr(fx.initTarget), {}}});
+          out.push_back(
+              Instr{AssignInstr{buildLValue(r.name, fx.path), ptrFixExpr(fx.initTarget), {}}}
+          );
     return out;
   }
 
@@ -146,7 +142,9 @@ namespace refractir::reify {
     std::vector<Instr> out;
     for (const auto &r: roots)
       for (const auto &fx: r.ptrFixes)
-        out.push_back(Instr{AssignInstr{leafLV(r.name, fx.path), ptrFixExpr(fx.finalTarget), {}}});
+        out.push_back(
+            Instr{AssignInstr{buildLValue(r.name, fx.path), ptrFixExpr(fx.finalTarget), {}}}
+        );
     return out;
   }
 

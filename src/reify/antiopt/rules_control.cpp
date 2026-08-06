@@ -51,10 +51,10 @@ namespace refractir::reify::antiopt {
     // An atom of a select value: a read of the local, or the literal itself.
     std::optional<Atom> atomOfSelectVal(const SelectVal &sv) {
       if (auto nm = nameOfSelectVal(sv))
-        return localAtom(*nm);
+        return buildLocalAtom(*nm);
       if (auto co = std::get_if<Coef>(&sv))
         if (auto lit = std::get_if<IntLit>(co))
-          return intAtom(lit->value);
+          return buildIntAtom(lit->value);
       return std::nullopt;
     }
 
@@ -67,7 +67,7 @@ namespace refractir::reify::antiopt {
       cmp.op = op;
       cmp.lhs = std::move(lhs);
       cmp.rhs = std::move(rhs);
-      out.push_back(assignInstr(localLV(c), simpleExpr(Atom{std::move(cmp), {}})));
+      out.push_back(buildAssign(buildLValue(c), buildExpr(Atom{std::move(cmp), {}})));
       return c;
     }
 
@@ -119,23 +119,23 @@ namespace refractir::reify::antiopt {
               !match(sel->cond->rhs, m_One(m_Var(m_Local(rhs)))))
             return {};
           cond = emitCmp(
-              sel->cond->op, SelectVal{RValue{localLV(lhs)}}, SelectVal{RValue{localLV(rhs)}}, ctx,
-              out
+              sel->cond->op, SelectVal{RValue{buildLValue(lhs)}},
+              SelectVal{RValue{buildLValue(rhs)}}, ctx, out
           );
         }
 
         const std::string mask = ctx.names.fresh(ty, ctx.lets);
         const std::string diff = ctx.names.fresh(ty, ctx.lets);
         out.push_back(
-            assignInstr(localLV(mask), simpleExpr(Atom{CastAtom{localLV(cond), ty, {}}, {}}))
+            buildAssign(buildLValue(mask), buildExpr(Atom{CastAtom{buildLValue(cond), ty, {}}, {}}))
         );
         Expr sub{cloneAtom(*vtrue), {}, {}};
-        addTail(sub, AddOp::Minus, cloneAtom(*vfalse));
-        out.push_back(assignInstr(localLV(diff), std::move(sub)));
-        out.push_back(assignInstr(localLV(diff), opExpr(diff, AtomOpKind::And, mask)));
+        appendTail(sub, AddOp::Minus, cloneAtom(*vfalse));
+        out.push_back(buildAssign(buildLValue(diff), std::move(sub)));
+        out.push_back(buildAssign(buildLValue(diff), buildOpExpr(diff, AtomOpKind::And, mask)));
         Expr sum{cloneAtom(*vfalse), {}, {}};
-        addTail(sum, AddOp::Plus, localAtom(diff));
-        out.push_back(assignInstr(ai.lhs, std::move(sum)));
+        appendTail(sum, AddOp::Plus, buildLocalAtom(diff));
+        out.push_back(buildAssign(ai.lhs, std::move(sum)));
         return out;
       }
 
@@ -194,7 +194,7 @@ namespace refractir::reify::antiopt {
         std::vector<Instr> out;
         const std::string c1 = emitCmp(parts.first_, cmp->lhs, cmp->rhs, ctx, out);
         const std::string c2 = emitCmp(parts.second_, cmp->lhs, cmp->rhs, ctx, out);
-        out.push_back(assignInstr(ai.lhs, opExpr(c1, parts.join, c2)));
+        out.push_back(buildAssign(ai.lhs, buildOpExpr(c1, parts.join, c2)));
         return out;
       }
 
@@ -269,10 +269,10 @@ namespace refractir::reify::antiopt {
         TypePtr ty = localType(ctx.fn, ctx.lets, x);
         const std::string diff = ctx.names.fresh(ty, ctx.lets);
 
-        Expr sub = simpleExpr(localAtom(x));
-        addTail(sub, AddOp::Minus, localAtom(y));
+        Expr sub = buildExpr(buildLocalAtom(x));
+        appendTail(sub, AddOp::Minus, buildLocalAtom(y));
         std::vector<Instr> out;
-        out.push_back(assignInstr(localLV(diff), std::move(sub)));
+        out.push_back(buildAssign(buildLValue(diff), std::move(sub)));
         // A bare `0` in a `cmp` is an i32 literal and nothing else: the
         // comparison's operands must share a width (spec §6.5), so the zero
         // gets a cell of the operand's own type rather than being written
@@ -281,9 +281,9 @@ namespace refractir::reify::antiopt {
         const std::string zeroCell = ctx.names.literal(0, ty, ctx.lets);
         CmpAtom zero;
         zero.op = cmp->op;
-        zero.lhs = SelectVal{RValue{localLV(diff)}};
-        zero.rhs = SelectVal{RValue{localLV(zeroCell)}};
-        out.push_back(assignInstr(ai.lhs, simpleExpr(Atom{std::move(zero), {}})));
+        zero.lhs = SelectVal{RValue{buildLValue(diff)}};
+        zero.rhs = SelectVal{RValue{buildLValue(zeroCell)}};
+        out.push_back(buildAssign(ai.lhs, buildExpr(Atom{std::move(zero), {}})));
         return out;
       }
 
@@ -350,21 +350,21 @@ namespace refractir::reify::antiopt {
         TypePtr ty = localType(ctx.fn, ctx.lets, ai.lhs.base.name);
         std::vector<Instr> out;
 
-        auto arg = [&](std::size_t i) { return SelectVal{RValue{localLV(c.args[i])}}; };
+        auto arg = [&](std::size_t i) { return SelectVal{RValue{buildLValue(c.args[i])}}; };
         if (c.callee == "@min" || c.callee == "@max") {
           const std::string cond =
               emitCmp(c.callee == "@min" ? RelOp::LT : RelOp::GT, arg(0), arg(1), ctx, out);
-          out.push_back(assignInstr(ai.lhs, selectOn(cond, arg(0), arg(1))));
+          out.push_back(buildAssign(ai.lhs, selectOn(cond, arg(0), arg(1))));
           return out;
         }
         if (c.callee == "@abs") {
           const std::string cond = emitCmp(RelOp::LT, arg(0), zeroOf(ty, ctx), ctx, out);
           const std::string neg = ctx.names.fresh(ty, ctx.lets);
-          Expr sub = simpleExpr(intAtom(0));
-          addTail(sub, AddOp::Minus, localAtom(c.args[0]));
-          out.push_back(assignInstr(localLV(neg), std::move(sub)));
+          Expr sub = buildExpr(buildIntAtom(0));
+          appendTail(sub, AddOp::Minus, buildLocalAtom(c.args[0]));
+          out.push_back(buildAssign(buildLValue(neg), std::move(sub)));
           out.push_back(
-              assignInstr(ai.lhs, selectOn(cond, SelectVal{RValue{localLV(neg)}}, arg(0)))
+              buildAssign(ai.lhs, selectOn(cond, SelectVal{RValue{buildLValue(neg)}}, arg(0)))
           );
           return out;
         }
@@ -375,14 +375,14 @@ namespace refractir::reify::antiopt {
         const std::string a = ctx.names.fresh(ty, ctx.lets);
         const std::string b = ctx.names.fresh(ty, ctx.lets);
         out.push_back(
-            assignInstr(localLV(a), simpleExpr(Atom{CastAtom{localLV(neg), ty, {}}, {}}))
+            buildAssign(buildLValue(a), buildExpr(Atom{CastAtom{buildLValue(neg), ty, {}}, {}}))
         );
         out.push_back(
-            assignInstr(localLV(b), simpleExpr(Atom{CastAtom{localLV(posi), ty, {}}, {}}))
+            buildAssign(buildLValue(b), buildExpr(Atom{CastAtom{buildLValue(posi), ty, {}}, {}}))
         );
-        Expr diff = simpleExpr(localAtom(a));
-        addTail(diff, AddOp::Minus, localAtom(b));
-        out.push_back(assignInstr(ai.lhs, std::move(diff)));
+        Expr diff = buildExpr(buildLocalAtom(a));
+        appendTail(diff, AddOp::Minus, buildLocalAtom(b));
+        out.push_back(buildAssign(ai.lhs, std::move(diff)));
         return out;
       }
 
@@ -402,15 +402,15 @@ namespace refractir::reify::antiopt {
       // As in compare-to-diff: a literal zero in a `cmp` is i32, so it takes
       // a cell of the compared type instead.
       static SelectVal zeroOf(const TypePtr &ty, AntiOptContext &ctx) {
-        return SelectVal{RValue{localLV(ctx.names.literal(0, ty, ctx.lets))}};
+        return SelectVal{RValue{buildLValue(ctx.names.literal(0, ty, ctx.lets))}};
       }
 
       static Expr selectOn(const std::string &cond, SelectVal vtrue, SelectVal vfalse) {
         SelectAtom sel;
-        sel.maskExpr = std::make_unique<Expr>(simpleExpr(localAtom(cond)));
+        sel.maskExpr = std::make_unique<Expr>(buildExpr(buildLocalAtom(cond)));
         sel.vtrue = std::move(vtrue);
         sel.vfalse = std::move(vfalse);
-        return simpleExpr(Atom{std::move(sel), {}});
+        return buildExpr(Atom{std::move(sel), {}});
       }
 
       // `%d = call @<one we can write out>(<locals>)`. The resolved overload

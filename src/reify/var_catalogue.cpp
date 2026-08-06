@@ -6,7 +6,7 @@
 #include <functional>
 #include "reify/hyperparameters.hpp"
 
-#include "reify/ast_builder.hpp"
+#include "ast/build.hpp"
 
 namespace refractir::reify {
 
@@ -232,11 +232,11 @@ namespace refractir::reify {
         }
 
         // Guarantee at least one i32 scalar (needed as fallback RValue)
-        auto i32scalars = cat.scalarsOf(makeI32());
+        auto i32scalars = cat.scalarsOf(buildI32());
         if (i32scalars.empty()) {
           VarEntry v;
           v.name = "%v" + std::to_string(scalarIdx++);
-          v.type = makeI32();
+          v.type = buildI32();
           cat.vars.push_back(std::move(v));
         }
       }

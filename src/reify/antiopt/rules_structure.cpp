@@ -47,13 +47,13 @@ namespace refractir::reify::antiopt {
 
         Expr head{cloneAtom(ai.rhs.first), {}, {}};
         head.rest.push_back(Expr::Tail{ai.rhs.rest[0].op, cloneAtom(ai.rhs.rest[0].atom), {}});
-        Expr tail{Atom{CoefAtom{Coef{LocalOrSymId{LocalId{tmp, {}}}}, {}}, {}}, {}, {}};
+        Expr tail{buildLocalAtom(tmp), {}, {}};
         for (std::size_t i = 1; i < ai.rhs.rest.size(); ++i)
           tail.rest.push_back(Expr::Tail{ai.rhs.rest[i].op, cloneAtom(ai.rhs.rest[i].atom), {}});
 
         std::vector<Instr> out;
-        out.push_back(assignInstr(localLV(tmp), std::move(head)));
-        out.push_back(assignInstr(ai.lhs, std::move(tail)));
+        out.push_back(buildAssign(buildLValue(tmp), std::move(head)));
+        out.push_back(buildAssign(ai.lhs, std::move(tail)));
         return out;
       }
 
@@ -156,7 +156,7 @@ namespace refractir::reify::antiopt {
         Instr user = cloneInstr(stmts[pos.stmt]);
         renameReads(user, src->name, copy);
         std::vector<Instr> out;
-        out.push_back(assignInstr(localLV(copy), cloneExpr(def.rhs)));
+        out.push_back(buildAssign(buildLValue(copy), cloneExpr(def.rhs)));
         out.push_back(std::move(user));
         return out;
       }
@@ -250,7 +250,7 @@ namespace refractir::reify::antiopt {
 
         std::vector<Instr> out;
         out.push_back(cloneInstr(stmts[pos.stmt]));
-        out.push_back(assignInstr(localLV(dead), std::move(e)));
+        out.push_back(buildAssign(buildLValue(dead), std::move(e)));
         return out;
       }
 
@@ -323,12 +323,14 @@ namespace refractir::reify::antiopt {
             ctx.names.fresh(std::make_shared<Type>(Type{PtrType{ty, {}}, {}}), ctx.lets);
 
         std::vector<Instr> out;
-        out.push_back(assignInstr(localLV(ptr), simpleExpr(Atom{AddrAtom{localLV(cell), {}}, {}})));
+        out.push_back(buildAssign(buildLValue(ptr), buildAddrExpr(buildLValue(cell))));
         StoreInstr st;
-        st.ptr = simpleExpr(localAtom(ptr));
+        st.ptr = buildExpr(buildLocalAtom(ptr));
         st.val = cloneExpr(std::get<AssignInstr>(stmts[pos.stmt]).rhs);
         out.push_back(Instr{std::move(st)});
-        out.push_back(assignInstr(localLV(d), simpleExpr(Atom{LoadAtom{localLV(ptr), {}}, {}})));
+        out.push_back(
+            buildAssign(buildLValue(d), buildExpr(Atom{LoadAtom{buildLValue(ptr), {}}, {}}))
+        );
         return out;
       }
 
