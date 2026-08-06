@@ -5,6 +5,36 @@
 
 namespace refractir {
 
+  std::string intrinsicSignature(const IntrinsicDecl &d) {
+    // One token per parameter, naming the type precisely enough that two
+    // overloads never collide: the width for an integer, the precision for a
+    // float, the lane count and element type for a vector. A type outside
+    // those families cannot appear in an intrinsic signature, and `?` keeps
+    // such a declaration distinct from a well-formed one rather than merging
+    // them silently.
+    auto scalar = [](const TypePtr &t) -> std::string {
+      if (auto bits = TypeUtils::getIntBitWidth(t))
+        return "i" + std::to_string(*bits);
+      if (auto ft = t ? std::get_if<FloatType>(&t->v) : nullptr)
+        return ft->kind == FloatType::Kind::F32 ? "f32" : "f64";
+      return "?";
+    };
+
+    std::string sig = d.name.name;
+    sig += "(";
+    for (std::size_t i = 0; i < d.params.size(); ++i) {
+      if (i > 0)
+        sig += ",";
+      const TypePtr &t = d.params[i].type;
+      if (auto vt = t ? std::get_if<VecType>(&t->v) : nullptr)
+        sig += "<" + std::to_string(vt->size) + ">" + scalar(vt->elem);
+      else
+        sig += scalar(t);
+    }
+    sig += ")";
+    return sig;
+  }
+
   refractir::PassResult SemChecker::run(Program &prog, DiagBag &diags) {
     std::unordered_set<std::string> globalNames;
 
@@ -48,37 +78,7 @@ namespace refractir {
       if (globalNames.count(d.name.name)) {
         diags.error("Duplicate global name (intrinsic): " + d.name.name, d.span);
       }
-      std::string sig = d.name.name;
-      sig += "(";
-      for (size_t i = 0; i < d.params.size(); ++i) {
-        if (i > 0)
-          sig += ",";
-        if (auto bits = TypeUtils::getIntBitWidth(d.params[i].type))
-          sig += "i" + std::to_string(*bits);
-        else if (auto ft =
-                     d.params[i].type ? std::get_if<FloatType>(&d.params[i].type->v) : nullptr)
-          // FP overloads must not collide on the same arity:
-          // @to_bits(f32) and @to_bits(f64) are distinct intrinsics with
-          // distinct lowerings.  Use the FP precision in the sig string so
-          // both can be declared in the same program.
-          sig += "f" + std::string(ft->kind == FloatType::Kind::F32 ? "32" : "64");
-        else if (auto vt =
-                     d.params[i].type ? std::get_if<VecType>(&d.params[i].type->v) : nullptr) {
-          // Reduction overloads differ by vector shape:
-          // @reduce_add(<4> i32) and @reduce_add(<8> i32) are distinct
-          // declarations.  Encode both the lane count and the element type
-          // so they don't collide on the same arity.
-          sig += "<" + std::to_string(vt->size) + ">";
-          if (auto ebits = TypeUtils::getIntBitWidth(vt->elem))
-            sig += "i" + std::to_string(*ebits);
-          else if (auto eft = vt->elem ? std::get_if<FloatType>(&vt->elem->v) : nullptr)
-            sig += "f" + std::string(eft->kind == FloatType::Kind::F32 ? "32" : "64");
-          else
-            sig += "?";
-        } else
-          sig += "?";
-      }
-      sig += ")";
+      const std::string sig = intrinsicSignature(d);
       if (intrinsicSigs.count(sig)) {
         diags.error("Duplicate intrinsic signature: " + d.name.name, d.span);
       }

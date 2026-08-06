@@ -7,6 +7,7 @@
 #include "analysis/intrinsics.hpp"
 #include "analysis/type_utils.hpp"
 #include "ast/ast.hpp"
+#include "frontend/semchecker.hpp"
 
 namespace refractir::reify {
 
@@ -83,33 +84,17 @@ namespace refractir::reify {
     return list;
   }
 
-  // Declare `name` in `prog.intrinsics` unless that exact signature is already
-  // there. Idempotent, so a caller may re-declare on every emission without
-  // checking first.
+  // Declare `name` in `prog.intrinsics` unless it is already declared.
+  // Idempotent, so a caller may re-declare on every emission without checking.
   //
-  // Signature identity is the whole signature, return type and parameter types
-  // included, not just the name: RefractIR admits overloaded intrinsics, and
-  // the generators use them (`@popcount` is emitted at both i32 and i64), so
-  // matching on name alone would drop the second width on the floor.
+  // Identity is intrinsicSignature's: the name and the parameter types. That
+  // is what the semantic checker rejects a program for repeating, so matching
+  // any more loosely would drop a legitimate overload and any more strictly
+  // would stage a program it rejects.
   inline void ensureIntrinsicDecl(
       Program &prog, const std::string &name, TypePtr retType,
       const std::vector<std::pair<std::string, TypePtr>> &params
   ) {
-    for (const auto &id: prog.intrinsics) {
-      if (id.name.name != name || id.params.size() != params.size())
-        continue;
-      if (!TypeUtils::areTypesEqual(id.retType, retType))
-        continue;
-      bool sameParams = true;
-      for (std::size_t i = 0; i < params.size(); ++i) {
-        if (!TypeUtils::areTypesEqual(id.params[i].type, params[i].second)) {
-          sameParams = false;
-          break;
-        }
-      }
-      if (sameParams)
-        return;
-    }
     IntrinsicDecl decl;
     decl.name = GlobalId{name, {}};
     decl.retType = std::move(retType);
@@ -119,6 +104,10 @@ namespace refractir::reify {
       pd.type = pType;
       decl.params.push_back(std::move(pd));
     }
+    const std::string sig = intrinsicSignature(decl);
+    for (const auto &existing: prog.intrinsics)
+      if (intrinsicSignature(existing) == sig)
+        return;
     prog.intrinsics.push_back(std::move(decl));
   }
 

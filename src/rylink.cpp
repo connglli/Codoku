@@ -48,6 +48,7 @@
 #include "cxxopts.hpp"
 #include "frontend/diagnostics.hpp"
 #include "frontend/pipeline.hpp"
+#include "frontend/semchecker.hpp"
 #include "reify/antiopt_transform.hpp"
 #include "reify/call_realize.hpp"
 #include "reify/cg_gen.hpp"
@@ -105,19 +106,6 @@ pickPoolIndices(std::mt19937 &rng, std::size_t k, std::size_t poolSize) {
     k = poolSize;
   all.resize(k);
   return all;
-}
-
-// Build a dedup key for IntrinsicDecl — "name|paramType0|paramType1..."
-// so that same-name intrinsics with different signatures (e.g. @popcount
-// i32 vs @popcount i64) are kept as separate declarations. Match the
-// semchecker's notion of "same intrinsic signature" exactly (it keys on
-// name + parameter types only); including the return type here would let
-// rylink stage a bundle that the semchecker then rejects as duplicate.
-[[nodiscard]] static std::string intrinsicKey(const IntrinsicDecl &d) {
-  std::string key = d.name.name;
-  for (const auto &p: d.params)
-    key += "|" + SIRPrinter::typeToString(p.type);
-  return key;
 }
 
 // Same-name structs in two merged programs must be structurally
@@ -179,7 +167,7 @@ pickPoolIndices(std::mt19937 &rng, std::size_t k, std::size_t poolSize) {
   // The semchecker now supports same-name intrinsics with different
   // signatures, so we must keep @popcount i32 distinct from @popcount i64.
   for (auto &id: src.intrinsics) {
-    if (haveIntrinsics.emplace(intrinsicKey(id)).second)
+    if (haveIntrinsics.emplace(intrinsicSignature(id)).second)
       bundle.intrinsics.push_back(std::move(id));
   }
 
