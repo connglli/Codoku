@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <random>
+#include "analysis/type_utils.hpp"
 #include "ast/ast.hpp"
 
 namespace refractir::reify {
@@ -27,21 +28,10 @@ namespace refractir::reify {
   // Generate a random integer scalar type (i8, i16, i32, i64)
   [[nodiscard]] TypePtr genIntType(std::mt19937 &rng);
 
-  // Type predicate helpers
-  [[nodiscard]] bool isIntType(const TypePtr &t);
-  [[nodiscard]] bool isFpType(const TypePtr &t);
-  [[nodiscard]] bool isPtrType(const TypePtr &t);
-  [[nodiscard]] bool isAggType(const TypePtr &t);    // array or struct
-  [[nodiscard]] bool isScalarType(const TypePtr &t); // int or fp (not ptr, not agg)
-  [[nodiscard]] bool isVecType(const TypePtr &t);    // <N> T
-
-  // Get the bitwidth of an integer type (8, 16, 32, 64, or custom bits)
+  // Width of an integer type. Unlike TypeUtils::getIntBitWidth, which reports
+  // "not an integer" as an empty optional, this asserts the caller has already
+  // established int-ness — which every generator site has, since it picked the
+  // type it is asking about.
   [[nodiscard]] std::uint32_t intBitWidth(const TypePtr &t);
-
-  // Get the pointee type of a ptr type
-  [[nodiscard]] TypePtr pointeeType(const TypePtr &t);
-
-  // Two types are "assignment compatible" (same kind and width/structure)
-  [[nodiscard]] bool typeEquals(const TypePtr &a, const TypePtr &b);
 
 } // namespace refractir::reify

@@ -157,7 +157,7 @@ namespace refractir::reify {
     ) {
       FunDecl &fn = prog.funs.front();
       Block &body = fn.blocks.front();
-      StructMap structs = structMap(prog);
+      StructMap structs = TypeUtils::buildStructTable(prog);
       std::vector<PathCheck> noChecks;
       NameAllocator names(kAntiOptLocalPrefix);
       DeclaredFacts facts(t);

@@ -61,14 +61,8 @@ namespace refractir {
     if (a->v.index() != b->v.index())
       return false;
 
-    if (auto ia = std::get_if<IntType>(&a->v)) {
-      auto ib = std::get_if<IntType>(&b->v);
-      if (ia->kind != ib->kind)
-        return false;
-      if (ia->kind == IntType::Kind::ICustom)
-        return ia->bits == ib->bits;
-      return true;
-    }
+    if (std::holds_alternative<IntType>(a->v))
+      return getIntBitWidth(a) == getIntBitWidth(b);
     if (auto fa = std::get_if<FloatType>(&a->v)) {
       auto fb = std::get_if<FloatType>(&b->v);
       return fa->kind == fb->kind;
@@ -110,6 +104,82 @@ namespace refractir {
   }
 
   bool TypeUtils::isVec(const TypePtr &t) { return t && std::holds_alternative<VecType>(t->v); }
+
+  const PtrType *TypeUtils::asPtr(const TypePtr &t) {
+    return t ? std::get_if<PtrType>(&t->v) : nullptr;
+  }
+
+  TypePtr TypeUtils::pointee(const TypePtr &t) {
+    const PtrType *pt = asPtr(t);
+    return pt ? pt->pointee : nullptr;
+  }
+
+  bool TypeUtils::isInt(const TypePtr &t) { return t && std::holds_alternative<IntType>(t->v); }
+
+  bool TypeUtils::isFloat(const TypePtr &t) { return t && std::holds_alternative<FloatType>(t->v); }
+
+  bool TypeUtils::isPtr(const TypePtr &t) { return t && std::holds_alternative<PtrType>(t->v); }
+
+  bool TypeUtils::isScalar(const TypePtr &t) { return isInt(t) || isFloat(t); }
+
+  bool TypeUtils::isAggregate(const TypePtr &t) { return isArray(t) || isStruct(t); }
+
+  TypeUtils::StructTable TypeUtils::buildStructTable(const Program &prog) {
+    StructTable table;
+    for (const auto &s: prog.structs)
+      table[s.name.name] = &s;
+    return table;
+  }
+
+  TypePtr TypeUtils::stepType(const TypePtr &t, const Access &acc, const StructTable &structs) {
+    if (auto af = std::get_if<AccessField>(&acc)) {
+      const StructType *st = asStruct(t);
+      if (!st)
+        return nullptr;
+      auto it = structs.find(st->name.name);
+      if (it == structs.end())
+        return nullptr;
+      for (const auto &f: it->second->fields)
+        if (f.name == af->field)
+          return f.type;
+      return nullptr;
+    }
+    if (const ArrayType *at = asArray(t))
+      return at->elem;
+    if (const VecType *vt = asVec(t))
+      return vt->elem;
+    return nullptr;
+  }
+
+  TypePtr TypeUtils::accessPathType(
+      const TypePtr &t, const std::vector<Access> &accesses, const StructTable &structs
+  ) {
+    TypePtr cur = t;
+    for (const auto &acc: accesses) {
+      cur = stepType(cur, acc, structs);
+      if (!cur)
+        return nullptr;
+    }
+    return cur;
+  }
+
+  bool TypeUtils::containsVec(const TypePtr &t, const StructTable &structs) {
+    if (!t)
+      return false;
+    if (isVec(t))
+      return true;
+    if (const ArrayType *at = asArray(t))
+      return containsVec(at->elem, structs);
+    if (const StructType *st = asStruct(t)) {
+      auto it = structs.find(st->name.name);
+      if (it == structs.end())
+        return false;
+      for (const auto &f: it->second->fields)
+        if (containsVec(f.type, structs))
+          return true;
+    }
+    return false;
+  }
 
   std::uint64_t TypeUtils::packedSizeof(const TypePtr &t, const StructTable &structs) {
     // The 8-byte fallbacks (null type, unknown struct) match the pointer

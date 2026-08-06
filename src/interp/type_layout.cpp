@@ -5,10 +5,7 @@
 
 namespace refractir {
 
-  TypeLayout::TypeLayout(const Program &prog) {
-    for (const auto &s: prog.structs)
-      structs_[s.name.name] = &s;
-  }
+  TypeLayout::TypeLayout(const Program &prog) : structs_(TypeUtils::buildStructTable(prog)) {}
 
   const StructDecl *TypeLayout::lookupStruct(const std::string &name) const {
     auto it = structs_.find(name);

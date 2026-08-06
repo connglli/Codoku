@@ -4,6 +4,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <vector>
 #include "ast/ast.hpp"
 
 namespace refractir {
@@ -44,6 +45,13 @@ namespace refractir {
 
     /**
      * Checks if two types are structurally equal.
+     *
+     * Integers compare by width, not by `IntType::Kind`. `I32` and `I64` are
+     * a shorthand for the two widths a program names most often, and `iN` is
+     * the same type however it was spelled; a caller that builds a type from
+     * a computed width has no way to know which spelling to reach for, so
+     * observing the distinction here would make equality depend on where a
+     * type came from rather than what it denotes.
      */
     static bool areTypesEqual(const TypePtr &a, const TypePtr &b);
 
@@ -58,6 +66,21 @@ namespace refractir {
     static const StructType *asStruct(const TypePtr &t);
 
     /**
+     * Casts to VecType if possible, otherwise returns nullptr.
+     */
+    static const VecType *asVec(const TypePtr &t);
+
+    /**
+     * Casts to PtrType if possible, otherwise returns nullptr.
+     */
+    static const PtrType *asPtr(const TypePtr &t);
+
+    /**
+     * The pointee of a `ptr T`, or nullptr when `t` is not a pointer.
+     */
+    static TypePtr pointee(const TypePtr &t);
+
+    /**
      * Returns true if the type is an array type.
      */
     static bool isArray(const TypePtr &t);
@@ -68,17 +91,76 @@ namespace refractir {
     static bool isStruct(const TypePtr &t);
 
     /**
-     * Casts to VecType if possible, otherwise returns nullptr.
-     */
-    static const VecType *asVec(const TypePtr &t);
-
-    /**
      * True iff the type is a vector type `<N> T`.
      */
     static bool isVec(const TypePtr &t);
 
+    /**
+     * True iff the type is an integer type `iN`.
+     */
+    static bool isInt(const TypePtr &t);
+
+    /**
+     * True iff the type is a float type (`f32` or `f64`).
+     */
+    static bool isFloat(const TypePtr &t);
+
+    /**
+     * True iff the type is a pointer type `ptr T`.
+     */
+    static bool isPtr(const TypePtr &t);
+
+    /**
+     * True iff the type is a scalar: an integer or a float. Vectors,
+     * pointers and aggregates are not scalars, though a vector's element
+     * type is.
+     */
+    static bool isScalar(const TypePtr &t);
+
+    /**
+     * True iff the type is an aggregate: an array or a struct. A vector is
+     * not an aggregate — its lanes are not addressable (SPEC §6.8.1).
+     */
+    static bool isAggregate(const TypePtr &t);
+
     /// Struct registry shared by every layout query: name → declaration.
     using StructTable = std::unordered_map<std::string, const StructDecl *>;
+
+    /**
+     * Index `prog`'s struct declarations by name. The entries point into
+     * `prog`, so the table is valid only while `prog` outlives it and its
+     * `structs` vector is not reallocated.
+     */
+    static StructTable buildStructTable(const Program &prog);
+
+    /**
+     * The static type reached from `t` by one access step: an element of an
+     * array or a vector, or a named field of a struct. Returns nullptr when
+     * the step does not apply — an index into a scalar, a field of a
+     * non-struct, an unknown struct, or a field the struct does not declare.
+     *
+     * An `AccessIndex` does not read its index. Whether the index is in
+     * bounds is a separate question from what type it lands on, and only the
+     * first is answerable statically.
+     */
+    static TypePtr stepType(const TypePtr &t, const Access &acc, const StructTable &structs);
+
+    /**
+     * The static type reached from `t` by following `accesses` in order.
+     * Returns nullptr as soon as a step does not apply, and `t` itself when
+     * `accesses` is empty.
+     */
+    static TypePtr accessPathType(
+        const TypePtr &t, const std::vector<Access> &accesses, const StructTable &structs
+    );
+
+    /**
+     * True iff a vector occurs anywhere inside `t`, at any depth through
+     * arrays and struct fields. A type that contains one cannot be navigated
+     * through a pointer, since vector lanes are not addressable
+     * (SPEC §6.8.1).
+     */
+    static bool containsVec(const TypePtr &t, const StructTable &structs);
 
     /**
      * Packed byte size of `t` — the one object-layout authority (SPEC §4:

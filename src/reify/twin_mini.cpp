@@ -3,13 +3,6 @@
 
 namespace refractir::reify {
 
-  StructMap structMap(const Program &prog) {
-    StructMap m;
-    for (const auto &sd: prog.structs)
-      m[sd.name.name] = &sd;
-    return m;
-  }
-
   TypePtr leafType(const StateValue &v) {
     if (v.kind == StateValue::Kind::Float) {
       FloatType ft;

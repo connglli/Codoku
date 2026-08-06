@@ -1,4 +1,5 @@
 #include "reify/expr_gen.hpp"
+#include "analysis/type_utils.hpp"
 #include "reify/ast_builder.hpp"
 
 #include <algorithm>
@@ -207,10 +208,10 @@ namespace refractir::reify {
         continue;
       // [bugfix] Vec lane operations create coef syms whose type is the
       // vec element type (expr_gen.cpp `sym->nextCoef(vt.elem)`), which
-      // can be f32 / f64. intBitWidth asserts isIntType and would
+      // can be f32 / f64. intBitWidth asserts int-ness and would
       // crash. The "large coef" notion only applies to integer
       // bit-vectors, so skip non-int coefs entirely.
-      if (!isIntType(e.type))
+      if (!TypeUtils::isInt(e.type))
         continue;
       // Effective feasible range for this coef = its declared --coef-domain
       // [e.lo, e.hi] intersected with the type's representable range. The
@@ -345,7 +346,7 @@ namespace refractir::reify {
       auto *v = pickOne(rng, scalars);
       return SelectVal{LValue{LocalId{v->name, {}}, {}, {}}};
     }
-    if (s < rysmith::hp::kSelectArm_SymEnd && sym != nullptr && isIntType(targetType)) {
+    if (s < rysmith::hp::kSelectArm_SymEnd && sym != nullptr && TypeUtils::isInt(targetType)) {
       // [bugfix] Sym slot must produce a sym whose declared type matches
       // `targetType`. SymCounter::nextValue() hardcoded i32, so a select
       // returning i64 ended up with arms of mismatched widths (i32 sym
@@ -361,7 +362,7 @@ namespace refractir::reify {
     // `select cond, 1, 1` (both literal arms) to a constant — the
     // compiler removes the select entirely and the cond evaluation with
     // it.
-    if (isFpType(targetType)) {
+    if (TypeUtils::isFloat(targetType)) {
       std::uniform_int_distribution<std::size_t> d(0, rysmith::hp::kFloatLitPoolSize - 1);
       return SelectVal{floatCoef(rysmith::hp::kFloatLitPool[d(rng)])};
     }
@@ -384,7 +385,7 @@ namespace refractir::reify {
       // drawn from the per-width pool — the threshold value is opaque to
       // the compiler either way, but a fixed 0 needlessly homogenises the
       // never-executed arms.
-      if (isFpType(vL->type)) {
+      if (TypeUtils::isFloat(vL->type)) {
         double f = 0.0;
         if (!sym) {
           std::uniform_int_distribution<std::size_t> d(0, rysmith::hp::kFloatLitPoolSize - 1);
@@ -440,7 +441,7 @@ namespace refractir::reify {
   // non-finite intermediates like any other intrinsic UB). Records the used
   // (kind, element type, lanes) in cfg.usedIntrinsics if non-null.
   static Atom genIntrinsicCallAtom(const ExprGenContext &ctx, const TypePtr &targetType) {
-    const bool isFloat = isFpType(targetType);
+    const bool isFloat = TypeUtils::isFloat(targetType);
     const uint32_t elemBits =
         isFloat ? (std::get<FloatType>(targetType->v).kind == FloatType::Kind::F32 ? 32u : 64u)
                 : intBitWidth(targetType);
@@ -534,7 +535,7 @@ namespace refractir::reify {
     auto allScalars = excluding(ctx.vars.allScalars(), ctx.excludeName);
     std::vector<const VarEntry *> otherIntScalars;
     for (auto *v: allScalars)
-      if (isIntType(v->type) && !typeEquals(v->type, targetType))
+      if (TypeUtils::isInt(v->type) && !TypeUtils::areTypesEqual(v->type, targetType))
         otherIntScalars.push_back(v);
 
     std::uniform_int_distribution<int> slot(0, 99);
@@ -567,7 +568,7 @@ namespace refractir::reify {
       // pick an i32 var for the amount; for non-i32 targets we fall
       // through to a standalone coef sym (no cross-width rval available).
       auto i32scalars = excluding(ctx.vars.scalarsOf(makeI32()), ctx.excludeName);
-      if (!i32scalars.empty() || isIntType(targetType)) {
+      if (!i32scalars.empty() || TypeUtils::isInt(targetType)) {
         static const AtomOpKind sops[] = {AtomOpKind::Shl, AtomOpKind::Shr, AtomOpKind::LShr};
         std::uniform_int_distribution<int> opPick(0, 2);
         auto idxSym = ctx.sym->nextIndex(); // always i32
@@ -675,7 +676,7 @@ namespace refractir::reify {
     auto allScalars = excluding(vars.allScalars(), excludeName);
     std::vector<const VarEntry *> otherIntScalars;
     for (auto *v: allScalars)
-      if (isIntType(v->type) && !typeEquals(v->type, targetType))
+      if (TypeUtils::isInt(v->type) && !TypeUtils::areTypesEqual(v->type, targetType))
         otherIntScalars.push_back(v);
 
     std::uniform_int_distribution<int> slot(0, 99);
@@ -861,8 +862,8 @@ namespace refractir::reify {
       std::mt19937 &rng, const VarCatalogue &vars, const TypePtr &targetType,
       const std::optional<std::string> &excludeName = std::nullopt
   ) {
-    assert(isPtrType(targetType));
-    TypePtr ptee = pointeeType(targetType);
+    assert(TypeUtils::isPtr(targetType));
+    TypePtr ptee = TypeUtils::pointee(targetType);
 
     std::vector<Atom> options;
 
@@ -872,7 +873,7 @@ namespace refractir::reify {
     for (auto *v: vars.allAddressable()) {
       if (nameExcluded(v->name))
         continue;
-      if (typeEquals(v->type, ptee)) {
+      if (TypeUtils::areTypesEqual(v->type, ptee)) {
         options.push_back(Atom{AddrAtom{localLV(v->name), {}}, {}});
       }
     }
@@ -884,7 +885,7 @@ namespace refractir::reify {
     // that whole-var addr never reaches. Params (immutable) are excluded.
     std::function<void(const LValue &, const TypePtr &)> collectSub = [&](const LValue &lv,
                                                                           const TypePtr &t) {
-      if (typeEquals(t, ptee))
+      if (TypeUtils::areTypesEqual(t, ptee))
         options.push_back(Atom{AddrAtom{lv, {}}, {}});
       if (auto *at = std::get_if<ArrayType>(&t->v)) {
         for (uint64_t i = 0; i < at->size; i++) {
@@ -905,7 +906,7 @@ namespace refractir::reify {
       }
     };
     for (const auto &v: vars.vars) {
-      if (v.isParam || nameExcluded(v.name) || !isAggType(v.type))
+      if (v.isParam || nameExcluded(v.name) || !TypeUtils::isAggregate(v.type))
         continue;
       collectSub(LValue{LocalId{v.name, {}}, {}, {}}, v.type);
     }
@@ -926,17 +927,17 @@ namespace refractir::reify {
 
     // PtrIndexAtom: if ptee is scalar and there exists a
     // ptr [N] ptee var, we can ptrindex it at a safe index.
-    if (isScalarType(ptee)) {
+    if (TypeUtils::isScalar(ptee)) {
       for (const auto &v: vars.vars) {
-        if (!isPtrType(v.type))
+        if (!TypeUtils::isPtr(v.type))
           continue;
         if (nameExcluded(v.name))
           continue;
-        auto innerPtee = pointeeType(v.type);
+        auto innerPtee = TypeUtils::pointee(v.type);
         if (!innerPtee || !std::holds_alternative<ArrayType>(innerPtee->v))
           continue;
         const auto &at = std::get<ArrayType>(innerPtee->v);
-        if (typeEquals(at.elem, ptee)) {
+        if (TypeUtils::areTypesEqual(at.elem, ptee)) {
           std::uniform_int_distribution<int64_t> idxd(0, (int64_t) at.size - 1);
           PtrIndexAtom pi;
           pi.rval = localLV(v.name);
@@ -949,11 +950,11 @@ namespace refractir::reify {
     // PtrFieldAtom: if there exists a ptr @S var where @S has
     // a field of type ptee, we can ptrfield it.
     for (const auto &v: vars.vars) {
-      if (!isPtrType(v.type))
+      if (!TypeUtils::isPtr(v.type))
         continue;
       if (nameExcluded(v.name))
         continue;
-      auto innerPtee = pointeeType(v.type);
+      auto innerPtee = TypeUtils::pointee(v.type);
       if (!innerPtee || !std::holds_alternative<StructType>(innerPtee->v))
         continue;
       const auto &st = std::get<StructType>(innerPtee->v);
@@ -961,7 +962,7 @@ namespace refractir::reify {
         if (sd.name.name != st.name.name)
           continue;
         for (const auto &f: sd.fields) {
-          if (typeEquals(f.type, ptee)) {
+          if (TypeUtils::areTypesEqual(f.type, ptee)) {
             PtrFieldAtom pf;
             pf.rval = localLV(v.name);
             pf.field = f.name;
@@ -1017,16 +1018,16 @@ namespace refractir::reify {
     std::vector<Cand> cands;
 
     for (const auto &v: vars.vars) {
-      if (v.name == lhsName || !isPtrType(v.type))
+      if (v.name == lhsName || !TypeUtils::isPtr(v.type))
         continue;
-      auto ptee = pointeeType(v.type);
+      auto ptee = TypeUtils::pointee(v.type);
       if (!ptee)
         continue;
 
       // Array source: `%ap : ptr [N] F` with N >= 2 (so a distinct base and
       // result index exist).
       if (auto *at = std::get_if<ArrayType>(&ptee->v)) {
-        if (at->size >= 2 && typeEquals(at->elem, lhsPtee))
+        if (at->size >= 2 && TypeUtils::areTypesEqual(at->elem, lhsPtee))
           cands.push_back({false, v.name, at->size, {}});
         continue;
       }
@@ -1045,10 +1046,11 @@ namespace refractir::reify {
         std::size_t i = 0;
         while (i < sd->fields.size()) {
           std::size_t j = i;
-          while (j < sd->fields.size() && typeEquals(sd->fields[j].type, sd->fields[i].type))
+          while (j < sd->fields.size() &&
+                 TypeUtils::areTypesEqual(sd->fields[j].type, sd->fields[i].type))
             j++;
           // [i, j) is a maximal run of identically-typed fields.
-          if ((j - i) >= 2 && typeEquals(sd->fields[i].type, lhsPtee)) {
+          if ((j - i) >= 2 && TypeUtils::areTypesEqual(sd->fields[i].type, lhsPtee)) {
             std::vector<std::string> run;
             for (std::size_t k = i; k < j; k++)
               run.push_back(sd->fields[k].name);
@@ -1141,7 +1143,7 @@ namespace refractir::reify {
     auto arrayN = [&](const TypePtr &t) -> std::optional<int64_t> {
       if (t)
         if (auto *at = std::get_if<ArrayType>(&t->v))
-          if (at->size >= 2 && typeEquals(at->elem, lhsPtee))
+          if (at->size >= 2 && TypeUtils::areTypesEqual(at->elem, lhsPtee))
             return (int64_t) at->size;
       return std::nullopt;
     };
@@ -1163,12 +1165,12 @@ namespace refractir::reify {
         continue; // only a plain `%p = ...` defines a pointer's current value
       const std::string &p = asg->lhs.base.name;
       auto pty = typeOf(p);
-      if (!pty || !isPtrType(pty))
+      if (!pty || !TypeUtils::isPtr(pty))
         continue;
       if (std::find(seen.begin(), seen.end(), p) != seen.end())
         continue; // an older, already-superseded assignment to this pointer
       seen.push_back(p);
-      if (!typeEquals(pointeeType(pty), lhsPtee) || !asg->rhs.rest.empty())
+      if (!TypeUtils::areTypesEqual(TypeUtils::pointee(pty), lhsPtee) || !asg->rhs.rest.empty())
         continue; // pointee must match %p2; the anchor must be a single atom
       const Atom &a = asg->rhs.first;
       // An anchor needs at least two cells: the offset is drawn as a distinct
@@ -1177,7 +1179,7 @@ namespace refractir::reify {
         // %p = ptrindex %ap, <IntLit i>
         auto *il = std::get_if<IntLit>(&pix->index);
         if (il && pix->rval.accesses.empty())
-          if (auto n = arrayN(pointeeType(typeOf(pix->rval.base.name))))
+          if (auto n = arrayN(TypeUtils::pointee(typeOf(pix->rval.base.name))))
             if (*n >= 2 && il->value >= 0 && il->value < *n)
               anchors.push_back({p, *n, il->value});
       } else if (auto *ad = std::get_if<AddrAtom>(&a.v)) {
@@ -1194,7 +1196,7 @@ namespace refractir::reify {
         // (idx - lo) within a run of length (hi - lo + 1), and stepping ± d
         // lands on a same-typed field cell (packed layout → exact stride).
         if (pf->rval.accesses.empty())
-          if (auto inner = pointeeType(typeOf(pf->rval.base.name)))
+          if (auto inner = TypeUtils::pointee(typeOf(pf->rval.base.name)))
             if (auto *st = std::get_if<StructType>(&inner->v))
               for (const auto &sd: vars.structDecls) {
                 if (sd.name.name != st->name.name)
@@ -1205,12 +1207,13 @@ namespace refractir::reify {
                     idx = k;
                     break;
                   }
-                if (idx >= 0 && typeEquals(sd.fields[idx].type, lhsPtee)) {
+                if (idx >= 0 && TypeUtils::areTypesEqual(sd.fields[idx].type, lhsPtee)) {
                   int lo = idx, hi = idx;
-                  while (lo > 0 && typeEquals(sd.fields[lo - 1].type, sd.fields[idx].type))
+                  while (lo > 0 &&
+                         TypeUtils::areTypesEqual(sd.fields[lo - 1].type, sd.fields[idx].type))
                     lo--;
                   while (hi + 1 < (int) sd.fields.size() &&
-                         typeEquals(sd.fields[hi + 1].type, sd.fields[idx].type))
+                         TypeUtils::areTypesEqual(sd.fields[hi + 1].type, sd.fields[idx].type))
                     hi++;
                   if (hi - lo + 1 >= 2)
                     anchors.push_back({p, hi - lo + 1, idx - lo});
@@ -1275,9 +1278,9 @@ namespace refractir::reify {
       return;
     if (auto *at = std::get_if<ArrayType>(&A->v)) {
       cur.push_back({false, "", (int64_t) at->size, at->elem});
-      if (typeEquals(at->elem, target))
+      if (TypeUtils::areTypesEqual(at->elem, target))
         out.push_back(cur);
-      if (isAggType(at->elem))
+      if (TypeUtils::isAggregate(at->elem))
         collectNavPaths(vars, at->elem, target, cur, out, maxDepth);
       cur.pop_back();
     } else if (auto *st = std::get_if<StructType>(&A->v)) {
@@ -1286,9 +1289,9 @@ namespace refractir::reify {
           continue;
         for (const auto &f: sd.fields) {
           cur.push_back({true, f.name, 0, f.type});
-          if (typeEquals(f.type, target))
+          if (TypeUtils::areTypesEqual(f.type, target))
             out.push_back(cur);
-          if (isAggType(f.type))
+          if (TypeUtils::isAggregate(f.type))
             collectNavPaths(vars, f.type, target, cur, out, maxDepth);
           cur.pop_back();
         }
@@ -1301,7 +1304,7 @@ namespace refractir::reify {
       std::vector<Instr> &result, std::mt19937 &rng, const VarCatalogue &vars,
       const TypePtr &lhsPtee, const std::string &lhsName
   ) {
-    if (!isScalarType(lhsPtee) && !isPtrType(lhsPtee))
+    if (!TypeUtils::isScalar(lhsPtee) && !TypeUtils::isPtr(lhsPtee))
       return false; // leaf must be loadable
 
     struct Cand {
@@ -1311,10 +1314,10 @@ namespace refractir::reify {
 
     std::vector<Cand> cands;
     for (const auto &v: vars.vars) {
-      if (!isPtrType(v.type))
+      if (!TypeUtils::isPtr(v.type))
         continue;
-      auto A = pointeeType(v.type);
-      if (!A || !isAggType(A))
+      auto A = TypeUtils::pointee(v.type);
+      if (!A || !TypeUtils::isAggregate(A))
         continue;
       std::vector<NavStep> cur;
       std::vector<std::vector<NavStep>> paths;
@@ -1331,9 +1334,9 @@ namespace refractir::reify {
     auto findStage = [&](const TypePtr &ptee) -> std::optional<std::string> {
       std::vector<std::string> opts;
       for (const auto &v: vars.vars) {
-        if (v.isParam || v.name == lhsName || !isPtrType(v.type))
+        if (v.isParam || v.name == lhsName || !TypeUtils::isPtr(v.type))
           continue;
-        if (typeEquals(pointeeType(v.type), ptee))
+        if (TypeUtils::areTypesEqual(TypeUtils::pointee(v.type), ptee))
           opts.push_back(v.name);
       }
       if (opts.empty())
@@ -1397,7 +1400,7 @@ namespace refractir::reify {
   // Threads `extraRequires` so on-path int atoms can publish their
   // div-by-zero guards (the off-path/FP paths don't touch it).
   static Atom genOneAtomOfType(const ExprGenContext &ctx, const TypePtr &targetType) {
-    if (isIntType(targetType))
+    if (TypeUtils::isInt(targetType))
       return (ctx.onPath && ctx.sym)
                  ? genIntAtomOnPath(ctx, targetType)
                  : genIntAtomOffPath(ctx.rng, ctx.vars, targetType, ctx.cfg, ctx.excludeName);
@@ -1433,7 +1436,7 @@ namespace refractir::reify {
       auto *v = pickOne(rng, same);
       std::uniform_int_distribution<int> slot(0, 99);
       bool mul = !allowBareRead || slot(rng) < rysmith::hp::kCheapAtom_MulEnd;
-      if (mul && isIntType(targetType)) {
+      if (mul && TypeUtils::isInt(targetType)) {
         std::uniform_int_distribution<int64_t> d(
             rysmith::hp::kCheapMulCoefLo, rysmith::hp::kCheapMulCoefHi
         );
@@ -1442,7 +1445,7 @@ namespace refractir::reify {
           c = 2; // a 0 coef folds the term and drops the read
         return opAtom(AtomOpKind::Mul, intCoef(c), localLV(v->name));
       }
-      if (mul && isFpType(targetType)) {
+      if (mul && TypeUtils::isFloat(targetType)) {
         std::uniform_int_distribution<std::size_t> d(0, rysmith::hp::kFloatMulCoefPoolSize - 1);
         return opAtom(
             AtomOpKind::Mul, floatCoef(rysmith::hp::kFloatMulCoefPool[d(rng)]), localLV(v->name)
@@ -1451,20 +1454,20 @@ namespace refractir::reify {
       return rvalAtom(localLV(v->name));
     }
     auto scalarWidth = [](const TypePtr &t) -> uint32_t {
-      if (isIntType(t))
+      if (TypeUtils::isInt(t))
         return intBitWidth(t);
       if (auto *ft = std::get_if<FloatType>(&t->v))
         return ft->kind == FloatType::Kind::F32 ? 32u : 64u;
       return 0;
     };
     auto safeCastSource = [&](const TypePtr &src) -> bool {
-      if (typeEquals(src, targetType))
+      if (TypeUtils::areTypesEqual(src, targetType))
         return false; // same type → covered by the read/mul step
-      if (isIntType(targetType))
-        return isIntType(src); // int→int is total; fp→int can be range-UB
-      if (isIntType(src))
-        return true;                                                      // int→fp is always finite
-      return isFpType(src) && scalarWidth(src) < scalarWidth(targetType); // widening only
+      if (TypeUtils::isInt(targetType))
+        return TypeUtils::isInt(src); // int→int is total; fp→int can be range-UB
+      if (TypeUtils::isInt(src))
+        return true; // int→fp is always finite
+      return TypeUtils::isFloat(src) && scalarWidth(src) < scalarWidth(targetType); // widening only
     };
     auto allScalars = excluding(vars.allScalars(), excludeName);
     for (auto *v: allScalars) {
@@ -1506,8 +1509,8 @@ namespace refractir::reify {
       if (auto cheap =
               genCheapLinearAtom(ctx.rng, ctx.vars, targetType, ctx.excludeName, allowBareRead))
         return std::move(*cheap);
-      return isFpType(targetType) ? genConcreteFloatAtom(ctx.rng)
-                                  : genConcreteIntAtom(ctx.rng, targetType);
+      return TypeUtils::isFloat(targetType) ? genConcreteFloatAtom(ctx.rng)
+                                            : genConcreteIntAtom(ctx.rng, targetType);
     }
     Atom last = genOneAtomOfType(ctx, targetType);
     auto acceptable = [&](const Atom &a) {
@@ -1537,7 +1540,7 @@ namespace refractir::reify {
   static void rewriteIfAllTriviallyConstant(
       const ExprGenContext &ctx, const TypePtr &targetType, std::vector<Atom> &atoms
   ) {
-    if (!isIntType(targetType) && !isFpType(targetType))
+    if (!TypeUtils::isInt(targetType) && !TypeUtils::isFloat(targetType))
       return;
     std::uniform_real_distribution<double> allowCoin(0.0, 1.0);
     if (allowCoin(ctx.rng) < rysmith::hp::kPAllowAllLiteral)
@@ -1585,35 +1588,35 @@ namespace refractir::reify {
     int nAtoms = nAtomsDist(rng);
 
     // For ptr types, always single atom
-    if (isPtrType(targetType)) {
+    if (TypeUtils::isPtr(targetType)) {
       nAtoms = 1;
     }
     // For float types, limit to 1-2 atoms
-    if (isFpType(targetType) && nAtoms > 2) {
+    if (TypeUtils::isFloat(targetType) && nAtoms > 2) {
       nAtoms = 2;
     }
     // Vec types: 1-2 atoms (lane-wise +/- is valid).
-    if (isVecType(targetType)) {
+    if (TypeUtils::isVec(targetType)) {
       nAtoms = std::min(nAtoms, 2);
     }
 
     for (int i = 0; i < nAtoms; i++) {
       Atom a;
-      if (isIntType(targetType)) {
+      if (TypeUtils::isInt(targetType)) {
         if (onPath && sym) {
           a = genIntAtomOnPath(ctx, targetType);
         } else {
           a = genIntAtomOffPath(rng, vars, targetType, cfg, excludeName);
         }
-      } else if (isFpType(targetType)) {
+      } else if (TypeUtils::isFloat(targetType)) {
         if (onPath && sym) {
           a = genFloatAtomOnPath(rng, *sym, vars, targetType, cfg, excludeName);
         } else {
           a = genFloatAtomOffPath(rng, vars, targetType, cfg, excludeName);
         }
-      } else if (isPtrType(targetType)) {
+      } else if (TypeUtils::isPtr(targetType)) {
         a = genPtrAtom(rng, vars, targetType, excludeName);
-      } else if (isVecType(targetType)) {
+      } else if (TypeUtils::isVec(targetType)) {
         // Vec atom generation.
         auto vecs = excluding(vars.vecsOf(targetType), excludeName);
         const auto &vt = std::get<VecType>(targetType->v);
@@ -1671,7 +1674,7 @@ namespace refractir::reify {
             // [-8, 8] uniform, which narrowed the literal magnitude
             // distribution well below what the compiler folds.
             CoefAtom ca;
-            if (isFpType(vt.elem)) {
+            if (TypeUtils::isFloat(vt.elem)) {
               std::uniform_int_distribution<std::size_t> fd(0, rysmith::hp::kFloatLitPoolSize - 1);
               ca.coef = FloatLit{rysmith::hp::kFloatLitPool[fd(rng)], {}};
             } else {
@@ -1699,7 +1702,7 @@ namespace refractir::reify {
     for (std::size_t i = 1; i < atoms.size(); i++) {
       // For float, always use Plus (subtraction is fine but let's keep it simple)
       AddOp op =
-          isFpType(targetType)
+          TypeUtils::isFloat(targetType)
               ? AddOp::Plus
               : (addOpCoin(rng) < rysmith::hp::kPTailAddOpIsPlus ? AddOp::Plus : AddOp::Minus);
       expr.rest.push_back({op, std::move(atoms[i]), {}});
@@ -1728,7 +1731,7 @@ namespace refractir::reify {
     auto allScalars = excluding(vars.allScalars(), excludeName);
     std::vector<const VarEntry *> otherIntScalars;
     for (auto *v: allScalars)
-      if (isIntType(v->type) && !typeEquals(v->type, targetType))
+      if (TypeUtils::isInt(v->type) && !TypeUtils::areTypesEqual(v->type, targetType))
         otherIntScalars.push_back(v);
 
     if (!scalarsOfT.empty()) {
@@ -1795,14 +1798,14 @@ namespace refractir::reify {
     std::uniform_int_distribution<int> nAtomsDist(cfg.minAtoms, cfg.maxAtoms);
     int nAtoms = nAtomsDist(rng);
 
-    if (isPtrType(targetType))
+    if (TypeUtils::isPtr(targetType))
       nAtoms = 1;
-    if (isFpType(targetType) && nAtoms > 2)
+    if (TypeUtils::isFloat(targetType) && nAtoms > 2)
       nAtoms = 2;
 
     for (int i = 0; i < nAtoms; i++) {
       Atom a;
-      if (isIntType(targetType)) {
+      if (TypeUtils::isInt(targetType)) {
         if (onPath && sym) {
           // For i==0, use genFirstIntAtomOnPath to ensure non-i32 types get
           // an explicitly-typed first atom. A bare CoefAtom{SymId} would print
@@ -1825,15 +1828,15 @@ namespace refractir::reify {
             a = genIntAtomOffPath(rng, vars, targetType, cfg, excludeName);
           }
         }
-      } else if (isFpType(targetType)) {
+      } else if (TypeUtils::isFloat(targetType)) {
         if (onPath && sym) {
           a = genFloatAtomOnPath(rng, *sym, vars, targetType, cfg, excludeName);
         } else {
           a = genFloatAtomOffPath(rng, vars, targetType, cfg, excludeName);
         }
-      } else if (isPtrType(targetType)) {
+      } else if (TypeUtils::isPtr(targetType)) {
         a = genPtrAtom(rng, vars, targetType, excludeName);
-      } else if (isVecType(targetType)) {
+      } else if (TypeUtils::isVec(targetType)) {
         // Vec target in genExprWithRequires — delegate to the same
         // logic as genExpr's vec branch.
         auto vecs = excluding(vars.vecsOf(targetType), excludeName);
@@ -1856,7 +1859,7 @@ namespace refractir::reify {
             a = rvalAtom(localLV(v->name));
           } else {
             CoefAtom ca;
-            if (isFpType(vt.elem))
+            if (TypeUtils::isFloat(vt.elem))
               ca.coef = FloatLit{1.0, {}};
             else
               ca.coef = IntLit{1, {}};
@@ -1885,7 +1888,7 @@ namespace refractir::reify {
     // in its own dispatch.
     std::uniform_real_distribution<double> copyCoin(0.0, 1.0);
     if (atoms.size() == 1 && std::holds_alternative<RValueAtom>(atoms[0].v) &&
-        (isIntType(targetType) || isFpType(targetType)) &&
+        (TypeUtils::isInt(targetType) || TypeUtils::isFloat(targetType)) &&
         copyCoin(rng) >= rysmith::hp::kPAllowPlainCopy) {
       if (cfg.maxAtoms > 1) {
         // On-path the appended tail is a cheap linear atom — a slot-
@@ -1920,7 +1923,7 @@ namespace refractir::reify {
           if (onPath && sym) {
             ca.coef = SymId{sym->nextCoef(targetType), {}};
           } else {
-            if (isFpType(targetType)) {
+            if (TypeUtils::isFloat(targetType)) {
               ca.coef = FloatLit{1.0, {}};
             } else {
               ca.coef = IntLit{1, {}};
@@ -1938,7 +1941,7 @@ namespace refractir::reify {
     std::uniform_real_distribution<double> addOpCoin(0.0, 1.0);
     for (std::size_t i = 1; i < atoms.size(); i++) {
       AddOp op =
-          isFpType(targetType)
+          TypeUtils::isFloat(targetType)
               ? AddOp::Plus
               : (addOpCoin(rng) < rysmith::hp::kPTailAddOpIsPlus ? AddOp::Plus : AddOp::Minus);
       expr.rest.push_back({op, std::move(atoms[i]), {}});
@@ -1962,7 +1965,7 @@ namespace refractir::reify {
       // Filter to int types only (can't compare floats with relational ops in RefractIR)
       std::vector<const VarEntry *> intScalars;
       for (auto *v: scalars)
-        if (isIntType(v->type))
+        if (TypeUtils::isInt(v->type))
           intScalars.push_back(v);
       if (!intScalars.empty()) {
         auto *v = pickOne(rng, intScalars);
@@ -2009,14 +2012,14 @@ namespace refractir::reify {
   // assignment through emitPtrReassign.
   static std::optional<AssignTarget>
   pickAssignTarget(std::mt19937 &rng, const VarCatalogue &vars, const VarEntry &lhsVar) {
-    if (isScalarType(lhsVar.type))
+    if (TypeUtils::isScalar(lhsVar.type))
       return AssignTarget{localLV(lhsVar.name), lhsVar.type};
 
     if (std::holds_alternative<ArrayType>(lhsVar.type->v)) {
       const auto &at = std::get<ArrayType>(lhsVar.type->v);
       std::uniform_int_distribution<int64_t> idxd(0, (int64_t) at.size - 1);
       int64_t idx = idxd(rng);
-      if (isScalarType(at.elem))
+      if (TypeUtils::isScalar(at.elem))
         return AssignTarget{arrayLV(lhsVar.name, idx), at.elem};
       if (std::holds_alternative<StructType>(at.elem->v)) {
         // Array-of-struct: pick a scalar field, generate %a[i].f = expr
@@ -2031,7 +2034,7 @@ namespace refractir::reify {
           return std::nullopt;
         std::vector<const FieldDecl *> scalarFields;
         for (const auto &f: sd->fields)
-          if (isScalarType(f.type))
+          if (TypeUtils::isScalar(f.type))
             scalarFields.push_back(&f);
         if (scalarFields.empty())
           return std::nullopt;
@@ -2061,12 +2064,12 @@ namespace refractir::reify {
       }
       std::uniform_int_distribution<int> fpick(0, (int) sd->fields.size() - 1);
       const auto &f = sd->fields[fpick(rng)];
-      if (isScalarType(f.type))
+      if (TypeUtils::isScalar(f.type))
         return AssignTarget{structLV(lhsVar.name, f.name), f.type};
       if (std::holds_alternative<ArrayType>(f.type->v)) {
         // Struct-of-array field: pick an element, generate %t.f[i] = expr
         const auto &fat = std::get<ArrayType>(f.type->v);
-        if (!isScalarType(fat.elem))
+        if (!TypeUtils::isScalar(fat.elem))
           return std::nullopt;
         std::uniform_int_distribution<int64_t> idxd2(0, (int64_t) fat.size - 1);
         LValue lhs = structLV(lhsVar.name, f.name);
@@ -2076,7 +2079,7 @@ namespace refractir::reify {
       return std::nullopt; // ptr field or other, skip
     }
 
-    if (isVecType(lhsVar.type)) {
+    if (TypeUtils::isVec(lhsVar.type)) {
       // Whole-vec only when another vec var of the same type can supply the
       // RHS — the typechecker rejects a scalar one. Excluding the LHS from
       // that pool keeps `%vec = %vec;` impossible, and when it leaves the pool
@@ -2113,15 +2116,16 @@ namespace refractir::reify {
     // `ptrindex %ap, b ± d` (array element) and `ptrfield %sp, f ± d`
     // (consecutive same-type struct fields), each provably load-safe on any
     // path. It falls through (nullopt) when no such source is in scope.
-    TypePtr lhsPtee = pointeeType(lhsVar.type);
+    TypePtr lhsPtee = TypeUtils::pointee(lhsVar.type);
     std::uniform_real_distribution<double> ptrArithCoin(0.0, 1.0);
     bool emitted = false;
     // Pointer arithmetic is offered for any loadable pointee — scalar or
     // pointer (`ptr ptr T`). Aggregate/vector pointees are excluded: they
     // aren't loadable, so an element step has nothing valid to dereference.
-    // The element-type matching downstream is by `typeEquals`, so pointer
+    // The element-type matching downstream is by type equality, so pointer
     // pointees flow through unchanged.
-    if (cfg.enablePtrArith && lhsPtee && (isScalarType(lhsPtee) || isPtrType(lhsPtee)) &&
+    if (cfg.enablePtrArith && lhsPtee &&
+        (TypeUtils::isScalar(lhsPtee) || TypeUtils::isPtr(lhsPtee)) &&
         ptrArithCoin(rng) < rysmith::hp::kPPtrArith) {
       if (!onPath) {
         // Off-path (unexecuted) blocks are never run and never symbolically
@@ -2197,7 +2201,7 @@ namespace refractir::reify {
     // Collect ptr vars for store operations
     std::vector<const VarEntry *> ptrVars;
     for (const auto &v: vars.vars)
-      if (isPtrType(v.type))
+      if (TypeUtils::isPtr(v.type))
         ptrVars.push_back(&v);
 
     // Splice a single StoreInstr (plus its safety requires) into `result`.
@@ -2209,16 +2213,16 @@ namespace refractir::reify {
       if (ptrVars.empty())
         return false;
       auto *pv = pickOne(rng, ptrVars);
-      TypePtr ptee = pointeeType(pv->type);
+      TypePtr ptee = TypeUtils::pointee(pv->type);
       Expr ptrExpr = simpleExpr(rvalAtom(localLV(pv->name)));
       Expr valExpr;
-      if (isIntType(ptee) || isFpType(ptee)) {
+      if (TypeUtils::isInt(ptee) || TypeUtils::isFloat(ptee)) {
         auto [ve, reqs] = genExprWithRequires(rng, sym, vars, ptee, onPath, cfg);
         if (onPath)
           for (auto &req: reqs)
             result.push_back(std::move(req));
         valExpr = std::move(ve);
-      } else if (isPtrType(ptee)) {
+      } else if (TypeUtils::isPtr(ptee)) {
         // Store a pointer value through a `ptr ptr T` slot. genPtrAtom
         // yields a single valid pointer atom (addr / ptr-copy / load /
         // ptrindex / ptrfield); the solver models the stored provenance, so
@@ -2264,7 +2268,7 @@ namespace refractir::reify {
 
         // A pointer LHS emits its own assignment and never reaches the shared
         // RHS path below.
-        if (isPtrType(lhsVar->type)) {
+        if (TypeUtils::isPtr(lhsVar->type)) {
           emitPtrReassign(result, rng, vars, *lhsVar, onPath, cfg);
           assignEmitted = true;
           continue;

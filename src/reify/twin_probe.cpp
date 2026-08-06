@@ -42,7 +42,7 @@ namespace refractir::reify {
     // read from the state profile — but it must typecheck against the
     // harness's return type.
     Expr zeroOf(const TypePtr &ty) {
-      if (isPtrType(ty))
+      if (TypeUtils::isPtr(ty))
         return Expr{Atom{CoefAtom{Coef{NullLit{}}, {}}, {}}, {}, {}};
       if (TypeUtils::getFloatBitWidth(ty))
         return Expr{Atom{CoefAtom{Coef{FloatLit{0.0, {}}}, {}}, {}}, {}, {}};
@@ -104,7 +104,7 @@ namespace refractir::reify {
     FunDecl f;
     f.name = GlobalId{kProbeFun, {}};
     f.retType = src->retType;
-    declareRoots(roots, structMap(host), f.lets);
+    declareRoots(roots, TypeUtils::buildStructTable(host), f.lets);
 
     // Locals the region touches but the entry state does not cover (still
     // `undef` when the region starts) have no root, yet the region's
@@ -172,7 +172,7 @@ namespace refractir::reify {
     if (!runAnalysisPasses(harness_, /*verbose=*/false))
       return; // a region shape the checkers reject in isolation
 
-    structs_ = structMap(harness_);
+    structs_ = TypeUtils::buildStructTable(harness_);
     valid_ = true;
   }
 

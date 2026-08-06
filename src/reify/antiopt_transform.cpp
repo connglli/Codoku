@@ -17,7 +17,7 @@ namespace refractir::reify {
 
       TransformReport apply(Program &prog, TransformContext &ctx) override {
         TransformReport rep;
-        const StructMap structs = structMap(prog);
+        const StructMap structs = TypeUtils::buildStructTable(prog);
         for (auto &fn: prog.funs) {
           // One allocator per function: its names are declared into that
           // function's lets, and they should read like the locals around them

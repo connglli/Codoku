@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "analysis/type_utils.hpp"
 #include "ast/ast.hpp"
 #include "reify/state_profile.hpp"
 
@@ -45,9 +46,7 @@ namespace refractir::reify {
     std::vector<MiniPtrFix> ptrFixes; // every pointer leaf of the root
   };
 
-  using StructMap = std::unordered_map<std::string, const StructDecl *>;
-
-  StructMap structMap(const Program &prog);
+  using StructMap = TypeUtils::StructTable;
 
   // --- captured state -> AST --------------------------------------------
 

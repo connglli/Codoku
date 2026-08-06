@@ -1,4 +1,5 @@
 #include "reify/var_catalogue.hpp"
+#include "analysis/type_utils.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -16,7 +17,7 @@ namespace refractir::reify {
   std::vector<const VarEntry *> VarCatalogue::scalarsOf(const TypePtr &t) const {
     std::vector<const VarEntry *> result;
     for (const auto &v: vars)
-      if (isScalarType(v.type) && typeEquals(v.type, t))
+      if (TypeUtils::isScalar(v.type) && TypeUtils::areTypesEqual(v.type, t))
         result.push_back(&v);
     return result;
   }
@@ -24,7 +25,7 @@ namespace refractir::reify {
   std::vector<const VarEntry *> VarCatalogue::allScalars() const {
     std::vector<const VarEntry *> result;
     for (const auto &v: vars)
-      if (isScalarType(v.type))
+      if (TypeUtils::isScalar(v.type))
         result.push_back(&v);
     return result;
   }
@@ -32,7 +33,7 @@ namespace refractir::reify {
   std::vector<const VarEntry *> VarCatalogue::vecsOf(const TypePtr &t) const {
     std::vector<const VarEntry *> result;
     for (const auto &v: vars)
-      if (isVecType(v.type) && typeEquals(v.type, t))
+      if (TypeUtils::isVec(v.type) && TypeUtils::areTypesEqual(v.type, t))
         result.push_back(&v);
     return result;
   }
@@ -40,7 +41,8 @@ namespace refractir::reify {
   std::vector<const VarEntry *> VarCatalogue::vecsWithElem(const TypePtr &elemT) const {
     std::vector<const VarEntry *> result;
     for (const auto &v: vars)
-      if (isVecType(v.type) && typeEquals(std::get<VecType>(v.type->v).elem, elemT))
+      if (TypeUtils::isVec(v.type) &&
+          TypeUtils::areTypesEqual(std::get<VecType>(v.type->v).elem, elemT))
         result.push_back(&v);
     return result;
   }
@@ -48,7 +50,8 @@ namespace refractir::reify {
   std::vector<const VarEntry *> VarCatalogue::ptrsOf(const TypePtr &pointeeT) const {
     std::vector<const VarEntry *> result;
     for (const auto &v: vars)
-      if (isPtrType(v.type) && typeEquals(pointeeType(v.type), pointeeT))
+      if (TypeUtils::isPtr(v.type) &&
+          TypeUtils::areTypesEqual(TypeUtils::pointee(v.type), pointeeT))
         result.push_back(&v);
     return result;
   }
@@ -56,7 +59,7 @@ namespace refractir::reify {
   std::vector<const VarEntry *> VarCatalogue::ptrsToPtr() const {
     std::vector<const VarEntry *> result;
     for (const auto &v: vars)
-      if (isPtrType(v.type) && isPtrType(pointeeType(v.type)))
+      if (TypeUtils::isPtr(v.type) && TypeUtils::isPtr(TypeUtils::pointee(v.type)))
         result.push_back(&v);
     return result;
   }
@@ -66,7 +69,7 @@ namespace refractir::reify {
     // Per spec §3.5.2 `addr` requires a `let mut` root, so
     // parameters (immutable) are NOT addressable.
     for (const auto &v: vars)
-      if (!v.isParam && !isPtrType(v.type) && !isAggType(v.type))
+      if (!v.isParam && !TypeUtils::isPtr(v.type) && !TypeUtils::isAggregate(v.type))
         result.push_back(&v);
     return result;
   }
@@ -82,7 +85,7 @@ namespace refractir::reify {
     // never produces one. Vectors stay excluded: spec §3 forbids `addr`
     // on vector locals.
     for (const auto &v: vars)
-      if (!v.isParam && !isVecType(v.type))
+      if (!v.isParam && !TypeUtils::isVec(v.type))
         result.push_back(&v);
     return result;
   }
@@ -90,7 +93,7 @@ namespace refractir::reify {
   const VarEntry *VarCatalogue::findAny(const TypePtr &t, std::mt19937 &rng) const {
     std::vector<const VarEntry *> candidates;
     for (const auto &v: vars)
-      if (typeEquals(v.type, t))
+      if (TypeUtils::areTypesEqual(v.type, t))
         candidates.push_back(&v);
     if (candidates.empty())
       return nullptr;
@@ -101,7 +104,7 @@ namespace refractir::reify {
   const VarEntry *VarCatalogue::findAddressableOfType(const TypePtr &t, std::mt19937 &rng) const {
     std::vector<const VarEntry *> candidates;
     for (const auto &v: vars)
-      if (!v.isParam && !isAggType(v.type) && typeEquals(v.type, t))
+      if (!v.isParam && !TypeUtils::isAggregate(v.type) && TypeUtils::areTypesEqual(v.type, t))
         candidates.push_back(&v);
     if (candidates.empty())
       return nullptr;
@@ -186,19 +189,19 @@ namespace refractir::reify {
 
           // If we drew a ptr type at depth 0, convert to scalar fallback
           // (ptr handling is reserved for phases 2/3). Same for vec if disabled.
-          if (isPtrType(t)) {
+          if (TypeUtils::isPtr(t)) {
             t = genScalarType(rng, tcfg.enableFp);
           }
-          if (isVecType(t) && !tcfg.enableVec) {
+          if (TypeUtils::isVec(t) && !tcfg.enableVec) {
             t = genScalarType(rng, tcfg.enableFp);
           }
 
           VarEntry v;
           v.type = t;
 
-          if (isScalarType(t)) {
+          if (TypeUtils::isScalar(t)) {
             v.name = "%v" + std::to_string(scalarIdx++);
-          } else if (isVecType(t)) {
+          } else if (TypeUtils::isVec(t)) {
             // Vec var — named %vec0, %vec1, etc.
             v.name = "%vec" + std::to_string(vecIdx++);
           } else if (std::holds_alternative<ArrayType>(t->v)) {
@@ -250,7 +253,8 @@ namespace refractir::reify {
 
           std::vector<TargetInfo> addressableTargets;
           for (const auto &v: cat.vars)
-            if (!isPtrType(v.type) && !isAggType(v.type) && !isVecType(v.type))
+            if (!TypeUtils::isPtr(v.type) && !TypeUtils::isAggregate(v.type) &&
+                !TypeUtils::isVec(v.type))
               addressableTargets.push_back({v.name, v.type});
 
           for (int i = 0; i < nPtr1 && !addressableTargets.empty(); i++) {
@@ -281,7 +285,7 @@ namespace refractir::reify {
 
           std::vector<TargetInfo> ptrTargets;
           for (const auto &v: cat.vars)
-            if (isPtrType(v.type))
+            if (TypeUtils::isPtr(v.type))
               ptrTargets.push_back({v.name, v.type});
 
           for (int i = 0; i < nPtr2 && !ptrTargets.empty(); i++) {
@@ -346,7 +350,7 @@ namespace refractir::reify {
           std::vector<TypePtr> subAggs;
           std::function<void(const TypePtr &)> collect = [&](const TypePtr &a) {
             if (auto *at = std::get_if<ArrayType>(&a->v)) {
-              if (isAggType(at->elem)) {
+              if (TypeUtils::isAggregate(at->elem)) {
                 subAggs.push_back(at->elem);
                 collect(at->elem);
               }
@@ -355,7 +359,7 @@ namespace refractir::reify {
                 if (sd.name.name != st->name.name)
                   continue;
                 for (const auto &f: sd.fields)
-                  if (isAggType(f.type)) {
+                  if (TypeUtils::isAggregate(f.type)) {
                     subAggs.push_back(f.type);
                     collect(f.type);
                   }
@@ -366,9 +370,9 @@ namespace refractir::reify {
           // Snapshot of current pointer pointees: don't grow `cat.vars` mid-scan.
           std::vector<TypePtr> aggPointees;
           for (const auto &v: cat.vars)
-            if (isPtrType(v.type)) {
-              auto p = pointeeType(v.type);
-              if (p && isAggType(p))
+            if (TypeUtils::isPtr(v.type)) {
+              auto p = TypeUtils::pointee(v.type);
+              if (p && TypeUtils::isAggregate(p))
                 aggPointees.push_back(p);
             }
           for (const auto &p: aggPointees)
@@ -378,10 +382,11 @@ namespace refractir::reify {
           std::vector<TypePtr> injected;
           auto present = [&](const TypePtr &ptee) {
             for (const auto &v: cat.vars)
-              if (isPtrType(v.type) && typeEquals(pointeeType(v.type), ptee))
+              if (TypeUtils::isPtr(v.type) &&
+                  TypeUtils::areTypesEqual(TypeUtils::pointee(v.type), ptee))
                 return true;
             for (const auto &t: injected)
-              if (typeEquals(t, ptee))
+              if (TypeUtils::areTypesEqual(t, ptee))
                 return true;
             return false;
           };

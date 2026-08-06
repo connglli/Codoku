@@ -323,12 +323,12 @@ namespace refractir::reify {
 
     std::vector<PtrLetInfo> ptrLets;
     for (const auto &let: entry->lets) {
-      if (!isPtrType(let.type))
+      if (!TypeUtils::isPtr(let.type))
         continue;
-      auto ptee = pointeeType(let.type);
+      auto ptee = TypeUtils::pointee(let.type);
       if (!ptee)
         continue;
-      if (!isScalarType(ptee) || isPtrType(ptee))
+      if (!TypeUtils::isScalar(ptee) || TypeUtils::isPtr(ptee))
         continue; // ptr-to-ptr / ptr-to-aggregate: skip
       if (!pointerLoadable(let.name.name))
         continue; // exit-time target unresolved (undef / cross-object): unsafe to load
@@ -338,7 +338,7 @@ namespace refractir::reify {
       LValue pLV{LocalId{pl.name, {}}, {}, {}};
       // Build the val operand of `crc32_update`.
       Atom valAtom;
-      if (isIntType(pl.pointee) && intBitWidth(pl.pointee) == 32) {
+      if (TypeUtils::isInt(pl.pointee) && intBitWidth(pl.pointee) == 32) {
         // Direct load — already i32, no scratch needed.
         LoadAtom la;
         la.rval = std::move(pLV);
@@ -594,7 +594,7 @@ namespace refractir::reify {
       newLet.name = letd.name;
       newLet.type = letd.type;
       auto it = letExitValues.find(letd.name.name);
-      if (isPtrType(letd.type) || letd.name.name == "%_chk" ||
+      if (TypeUtils::isPtr(letd.type) || letd.name.name == "%_chk" ||
           letd.name.name.rfind("%_pld_", 0) == 0) {
         newLet.init = letd.init;
       } else if (it != letExitValues.end() &&
@@ -643,7 +643,7 @@ namespace refractir::reify {
       return {};
     };
     for (const auto &letd: entry->lets) {
-      if (!isPtrType(letd.type))
+      if (!TypeUtils::isPtr(letd.type))
         continue;
       std::string targetLocal;
       uint64_t targetOffset = 0;
@@ -658,7 +658,7 @@ namespace refractir::reify {
       bool resolved = false;
       if (!targetLocal.empty()) {
         TypePtr targetTy = findLetType(targetLocal);
-        TypePtr pointeeTy = pointeeType(letd.type);
+        TypePtr pointeeTy = TypeUtils::pointee(letd.type);
         std::vector<Access> acc;
         uint64_t remOff = targetOffset;
         TypePtr cur = targetTy;

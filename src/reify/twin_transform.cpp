@@ -300,54 +300,6 @@ namespace refractir::reify {
       return coefAtom(Coef{NullLit{}});
     }
 
-    // --- static-type walking ---------------------------------------------
-
-    using StructMap = std::unordered_map<std::string, const StructDecl *>;
-
-    // The static type reached from `t` after one access step. Returns nullptr
-    // when the shape doesn't match (unknown struct/field, non-aggregate).
-    TypePtr stepType(const TypePtr &t, const Access &acc, const StructMap &structs) {
-      if (auto af = std::get_if<AccessField>(&acc)) {
-        const StructType *st = TypeUtils::asStruct(t);
-        if (!st)
-          return nullptr;
-        auto it = structs.find(st->name.name);
-        if (it == structs.end())
-          return nullptr;
-        for (const auto &f: it->second->fields)
-          if (f.name == af->field)
-            return f.type;
-        return nullptr;
-      }
-      if (const ArrayType *at = TypeUtils::asArray(t))
-        return at->elem;
-      if (t && std::holds_alternative<VecType>(t->v))
-        return std::get<VecType>(t->v).elem;
-      return nullptr;
-    }
-
-    // Whether an aggregate type contains a vector anywhere. Vector lanes are
-    // not addressable, so such a root cannot be navigated through a pointer
-    // parameter (rysmith never nests vectors in aggregates; hand-written
-    // programs might).
-    bool containsVec(const TypePtr &t, const StructMap &structs) {
-      if (!t)
-        return false;
-      if (std::holds_alternative<VecType>(t->v))
-        return true;
-      if (const ArrayType *at = TypeUtils::asArray(t))
-        return containsVec(at->elem, structs);
-      if (const StructType *st = TypeUtils::asStruct(t)) {
-        auto it = structs.find(st->name.name);
-        if (it == structs.end())
-          return false;
-        for (const auto &f: it->second->fields)
-          if (containsVec(f.type, structs))
-            return true;
-      }
-      return false;
-    }
-
     // --- twin planning ----------------------------------------------------
 
     // One state root the guard consumes, with its crossing strategy.
@@ -412,13 +364,10 @@ namespace refractir::reify {
         return false;
       };
       // Static type of the cell: walk the root type along the leaf path.
-      TypePtr t = rootType;
-      for (const auto &acc: leaf.path) {
-        t = stepType(t, acc, structs);
-        if (!t)
-          return no("a leaf whose type does not follow the root's");
-      }
-      if (!isPtrType(t))
+      TypePtr t = TypeUtils::accessPathType(rootType, leaf.path, structs);
+      if (!t)
+        return no("a leaf whose type does not follow the root's");
+      if (!TypeUtils::isPtr(t))
         return no("a pointer leaf of non-pointer type");
       leaf.ptrType = t;
       if (leaf.val.ptrNull)
@@ -430,7 +379,7 @@ namespace refractir::reify {
         return no("a pointer into something the function does not declare");
       if (!target->isMutable)
         return no("a pointer into an immutable root"); // `addr` needs a let mut
-      auto path = ptrAccessPath(target->type, leaf.val.ptrOfs, pointeeType(t), layout);
+      auto path = ptrAccessPath(target->type, leaf.val.ptrOfs, TypeUtils::pointee(t), layout);
       if (!path)
         return no("a pointer to an offset no access path reaches");
       leaf.ptrTarget = LValue{LocalId{leaf.val.ptrRoot, {}}, std::move(*path), {}};
@@ -553,7 +502,7 @@ namespace refractir::reify {
           why = decl.has_value() ? "not initialized at region entry" : "no declaration";
         GuardRoot::Kind kind = GuardRoot::Kind::Scalar;
         if (guardable) {
-          if (isPtrType(decl->type))
+          if (TypeUtils::isPtr(decl->type))
             kind = GuardRoot::Kind::Ptr;
           else if (std::holds_alternative<VecType>(decl->type->v))
             kind = GuardRoot::Kind::Vec;
@@ -564,7 +513,7 @@ namespace refractir::reify {
             if (!decl->isMutable) {
               guardable = false;
               why = "an immutable aggregate, which `addr` cannot take";
-            } else if (containsVec(decl->type, ctx.structs)) {
+            } else if (TypeUtils::containsVec(decl->type, ctx.structs)) {
               guardable = false;
               why = "a vector inside an aggregate, which no pointer reaches";
             }
@@ -724,7 +673,7 @@ namespace refractir::reify {
       }
 
       InitVal zeroInit(const TypePtr &ty) {
-        if (isPtrType(ty))
+        if (TypeUtils::isPtr(ty))
           return InitVal{InitVal::Kind::Undef, IntLit{0, {}}, {}};
         if (TypeUtils::getFloatBitWidth(ty))
           return InitVal{InitVal::Kind::Float, FloatLit{0.0, {}}, {}};
@@ -797,7 +746,7 @@ namespace refractir::reify {
         std::string cur = root.name;
         TypePtr curT = root.type; // pointee of `cur`
         for (const auto &acc: leaf.path) {
-          TypePtr nextT = stepType(curT, acc, structs);
+          TypePtr nextT = TypeUtils::stepType(curT, acc, structs);
           std::string nxt = getScratch(ptrScratch, makePtr(nextT), "%__p", true);
           Atom nav =
               std::holds_alternative<AccessField>(acc)

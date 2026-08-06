@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
+#include "analysis/type_utils.hpp"
 #include "ast/ast.hpp"
 
 namespace refractir {
@@ -38,10 +39,10 @@ namespace refractir {
     const StructDecl *lookupStruct(const std::string &name) const;
 
     /// The full struct registry (for the find/end idiom at call sites).
-    const std::unordered_map<std::string, const StructDecl *> &structs() const { return structs_; }
+    const TypeUtils::StructTable &structs() const { return structs_; }
 
   private:
-    std::unordered_map<std::string, const StructDecl *> structs_;
+    TypeUtils::StructTable structs_;
   };
 
 } // namespace refractir

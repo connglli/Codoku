@@ -1,4 +1,5 @@
 #include "reify/func_gen.hpp"
+#include "analysis/type_utils.hpp"
 #include "reify/ast_builder.hpp"
 
 #include <algorithm>
@@ -52,19 +53,19 @@ namespace refractir::reify {
 
   static InitVal
   makeInitVal(std::mt19937 &rng, const TypePtr &t, const std::vector<StructDecl> &structDecls) {
-    if (isIntType(t)) {
+    if (TypeUtils::isInt(t)) {
       InitVal iv;
       iv.kind = InitVal::Kind::Int;
       iv.value = IntLit{pickInitIntLit(rng, t), {}};
       return iv;
     }
-    if (isFpType(t)) {
+    if (TypeUtils::isFloat(t)) {
       InitVal iv;
       iv.kind = InitVal::Kind::Float;
       iv.value = FloatLit{pickInitFloatLit(rng), {}};
       return iv;
     }
-    if (isPtrType(t)) {
+    if (TypeUtils::isPtr(t)) {
       InitVal iv;
       iv.kind = InitVal::Kind::Undef;
       return iv;
@@ -157,9 +158,9 @@ namespace refractir::reify {
 
     // Emit a scalar LValue into the checksum, casting to i32 when needed.
     auto emitScalarLV = [&](LValue lv, const TypePtr &t) {
-      if (isIntType(t) && intBitWidth(t) == 32) {
+      if (TypeUtils::isInt(t) && intBitWidth(t) == 32) {
         emitChkAccum(rvalAtom(std::move(lv)), /*isCast=*/false);
-      } else if (isScalarType(t)) {
+      } else if (TypeUtils::isScalar(t)) {
         CastAtom ca;
         ca.src = std::move(lv);
         ca.dstType = i32;
@@ -186,9 +187,9 @@ namespace refractir::reify {
     emitTypeHash = [&](LValue lv, const TypePtr &t) {
       if (!t)
         return;
-      if (isPtrType(t))
+      if (TypeUtils::isPtr(t))
         return; // deferred to rewriteExitToCrc32Checksum
-      if (isScalarType(t)) {
+      if (TypeUtils::isScalar(t)) {
         emitScalarLV(std::move(lv), t);
         return;
       }
@@ -312,7 +313,7 @@ namespace refractir::reify {
         if (blkLabel == cfg.entry) {
           // Assign all ptr vars (addr or addr-of-ptr)
           for (const auto &v: vars.vars) {
-            if (!isPtrType(v.type))
+            if (!TypeUtils::isPtr(v.type))
               continue;
             if (!v.ptrTarget)
               continue;
@@ -418,7 +419,7 @@ namespace refractir::reify {
       let.name = LocalId{v.name, {}};
       let.type = v.type;
 
-      if (isPtrType(v.type)) {
+      if (TypeUtils::isPtr(v.type)) {
         // Ptr vars assigned in entry block via addr; declare as undef.
         InitVal iv;
         iv.kind = InitVal::Kind::Undef;
@@ -550,8 +551,8 @@ namespace refractir::reify {
     correctLeaves = [&](LValue lv, const TypePtr &t) {
       if (!t)
         return;
-      const bool ptrLeaf = isPtrType(t);
-      if (isIntType(t) || isFpType(t) || ptrLeaf) {
+      const bool ptrLeaf = TypeUtils::isPtr(t);
+      if (TypeUtils::isInt(t) || TypeUtils::isFloat(t) || ptrLeaf) {
         if (!haveObsLeaf && !ptrLeaf) {
           haveObsLeaf = true;
           obsLv = lv;

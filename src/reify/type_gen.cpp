@@ -1,4 +1,5 @@
 #include "reify/type_gen.hpp"
+#include "analysis/type_utils.hpp"
 
 #include <cassert>
 #include <stdexcept>
@@ -39,71 +40,10 @@ namespace refractir::reify {
   // Public helpers
   // ---------------------------------------------------------------------------
 
-  bool isIntType(const TypePtr &t) { return t && std::holds_alternative<IntType>(t->v); }
-
-  bool isFpType(const TypePtr &t) { return t && std::holds_alternative<FloatType>(t->v); }
-
-  bool isPtrType(const TypePtr &t) { return t && std::holds_alternative<PtrType>(t->v); }
-
-  bool isAggType(const TypePtr &t) {
-    if (!t)
-      return false;
-    return std::holds_alternative<ArrayType>(t->v) || std::holds_alternative<StructType>(t->v);
-  }
-
-  bool isScalarType(const TypePtr &t) { return isIntType(t) || isFpType(t); }
-
   uint32_t intBitWidth(const TypePtr &t) {
-    assert(isIntType(t));
-    const auto &it = std::get<IntType>(t->v);
-    switch (it.kind) {
-      case IntType::Kind::I32:
-        return 32;
-      case IntType::Kind::I64:
-        return 64;
-      case IntType::Kind::ICustom:
-        return (uint32_t) *it.bits;
-    }
-    return 32;
-  }
-
-  TypePtr pointeeType(const TypePtr &t) {
-    assert(isPtrType(t));
-    return std::get<PtrType>(t->v).pointee;
-  }
-
-  bool typeEquals(const TypePtr &a, const TypePtr &b) {
-    if (!a || !b)
-      return a == b;
-    // Compare by index first
-    if (a->v.index() != b->v.index())
-      return false;
-
-    if (isIntType(a)) {
-      return intBitWidth(a) == intBitWidth(b);
-    }
-    if (isFpType(a)) {
-      auto fa = std::get<FloatType>(a->v).kind;
-      auto fb = std::get<FloatType>(b->v).kind;
-      return fa == fb;
-    }
-    if (isPtrType(a)) {
-      return typeEquals(std::get<PtrType>(a->v).pointee, std::get<PtrType>(b->v).pointee);
-    }
-    if (std::holds_alternative<ArrayType>(a->v)) {
-      const auto &aa = std::get<ArrayType>(a->v);
-      const auto &ab = std::get<ArrayType>(b->v);
-      return aa.size == ab.size && typeEquals(aa.elem, ab.elem);
-    }
-    if (std::holds_alternative<StructType>(a->v)) {
-      return std::get<StructType>(a->v).name.name == std::get<StructType>(b->v).name.name;
-    }
-    if (std::holds_alternative<VecType>(a->v)) {
-      const auto &va = std::get<VecType>(a->v);
-      const auto &vb = std::get<VecType>(b->v);
-      return va.size == vb.size && typeEquals(va.elem, vb.elem);
-    }
-    return false;
+    auto bits = TypeUtils::getIntBitWidth(t);
+    assert(bits && "intBitWidth: not an integer type");
+    return bits.value_or(32);
   }
 
   // ---------------------------------------------------------------------------
@@ -155,8 +95,6 @@ namespace refractir::reify {
     return std::make_shared<Type>(Type{vt, {}});
   }
 
-  bool isVecType(const TypePtr &t) { return t && std::holds_alternative<VecType>(t->v); }
-
   TypePtr genRandomType(std::mt19937 &rng, const TypeGenConfig &cfg, int depth) {
     // Type-kind probability buckets — see rysmith::hp::kPType*. Aggregates are zeroed
     // past maxAggNesting and pointers past maxPtrDepth, then renormalized.
@@ -206,10 +144,10 @@ namespace refractir::reify {
     // If enableAggPtr, allow aggregate pointees (ptr [N] T, ptr @S).
     // Otherwise fall back to scalar.
     // Pointer to vector (ptr <N> T) is always forbidden (§6.8.1).
-    if (isVecType(pointee)) {
+    if (TypeUtils::isVec(pointee)) {
       pointee = genScalarType(rng, cfg.enableFp);
     }
-    if (!cfg.enableAggPtr && isAggType(pointee)) {
+    if (!cfg.enableAggPtr && TypeUtils::isAggregate(pointee)) {
       pointee = genScalarType(rng, cfg.enableFp);
     }
     PtrType pt;
