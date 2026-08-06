@@ -387,4 +387,101 @@ namespace refractir {
     SymbolicStore *outerStore_ = nullptr;
   };
 
+  /**
+   * A solved exit value, as an AST initializer.
+   *
+   * Only the solver knows this record's invariants — which alternative of
+   * `scalar` a given `kind` sets, and that a field the model does not mention
+   * is unconstrained rather than zero — so decoding it belongs here rather
+   * than wherever a caller wants the initializer.
+   *
+   * `declType` supplies the shape the value is being read back into: an
+   * aggregate's children come out in *declaration* order, which the model's
+   * name-keyed fields do not carry, and `structs` resolves that order. A
+   * pointer or an unconstrained value becomes `undef`, since neither has an
+   * initializer form.
+   *
+   * Inline so that a translation unit reading a solver result need not link
+   * the symbolic executor to decode one.
+   */
+  inline InitVal letExitValueToInitVal(
+      const SymbolicExecutor::LetExitValue &lev, const TypePtr &declType,
+      const std::vector<StructDecl> &structs
+  ) {
+    using LEV = SymbolicExecutor::LetExitValue;
+    InitVal iv;
+    switch (lev.kind) {
+      case LEV::Kind::Int: {
+        iv.kind = InitVal::Kind::Int;
+        int64_t v = 0;
+        if (auto pi = std::get_if<int64_t>(&lev.scalar))
+          v = *pi;
+        else if (auto pd = std::get_if<double>(&lev.scalar))
+          v = static_cast<int64_t>(*pd);
+        iv.value = IntLit{v, {}};
+        return iv;
+      }
+      case LEV::Kind::Float: {
+        iv.kind = InitVal::Kind::Float;
+        double v = 0.0;
+        if (auto pd = std::get_if<double>(&lev.scalar))
+          v = *pd;
+        else if (auto pi = std::get_if<int64_t>(&lev.scalar))
+          v = static_cast<double>(*pi);
+        iv.value = FloatLit{v, {}};
+        return iv;
+      }
+      case LEV::Kind::Array:
+      case LEV::Kind::Vec: {
+        TypePtr elemTy;
+        if (declType && std::holds_alternative<ArrayType>(declType->v))
+          elemTy = std::get<ArrayType>(declType->v).elem;
+        else if (declType && std::holds_alternative<VecType>(declType->v))
+          elemTy = std::get<VecType>(declType->v).elem;
+        std::vector<InitValPtr> children;
+        children.reserve(lev.elems.size());
+        for (const auto &c: lev.elems)
+          children.push_back(std::make_shared<InitVal>(letExitValueToInitVal(c, elemTy, structs)));
+        iv.kind = InitVal::Kind::Aggregate;
+        iv.value = std::move(children);
+        return iv;
+      }
+      case LEV::Kind::Struct: {
+        const StructDecl *sd = nullptr;
+        if (declType && std::holds_alternative<StructType>(declType->v)) {
+          const auto &sn = std::get<StructType>(declType->v).name.name;
+          for (const auto &s: structs)
+            if (s.name.name == sn) {
+              sd = &s;
+              break;
+            }
+        }
+        std::vector<InitValPtr> children;
+        if (sd) {
+          children.reserve(sd->fields.size());
+          for (const auto &f: sd->fields) {
+            auto it = lev.fields.find(f.name);
+            if (it != lev.fields.end()) {
+              children.push_back(
+                  std::make_shared<InitVal>(letExitValueToInitVal(it->second, f.type, structs))
+              );
+            } else {
+              InitVal u;
+              u.kind = InitVal::Kind::Undef;
+              children.push_back(std::make_shared<InitVal>(std::move(u)));
+            }
+          }
+        }
+        iv.kind = InitVal::Kind::Aggregate;
+        iv.value = std::move(children);
+        return iv;
+      }
+      case LEV::Kind::Ptr:
+      case LEV::Kind::Undef:
+      default:
+        iv.kind = InitVal::Kind::Undef;
+        return iv;
+    }
+  }
+
 } // namespace refractir
