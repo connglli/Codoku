@@ -74,17 +74,6 @@ using namespace refractir::reify;
   return {std::stoll(loStr), std::stoll(hiStr)};
 }
 
-// Format a solved model value as the canonical descriptor / SOLVED-
-// header string. Floats go through refractir::formatDouble for bit-exact
-// round-trip — see its comment in ast.hpp for the rationale (signed
-// zero preservation, no int/float dispatch ambiguity, subnormal
-// safety).
-[[nodiscard]] static std::string fmtModelVal(const SymbolicExecutor::Result::ModelVal &v) {
-  if (std::holds_alternative<std::int64_t>(v))
-    return std::to_string(std::get<std::int64_t>(v));
-  return formatDouble(std::get<double>(v));
-}
-
 [[nodiscard]] static auto makeSolverFactory() {
   return [](const SymbolicExecutor::Config &cfg) -> std::unique_ptr<smt::ISolver> {
 #if defined(USE_BITWUZLA)
@@ -495,7 +484,7 @@ static void writePathHeader(
           paramVals.reserve(entry->params.size());
           for (const auto &p: entry->params) {
             auto it = res.paramModel.find(p.name.name);
-            std::string val = it != res.paramModel.end() ? fmtModelVal(it->second) : "0";
+            std::string val = it != res.paramModel.end() ? formatModelValue(it->second) : "0";
             paramVals.push_back(val);
             if (it != res.paramModel.end())
               paramValuesCaptured.emplace_back(p.name.name, std::move(val));
@@ -503,7 +492,7 @@ static void writePathHeader(
           for (const auto &s: entry->syms) {
             auto it = res.model.find(s.name.name);
             if (it != res.model.end())
-              symValuesCaptured.emplace_back(s.name.name, fmtModelVal(it->second));
+              symValuesCaptured.emplace_back(s.name.name, formatModelValue(it->second));
           }
         }
 
@@ -558,8 +547,9 @@ static void writePathHeader(
         }
 
         std::string expectedRet =
-            !crcRetValue.empty() ? crcRetValue
-                                 : (res.retModel.has_value() ? fmtModelVal(*res.retModel) : "");
+            !crcRetValue.empty()
+                ? crcRetValue
+                : (res.retModel.has_value() ? formatModelValue(*res.retModel) : "");
 
         // A diverging program has no captured return value, but --emit-main
         // still needs an expected checksum for @check_chksum. The entry call
@@ -585,21 +575,9 @@ static void writePathHeader(
             std::cerr << "error: cannot open " << concretePath << "\n";
             continue;
           }
-          // SOLVED header (same format as symirsolve --output).
-          // Records the synthesised param + ret values so symiri can
-          // re-run via `--main @f <file> -- <p0> <p1>` deterministically.
-          if (!res.paramModel.empty() || !expectedRet.empty()) {
-            ofs << "// SOLVED:";
-            bool first = true;
-            for (const auto &[name, val]: res.paramModel) {
-              ofs << (first ? " " : ", ") << name << "=" << fmtModelVal(val);
-              first = false;
-            }
-            if (!expectedRet.empty()) {
-              ofs << (first ? " " : ", ") << "ret=" << expectedRet;
-            }
-            ofs << "\n";
-          }
+          // The synthesised param + ret values, so symiri can re-run this
+          // program deterministically via `--main @f <file> -- <p0> <p1>`.
+          writeSolvedHeader(ofs, res.paramModel, expectedRet);
           emitPathHeader(ofs);
           SIRPrinter printer(ofs, res.model);
           printer.print(prog);

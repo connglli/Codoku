@@ -52,35 +52,6 @@ using namespace refractir;
 static constexpr std::uint64_t kNoDescProfileStepCap = 3200;
 using namespace refractir::reify;
 
-// Parse p1's `// SOLVED: %p0=…, %p1=…, ret=…` header (written by rysmith
-// and symirsolve --output) into name → canonical value text. Values are
-// emitted by the canonical formatters, so they are safe to pass verbatim as
-// symiri positional args.
-[[nodiscard]] static std::unordered_map<std::string, std::string>
-parseSolvedHeader(const std::string &src) {
-  std::unordered_map<std::string, std::string> kv;
-  const std::string tag = "// SOLVED:";
-  std::size_t pos = src.find(tag);
-  if (pos == std::string::npos)
-    return kv;
-  std::size_t eol = src.find('\n', pos);
-  std::string line = src.substr(pos + tag.size(), eol - pos - tag.size());
-  std::stringstream ss(line);
-  std::string part;
-  while (std::getline(ss, part, ',')) {
-    std::size_t eq = part.find('=');
-    if (eq == std::string::npos)
-      continue;
-    auto trim = [](std::string s) {
-      std::size_t b = s.find_first_not_of(" \t");
-      std::size_t e = s.find_last_not_of(" \t");
-      return b == std::string::npos ? std::string{} : s.substr(b, e - b + 1);
-    };
-    kv[trim(part.substr(0, eq))] = trim(part.substr(eq + 1));
-  }
-  return kv;
-}
-
 // Resolve the entry function's parameter values for the solved input, in
 // declaration order: prefer the descriptor realization for this .sir, fall
 // back to p1's SOLVED header, and default to 0. rytwin profiles p1 at these
