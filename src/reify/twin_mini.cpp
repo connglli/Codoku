@@ -18,33 +18,6 @@ namespace refractir::reify {
     );
   }
 
-  std::string leafKey(const std::string &root, const std::vector<Access> &path) {
-    std::string k = root;
-    for (const auto &acc: path) {
-      if (auto af = std::get_if<AccessField>(&acc))
-        k += "." + af->field;
-      else
-        k += "[" + std::to_string(std::get<IntLit>(std::get<AccessIndex>(acc).index).value) + "]";
-    }
-    return k;
-  }
-
-  std::optional<std::string> leafKey(const LValue &lv) {
-    std::string k = lv.base.name;
-    for (const auto &acc: lv.accesses) {
-      if (auto af = std::get_if<AccessField>(&acc)) {
-        k += "." + af->field;
-        continue;
-      }
-      const auto &idx = std::get<AccessIndex>(acc).index;
-      auto il = std::get_if<IntLit>(&idx);
-      if (!il)
-        return std::nullopt;
-      k += "[" + std::to_string(il->value) + "]";
-    }
-    return k;
-  }
-
   Expr ptrFixExpr(const std::optional<LValue> &target) {
     if (target)
       return buildAddrExpr(*target);

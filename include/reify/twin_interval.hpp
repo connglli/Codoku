@@ -1,151 +1,27 @@
 #pragma once
 
-// twin_interval — does a whole set of entry states run a trace the same way?
+// The widest set of entry states a region's trace can be proven over.
 //
-// A twin guard admits a set of live-in states, and every state it admits must
-// reach the region's exit computing what the region computed. Deciding that by
-// running each state is fine for a handful of them and hopeless for a range, so
-// this is the other oracle: propagate an *interval* per leaf through the
-// flattened trace once, and check at every step that nothing the run depends on
-// can differ.
+// analysis/interval.hpp answers the question for a given set: propagate an
+// interval per leaf through the body and check that nothing the run depends on
+// can differ. This header is the search on top of it — start from the single
+// profiled state and widen until the proof stops going through.
 //
-// Two obligations, both checked here:
-//
-//   UB-freedom — every trapping operation stays safe for the whole input
-//   interval: `+ - * <<` cannot leave the type's range, a divisor cannot
-//   contain 0 (nor the INT_MIN / -1 pair), a shift amount stays in [0, N), an
-//   index stays in bounds, and a `require` cannot fail.
-//
-//   Path agreement — every branch the trace recorded (twin_trace.hpp) is still
-//   decided the way the profiled run decided it. The body has no branches left,
-//   so a state that would have gone the other way would silently compute the
-//   wrong thing.
-//
-// Intervals over-approximate, so a verdict of `ok` covers every state in the
-// input box: one pass proves the whole set. The converse does not hold — a
-// verdict of "not ok" means *not proven*, never "unsafe" — so a caller may only
-// use it to decline widening, never to conclude a state is bad.
-//
-// Precision is deliberately modest, but nothing is left *unbounded* that has a
-// bound. Integer scalars are tracked exactly through `+ - * ~ <<` and casts
-// that keep the value; a cast that does not is still inside the destination
-// type's range, since narrowing truncates rather than trapping. Shifts by a
-// known amount, `x & m` for a non-negative m, `x | y` and `x ^ y` over
-// non-negative ranges, and `/` and `%` (which cannot grow a value) all carry
-// bounds. Floats, pointers, intrinsic results and anything reached through
-// memory are unknown from the start.
-// Unknown is sound but useless: a check on an unknown value cannot be proven,
-// so such regions simply do not widen and keep the guard they have today.
-// Sharpening any of this is a local change to one transfer function.
-//
-// Vectors need no value of their own. A vector statement is N scalar
-// statements, one per lane, so the pass walks it that way and every lane is an
-// ordinary tracked cell — which is also how the profile records them. A lane
-// written through an index the pass cannot pin could have landed anywhere, and
-// the whole vector is forgotten.
-//
-// Solver-free by construction — this is arithmetic on bounds.
+// The search is generation policy, not analysis: how far to widen, how to
+// split the remaining slack, how many passes to spend, and which leaves to
+// free rather than bound are all tuning, and they read rytwin's
+// hyperparameters and draw from its RNG.
 
-#include <cstdint>
-#include <functional>
-#include <optional>
+#include <cstddef>
 #include <random>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
+#include "analysis/interval.hpp"
 #include "ast/ast.hpp"
-#include "reify/twin_mini.hpp"
 #include "reify/twin_trace.hpp"
 
 namespace refractir::reify {
-
-  // An inclusive range of signed values. `unknown` is the full range of the
-  // value's type and carries no information.
-  struct Interval {
-    std::int64_t lo = 0;
-    std::int64_t hi = 0;
-    bool unknown = false;
-    // The declared width of the leaf this interval describes, when it is one
-    // (0 otherwise). A leaf can never hold a value its own type cannot
-    // represent, so a search widening it must stop there however much the
-    // arithmetic downstream would tolerate.
-    std::uint32_t bits = 0;
-    // Which entry leaves this value was computed from, one bit each. A check
-    // that fails names them, so a search widening the box knows which leaves
-    // to freeze rather than freezing all of them. Only integer leaves get a
-    // bit: floats and pointers are pinned, so they can never be the reason a
-    // widened box fails. Callers leave this alone — the pass assigns the bits.
-    std::uint64_t deps = 0;
-
-    bool isConst() const { return !unknown && lo == hi; }
-  };
-
-  // The entry state to check a trace against: one interval per scalar leaf,
-  // keyed as twin_mini's `leafKey` names them (`%a`, `%a[1]`, `%s.f0`). A leaf
-  // the map does not mention is unknown, so an empty environment is the
-  // "nothing is pinned" extreme.
-  using IntervalEnv = std::unordered_map<std::string, Interval>;
-
-  // Where each pointer leaf points at region entry, keyed the same way. An
-  // empty optional is the null pointer; a pointer the caller cannot resolve is
-  // left out, and everything reached through it stays unknown. Without this a
-  // pointer set up *before* the region — the usual case — would have no known
-  // target, and every load through it would be a dead end.
-  using PtrEnv = std::unordered_map<std::string, std::optional<LValue>>;
-
-  // Floats are carried as exact values rather than ranges. A guard pins every
-  // float leaf it mentions (bounding a float needs rounding-aware arithmetic,
-  // which buys nothing while they stay pinned), and a pinned float is a
-  // constant — so the domain that fits them is equality, not an interval.
-  using FloatEnv = std::unordered_map<std::string, double>;
-
-  // The state a trace is checked against: what each leaf may hold at region
-  // entry, per kind. A leaf missing from all three is simply unknown.
-  struct EntryState {
-    IntervalEnv ints;
-    FloatEnv floats;
-    PtrEnv ptrs;
-  };
-
-  struct IntervalVerdict {
-    bool ok = false;
-    // Why the trace could not be proven — the failing operation and what it
-    // needed. Empty when ok.
-    std::string reason;
-    // The entry leaves the failing check depended on. Empty when the failure
-    // involved nothing the caller can widen (an untracked value, say), which
-    // means narrowing the box cannot help.
-    std::vector<std::string> blame;
-  };
-
-  // What an intrinsic call computes, when every argument is a single value.
-  // The pass does not know — the interpreter does, and duplicating it here is
-  // exactly the mistake this project keeps having to undo — so a caller that
-  // can answer supplies this, and one that cannot leaves every call unknown.
-  // `nullopt` means "cannot say"; a caller reports UB by throwing, which the
-  // pass turns into a refusal.
-  using IntrinsicFold = std::function<
-      std::optional<std::int64_t>(const CallAtom &, const std::vector<std::int64_t> &)>;
-
-  // Check `body` over every state in `entry`. `fn` supplies the declared types
-  // of the locals the body touches (widths bound the arithmetic) and `structs`
-  // resolves field types.
-  IntervalVerdict checkTrace(
-      const FunDecl &fn, const StructMap &structs, const TraceBody &body, const EntryState &entry,
-      const IntrinsicFold *fold = nullptr
-  );
-
-  // What every local held *before* each statement of `body`, over every state
-  // in `entry` — one environment per statement, in body order. This is the
-  // same forward pass that certifies a box, read for its annotations rather
-  // than its verdict: a rewrite licensed by a value's range needs to know the
-  // range at the point it fires. A trace the pass cannot finish returns the
-  // prefix it managed, so a caller reading past the end simply knows nothing.
-  std::vector<IntervalEnv> traceSnapshots(
-      const FunDecl &fn, const StructMap &structs, const TraceBody &body, const EntryState &entry,
-      const IntrinsicFold *fold = nullptr
-  );
 
   // What a guard may say about one leaf.
   //
@@ -170,32 +46,19 @@ namespace refractir::reify {
     std::size_t passes = 0; // interval passes spent computing it
   };
 
-  // The widest range each integer leaf could possibly take, obtained by
-  // pushing every check's requirement backward through the trace: an addition
-  // that must not overflow bounds its operands, a branch that must go one way
-  // bounds what it compares, and so on back to the entry.
-  //
-  // These are upper bounds and nothing more. Narrowing is not exact — it
-  // ignores how operands relate to one another — so a ceiling may contain
-  // values that do not actually work, and a search must still prove what it
-  // claims. What a ceiling is good for is not searching above it: a leaf whose
-  // ceiling is a single value is pinned without a single pass, one whose
-  // ceiling is its whole type is a free candidate, and everything else has a
-  // bound to bisect under instead of a doubling sequence to guess at.
-  std::unordered_map<std::string, Interval> ceilings(
-      const FunDecl &fn, const StructMap &structs, const TraceBody &body, const EntryState &entry,
-      const IntrinsicFold *fold = nullptr
-  );
+  // The branch obligations a flattened trace carries, in the form the analysis
+  // takes. The conditions stay owned by `body`, which must outlive the result.
+  [[nodiscard]] std::vector<BranchObligation> traceObligations(const TraceBody &body);
 
-  // Compute the widest box the interval pass can prove for `body`, starting
+  // Compute the widest box the interval analysis can prove for `body`, starting
   // from the profiled state. Leaves are freed where a proof allows, otherwise
   // widened in lockstep — every open leaf advances by the same relative step
-  // each round, and a round the pass refuses freezes only the leaves that
+  // each round, and a round the analysis refuses freezes only the leaves that
   // round's failing check depended on, so no leaf's width depends on the order
   // a loop visited it. `rng` settles how the remaining slack is split.
   Box computeBox(
-      const FunDecl &fn, const StructMap &structs, const TraceBody &body, const EntryState &entry,
-      std::mt19937 &rng, const IntrinsicFold *fold = nullptr
+      const FunDecl &fn, const TypeUtils::StructTable &structs, const TraceBody &body,
+      const EntryState &entry, std::mt19937 &rng, const IntrinsicFold *fold = nullptr
   );
 
 } // namespace refractir::reify

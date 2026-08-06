@@ -1154,7 +1154,9 @@ namespace refractir::reify {
           return false;
         EntryState es = pointBox(ctx.fn, pts[t]->vars, ctx.structs, ctx.layout);
         const IntrinsicFold fold = intrinsicFold();
-        const IntervalVerdict iv = checkTrace(ctx.fn, ctx.structs, *body, es, &fold);
+        const IntervalVerdict iv = IntervalAnalysis::check(
+            ctx.fn, ctx.structs, body->stmts, traceObligations(*body), es, &fold
+        );
         note = iv.ok ? "ok" : iv.reason;
         plan.entry = std::move(es);
         plan.body = std::move(*body);
@@ -1265,7 +1267,11 @@ namespace refractir::reify {
         }
 
         void refresh(const std::vector<Instr> &stmts) override {
-          snaps_ = traceSnapshots(fn_, structs_, probe_(stmts), state_(), &fold_);
+          // The trace outlives the call: the obligations borrow its conditions.
+          const TraceBody probed = probe_(stmts);
+          snaps_ = IntervalAnalysis::snapshots(
+              fn_, structs_, probed.stmts, traceObligations(probed), state_(), &fold_
+          );
         }
 
         std::optional<ValueRange>
@@ -1297,7 +1303,13 @@ namespace refractir::reify {
           [&](const std::vector<Instr> &s) {
             // Re-read the declarations every time: the engine adds cells as it
             // rewrites, and the body being judged may already use them.
-            return checkTrace(fn, structs, probeOf(s), withConstantCells(guarded), &fold).ok;
+            // The trace outlives the call: the obligations borrow its conditions.
+            const TraceBody probed = probeOf(s);
+            return IntervalAnalysis::check(
+                       fn, structs, probed.stmts, traceObligations(probed),
+                       withConstantCells(guarded), &fold
+            )
+                .ok;
           },
           rytwin::hp::kTwinRewriteRounds * rytwin::hp::kTwinRewritesPerRound
       );

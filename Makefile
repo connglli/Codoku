@@ -56,6 +56,7 @@ COMMON_SRCS = src/frontend/lexer.cpp src/frontend/parser.cpp src/frontend/ast_du
               src/frontend/typechecker.cpp src/frontend/semchecker.cpp \
               src/analysis/pass_manager.cpp src/analysis/reachability.cpp \
               src/analysis/unused_name.cpp src/analysis/type_utils.cpp \
+              src/analysis/interval.cpp \
               src/frontend/diagnostics.cpp
 
 TEST_SRCS =
