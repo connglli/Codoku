@@ -11,6 +11,7 @@
 #include "error.hpp"
 #include "frontend/link_resolver.hpp"
 #include "frontend/pipeline.hpp"
+#include "solver/solved_header.hpp"
 #include "solver/solver.hpp"
 #if defined(USE_ALIVESMT)
 #include "solver/alive_impl.hpp"

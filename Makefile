@@ -57,7 +57,8 @@ COMMON_SRCS = src/frontend/lexer.cpp src/frontend/parser.cpp src/frontend/ast_du
               src/analysis/pass_manager.cpp src/analysis/reachability.cpp \
               src/analysis/unused_name.cpp src/analysis/type_utils.cpp \
               src/analysis/interval.cpp \
-              src/frontend/diagnostics.cpp
+              src/frontend/diagnostics.cpp \
+              src/solver/solved_header.cpp
 
 TEST_SRCS =
 BACKEND_SRCS = src/backend/emit.cpp \

@@ -46,6 +46,7 @@
 #include "reify/path_sampler.hpp"
 #include "reify/state_profile.hpp"
 #include "reify/var_catalogue.hpp"
+#include "solver/solved_header.hpp"
 #include "solver/solver.hpp"
 #if defined(USE_BITWUZLA)
 #include "solver/bitwuzla_impl.hpp"

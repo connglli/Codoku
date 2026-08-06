@@ -40,6 +40,7 @@
 #include "reify/state_profile.hpp"
 #include "reify/transform.hpp"
 #include "reify/twin_transform.hpp"
+#include "solver/solved_header.hpp"
 
 namespace fs = std::filesystem;
 using namespace refractir;
