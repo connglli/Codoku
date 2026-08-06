@@ -16,6 +16,20 @@ Reify separates *leaf function generation*, compact functions with no calls, fro
 
 ## Leaf function generation
 
+Two of the clauses hold by construction: the program is built over `g` itself, so `g` is its CFG, and its statements are typed as they are generated, so it is syntactically correct. What is left is that `P` runs `pi` without UB and produces `o` on `i`, and that is a question about values.
+
+Let `T` be that program with the values that matter left as symbols, and `T[x]` the program obtained by assigning `x` to them. The task is to find one `x`:
+
+```
+∃x. follows(T[x], pi) ∧ safe(T[x], pi) ∧ interesting(x)
+```
+
+`follows` is the conjunction of the branch conditions `pi` decides, and `safe` the UB guard of every operation `pi` executes; between them they carry what construction could not. `interesting` answers to no clause at all — it excludes degenerate values, and its job is to make the program worth compiling. Every conjunct is a bit-vector formula over `x`, so this is a first-order existential over values: decidable, and settled by a single query. A model is `P`, the values it gives the parameters are `i`, and running it produces `o`.
+
+Which conjuncts are asserted decides what kind of program comes out. `safe` as stated gives a clean run, `¬safe` one that triggers UB, and a `pi` that returns to a loop header in the state it left one that diverges.
+
+`rysmith` implements this:
+
 ```
 S1. CFG generation   - random control-flow skeleton
 S2. Path sampling    - random entry-to-exit walk through the CFG
@@ -114,7 +128,19 @@ Differential testing across compiler versions or optimization levels works the s
 
 ## Whole-program generation
 
-S1 to S6 produce independent functions. To build a whole program, reify generates a random call graph and applies a semantics-preserving peephole rewrite: a constant `c` in a caller becomes `f(i) + (c - o)`, where `f(i) = o` is known from `f`'s own concretization. The call is real, and the constant's runtime value is unchanged.
+S1 to S6 produce independent functions. To build a whole program, reify generates a random call graph and realizes each of its edges as a real call, without disturbing what the caller computes.
+
+The leaves arrive already satisfying the three clauses, and composition adds a fourth: the call graph of `P` is the sampled DAG `h`. An edge of `h` is realized at a point where the caller already computes some value `v`, by routing that value through the callee. Writing `S` for the states the profiled run reaches that point in, the task is to find an argument expression `e1` and a result expression `e2` such that
+
+```
+∃e1. ∃e2. ∀s ∈ S. e2(f(e1(s))) = v(s)
+```
+
+`e1` builds the callee's parameters out of variables the caller has in scope, and `e2` turns the callee's return value back into the variable or constant the caller wanted. Neither may trap, and neither may the call between them, since the program has to stay UB-free on `i`. Both are unknown functions, so this is a second-order synthesis problem.
+
+What collapses it is that `f` is known at the inputs it was concretized on and nowhere else. A non-constant `e1` would demand `f`'s behaviour at every state in `S` — behaviour nobody has computed, on inputs the callee was never proven UB-free for.
+
+In `rylink`, `e1` is therefore constant, an input `f` was concretized on. Then `f(e1(s))` is the known `o` whatever `s` is, the callee runs on an input it was proven safe for, and `e2` is left alone and first-order: for a constant `v = c`, it is `+ (c - o)`.
 
 `rylink` implements this:
 
@@ -128,7 +154,7 @@ W6. Lowering          - program.sir plus optional C / WASM / Python
 W7. Validation        - run the bundled entry and check its outcome
 ```
 
-Each chosen leaf brings its own solved realization, one of the `--n-inits` concretizations `rysmith` emitted, which is what makes `call + (c - o)` equal the original literal at runtime. `CallRealizeTransform` consumes each rewrite site at most once across the whole program: composing two rewrites on one literal would build a left-to-right call chain, `f1() + f2() + …`, whose prefix sums can wrap even though each rewrite is individually sound in bit-vector arithmetic.
+Which realization a leaf brings is a choice among the `--n-inits` concretizations `rysmith` emitted for it, and it fixes the `i` and the `o` the splice is built from. `CallRealizeTransform` consumes each rewrite site at most once across the whole program: composing two rewrites on one literal would build a left-to-right call chain, `f1() + f2() + …`, whose prefix sums can wrap even though each rewrite is individually sound in bit-vector arithmetic.
 
 Every function in a bundle comes out of the same statement generator, so they read alike. W5 breaks that up by rewriting them with identities applied in the direction a compiler does not take: reversed peepholes, arithmetic and bitwise crossings, restructuring. The rule families live in [src/reify/antiopt](../src/reify/antiopt), driven by [include/reify/antiopt.hpp](../include/reify/antiopt.hpp). A bundled program is concrete, with no set of states to prove anything over, so only rules that cannot introduce a trapping operation apply; those hold whatever the state does, and so does any composition of them.
 
@@ -136,7 +162,19 @@ Every function in a bundle comes out of the same statement generator, so they re
 
 A twin program is an equivalent variant: `f2(i) == f1(i)` for every input, with the same UB outcome. `rytwin` builds one from a program and the input that concretizes it, so the execution is deterministic and known, and no solver is involved anywhere.
 
-Its unit is a *region*: the maximal single-entry region rooted at an executed block, covering every later block that the entry dominates on the executed path.
+Its unit is a *region*: the maximal single-entry region rooted at an executed block, covering every later block that the entry dominates on the executed path. For a region `R` and the entry state `s0` the profiled run reaches it in, the task is to find a guard `G` and a twin body `B` such that
+
+```
+∃G. ∃B. G(s0) ∧ ∀s. G(s) ⇒ R(s) ≡ B(s)
+```
+
+where `R(s) ≡ B(s)` holds when, started in `s` or `s0`, the region and the twin leave at the same block, neither hits UB on the way, and the states they leave in are bit-identical.
+
+`G` and `B` are unknown *functions*, so this is a challenging, second-order synthesis problem under one ∀.
+
+In `rytwin`, neither `G` nor `B` is searched for over a space of functions: T3 witnesses `B` by construction, and T4 draws `G` from a single template, a box around `s0`, so `G(s0)` holds for free. What is left of the ∀ is a first-order question about a fixed body and a fixed set of states.
+
+`rytwin` implements this:
 
 ```
 T1. State profile     - every initialized local at each on-path point, from the
