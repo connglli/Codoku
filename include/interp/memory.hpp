@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <list>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include "ast/ast.hpp"
@@ -72,6 +73,32 @@ namespace refractir {
     const ObjectInfo *findObjectByProvId(std::uint64_t provId) const;
     const ObjectInfo *findObjectByBaseAddress(std::uint64_t base) const;
     const ObjectInfo *findFieldOrStructObject(std::uint64_t addr, const TypePtr &type) const;
+
+    /// Where a pointer points, in terms a caller outside the memory model can
+    /// use: the local the pointee lives in, and the pointee's byte offset from
+    /// that local's base.
+    struct Provenance {
+      std::string root;
+      std::uint64_t offset;
+    };
+
+    /**
+     * Resolve the pointer value `addr`, whose provenance object is `provId`
+     * (RuntimeValue::ptrBase carries the id, not an address).
+     *
+     * Returns nullopt when the pointer does not resolve against this frame:
+     * an unknown provenance id, a root with no address in this frame, or an
+     * address outside the object rooted there. The last is the one worth
+     * knowing about — the address map is per frame, so a pointer from a
+     * caller's frame whose root name is rebound here would otherwise resolve
+     * to the wrong local. Requiring the address to fall inside this frame's
+     * object rules that out.
+     *
+     * The null pointer is not a resolution failure and is not handled here:
+     * it carries no provenance, and a caller that distinguishes null from
+     * unresolved must check for it first.
+     */
+    std::optional<Provenance> resolveProvenance(std::uint64_t addr, std::uint64_t provId) const;
 
     /// Clear all per-function state (heap, objects, addresses) and reset the
     /// bump allocator (null stays at 0) and provenance counter.

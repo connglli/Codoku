@@ -379,7 +379,7 @@ namespace refractir::reify {
         return no("a pointer into something the function does not declare");
       if (!target->isMutable)
         return no("a pointer into an immutable root"); // `addr` needs a let mut
-      auto path = ptrAccessPath(target->type, leaf.val.ptrOfs, TypeUtils::pointee(t), layout);
+      auto path = layout.accessPathAtOffset(target->type, leaf.val.ptrOfs, TypeUtils::pointee(t));
       if (!path)
         return no("a pointer to an offset no access path reaches");
       leaf.ptrTarget = LValue{LocalId{leaf.val.ptrRoot, {}}, std::move(*path), {}};

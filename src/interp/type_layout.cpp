@@ -42,6 +42,51 @@ namespace refractir {
     return t;
   }
 
+  std::optional<std::vector<Access>> TypeLayout::accessPathAtOffset(
+      const TypePtr &root, std::uint64_t offset, const TypePtr &target
+  ) const {
+    TypePtr t = root;
+    std::vector<Access> path;
+    while (true) {
+      if (offset == 0 && TypeUtils::areTypesEqual(t, target))
+        return path;
+      if (const ArrayType *at = TypeUtils::asArray(t)) {
+        std::uint64_t elemSize = sizeofType(at->elem);
+        if (elemSize == 0)
+          return std::nullopt;
+        std::uint64_t idx = offset / elemSize;
+        if (idx >= at->size)
+          return std::nullopt; // out of bounds, or one past the end
+        path.push_back(AccessIndex{Index{IntLit{static_cast<std::int64_t>(idx), {}}}, {}});
+        offset -= idx * elemSize;
+        t = at->elem;
+        continue;
+      }
+      if (const StructType *st = TypeUtils::asStruct(t)) {
+        const StructDecl *sd = lookupStruct(st->name.name);
+        if (!sd)
+          return std::nullopt;
+        std::uint64_t fieldOfs = 0;
+        const FieldDecl *hit = nullptr;
+        for (const auto &f: sd->fields) {
+          std::uint64_t size = sizeofType(f.type);
+          if (offset < fieldOfs + size) {
+            hit = &f;
+            break;
+          }
+          fieldOfs += size;
+        }
+        if (!hit)
+          return std::nullopt;
+        path.push_back(AccessField{hit->name, {}});
+        offset -= fieldOfs;
+        t = hit->type;
+        continue;
+      }
+      return std::nullopt; // a leaf, but the offset or the type disagrees
+    }
+  }
+
   // Byte offset of named field within struct s (sequential layout, no padding).
   std::uint64_t TypeLayout::fieldOffset(const StructDecl &s, const std::string &fieldName) const {
     uint64_t offset = 0;

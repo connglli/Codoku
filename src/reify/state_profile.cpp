@@ -22,23 +22,11 @@ namespace refractir::reify {
         sv.ptrNull = true;
         return;
       }
-      // rv.ptrBase carries the provenance object's ID (not an address).
-      const ObjectInfo *obj = memory.findObjectByProvId(rv.ptrBase);
-      if (!obj)
-        return;
-      auto it = memory.addrMap().find(obj->varName);
-      if (it == memory.addrMap().end())
-        return;
-      const std::uint64_t rootBase = it->second;
-      // The addrMap is scoped per frame; a caller-frame pointer whose root
-      // name is rebound in this frame would resolve to the wrong local.
-      // Require the pointer to lie inside the object rooted at this
-      // frame's base.
-      const ObjectInfo *rootObj = memory.findObjectByBaseAddress(rootBase);
-      if (!rootObj || rv.ptrVal < rootObj->base || rv.ptrVal > rootObj->end)
-        return;
-      sv.ptrRoot = obj->varName;
-      sv.ptrOfs = rv.ptrVal - rootBase;
+      // rv.ptrBase carries the provenance object's ID, not an address.
+      if (auto prov = memory.resolveProvenance(rv.ptrVal, rv.ptrBase)) {
+        sv.ptrRoot = prov->root;
+        sv.ptrOfs = prov->offset;
+      }
     }
   } // namespace
 
@@ -54,51 +42,6 @@ namespace refractir::reify {
         val = toStateValue(rv.structVal.at(name), memory);
     }
     return sv;
-  }
-
-  std::optional<std::vector<Access>> ptrAccessPath(
-      const TypePtr &rootType, std::uint64_t ofs, const TypePtr &pointee, const TypeLayout &layout
-  ) {
-    TypePtr t = rootType;
-    std::vector<Access> path;
-    while (true) {
-      if (ofs == 0 && TypeUtils::areTypesEqual(t, pointee))
-        return path;
-      if (const ArrayType *at = TypeUtils::asArray(t)) {
-        std::uint64_t es = layout.sizeofType(at->elem);
-        if (es == 0)
-          return std::nullopt;
-        std::uint64_t idx = ofs / es;
-        if (idx >= at->size)
-          return std::nullopt; // out of bounds / one-past-the-end
-        path.push_back(AccessIndex{Index{IntLit{(std::int64_t) idx, {}}}, {}});
-        ofs -= idx * es;
-        t = at->elem;
-        continue;
-      }
-      if (const StructType *st = TypeUtils::asStruct(t)) {
-        const StructDecl *sd = layout.lookupStruct(st->name.name);
-        if (!sd)
-          return std::nullopt;
-        std::uint64_t fieldOfs = 0;
-        const FieldDecl *hit = nullptr;
-        for (const auto &f: sd->fields) {
-          std::uint64_t sz = layout.sizeofType(f.type);
-          if (ofs < fieldOfs + sz) {
-            hit = &f;
-            break;
-          }
-          fieldOfs += sz;
-        }
-        if (!hit)
-          return std::nullopt;
-        path.push_back(AccessField{hit->name, {}});
-        ofs -= fieldOfs;
-        t = hit->type;
-        continue;
-      }
-      return std::nullopt; // scalar/vec reached but offset or type disagrees
-    }
   }
 
   StateValue toStateValue(const RuntimeValue &rv) {

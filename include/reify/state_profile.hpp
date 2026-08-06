@@ -93,14 +93,6 @@ namespace refractir::reify {
   StateValue toStateValue(const RuntimeValue &rv);
   StateValue toStateValue(const RuntimeValue &rv, const Memory &memory);
 
-  // Resolve a captured pointer's (root type, byte offset) to an access
-  // path, disambiguated by the pointer's static pointee type (a base
-  // address is shared by `%a`, `%a[0]`, `%a[0].f0`, ...). Returns nullopt
-  // for one-past-the-end offsets or shape mismatches.
-  std::optional<std::vector<Access>> ptrAccessPath(
-      const TypePtr &rootType, std::uint64_t ofs, const TypePtr &pointee, const TypeLayout &layout
-  );
-
   // One scalar leaf of a StateValue tree: its access path from the root
   // (concrete IntLit indices / field names) and its value.
   struct StateLeaf {

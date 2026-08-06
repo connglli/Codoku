@@ -325,4 +325,20 @@ namespace refractir {
     }
     return base;
   }
+
+  std::optional<Memory::Provenance>
+  Memory::resolveProvenance(std::uint64_t addr, std::uint64_t provId) const {
+    const ObjectInfo *obj = findObjectByProvId(provId);
+    if (!obj)
+      return std::nullopt;
+    auto it = addrMap_.find(obj->varName);
+    if (it == addrMap_.end())
+      return std::nullopt;
+    const std::uint64_t rootBase = it->second;
+    const ObjectInfo *rootObj = findObjectByBaseAddress(rootBase);
+    if (!rootObj || addr < rootObj->base || addr > rootObj->end)
+      return std::nullopt;
+    return Provenance{obj->varName, addr - rootBase};
+  }
+
 } // namespace refractir
