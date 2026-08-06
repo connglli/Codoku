@@ -44,4 +44,12 @@ namespace refractir {
     return res.reducible() ? PassResult::Success : PassResult::Error;
   }
 
+  bool ReducibilityResult::isReducible(const FunDecl &fun) {
+    // The DiagBag is throwaway: a caller reaching here has a program the
+    // checkers already accepted, so the CFG builds.
+    DiagBag diags;
+    CFG cfg = CFG::build(fun, diags);
+    return check(cfg, DomTree::build(cfg)).reducible();
+  }
+
 } // namespace refractir

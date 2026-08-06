@@ -31,6 +31,17 @@ namespace refractir {
     bool reducible() const { return offenders.empty(); }
 
     static ReducibilityResult check(const CFG &cfg, const DomTree &dt);
+
+    /**
+     * True iff `fun`'s CFG is reducible, building the CFG and dominator tree
+     * it needs. The verdict is all a caller usually wants — structured
+     * lowering is total only on reducible control flow — and asking for it
+     * should not require assembling two analyses first.
+     *
+     * Reports nothing. A caller that wants to say which edge offends reads
+     * `check`; one that wants diagnostics registers ReducibilityCheck.
+     */
+    static bool isReducible(const FunDecl &fun);
   };
 
   /**

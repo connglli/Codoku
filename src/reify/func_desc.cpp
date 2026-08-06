@@ -124,15 +124,7 @@ namespace refractir::reify {
     d.outcome = outcome;
     d.name = fn->name.name;
     d.retType = SIRPrinter::typeToString(fn->retType);
-    // Reducibility of the emitted function, via the same analyses the
-    // structuring backends run. The DiagBag is throwaway: the program
-    // was already validated upstream.
-    {
-      DiagBag diags;
-      CFG cfg = CFG::build(*fn, diags);
-      DomTree dt = DomTree::build(cfg);
-      d.reducible = ReducibilityResult::check(cfg, dt).reducible();
-    }
+    d.reducible = ReducibilityResult::isReducible(*fn);
     for (const auto &p: fn->params)
       d.params.push_back({p.name.name, SIRPrinter::typeToString(p.type)});
     d.path = pathLabels;

@@ -317,10 +317,7 @@ namespace refractir::reify {
   // malformed backend output.
   static bool allFunsReducible(const Program &prog, bool verbose) {
     for (const auto &f: prog.funs) {
-      DiagBag diags;
-      CFG cfg = CFG::build(f, diags);
-      DomTree dt = DomTree::build(cfg);
-      if (!ReducibilityResult::check(cfg, dt).reducible()) {
+      if (!ReducibilityResult::isReducible(f)) {
         if (verbose)
           std::cerr << "reify: structured lowering requires reducible control flow: " << f.name.name
                     << "\n";
