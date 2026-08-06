@@ -22,6 +22,7 @@
 #include "analysis/pass_manager.hpp"
 #include "analysis/reachability.hpp"
 #include "analysis/unused_name.hpp"
+#include "ast/clone.hpp"
 #include "ast/sir_printer.hpp"
 #include "backend/c_backend.hpp"
 #include "backend/c_vec_lowering.hpp"
@@ -373,62 +374,6 @@ namespace refractir::reify {
       }
     }
 
-    // Atom-graph deep clone restricted to the variants the checksum
-    // chain and the load preamble produce. Block / Atom are not
-    // generically copyable (SelectAtom holds unique_ptrs), so we
-    // rebuild rather than copy. Throws on any unexpected variant —
-    // the caller is the exit-block-only path emitted by
-    // buildSumChecksum + rewriter, which never emits SelectAtom /
-    // CmpAtom / aggregates inside the accumulator chain or scratch
-    // loads.
-    Atom cloneChecksumAtom(const Atom &a);
-
-    Expr cloneChecksumExpr(const Expr &e) {
-      Expr ne;
-      ne.first = cloneChecksumAtom(e.first);
-      ne.span = e.span;
-      for (const auto &tail: e.rest)
-        ne.rest.push_back({tail.op, cloneChecksumAtom(tail.atom), tail.span});
-      return ne;
-    }
-
-    Atom cloneChecksumAtom(const Atom &a) {
-      return std::visit(
-          [&a](const auto &v) -> Atom {
-            using T = std::decay_t<decltype(v)>;
-            if constexpr (std::is_same_v<T, CoefAtom>) {
-              return Atom{CoefAtom{v.coef, v.span}, a.span};
-            } else if constexpr (std::is_same_v<T, RValueAtom>) {
-              return Atom{RValueAtom{v.rval, v.span}, a.span};
-            } else if constexpr (std::is_same_v<T, CastAtom>) {
-              return Atom{CastAtom{v.src, v.dstType, v.span}, a.span};
-            } else if constexpr (std::is_same_v<T, LoadAtom>) {
-              return Atom{LoadAtom{v.rval, v.span}, a.span};
-            } else if constexpr (std::is_same_v<T, OpAtom>) {
-              return Atom{OpAtom{v.op, v.coef, v.rval, v.span}, a.span};
-            } else if constexpr (std::is_same_v<T, UnaryAtom>) {
-              return Atom{UnaryAtom{v.op, v.rval, v.span}, a.span};
-            } else if constexpr (std::is_same_v<T, AddrAtom>) {
-              return Atom{AddrAtom{v.lv, v.span}, a.span};
-            } else if constexpr (std::is_same_v<T, CallAtom>) {
-              // CallAtom arg list holds shared_ptr<Expr>; sharing is
-              // safe because consumers (printer, interpreter, C
-              // backend) treat the AST as immutable.
-              CallAtom ca;
-              ca.callee = v.callee;
-              ca.args = v.args;
-              ca.span = v.span;
-              return Atom{std::move(ca), a.span};
-            } else {
-              throw std::runtime_error(
-                  "buildMiniCrc32Prog: unsupported atom variant in checksum chain"
-              );
-            }
-          },
-          a.v
-      );
-    }
-
   } // namespace
 
   refractir::Program buildMiniCrc32Prog(
@@ -605,14 +550,14 @@ namespace refractir::reify {
         continue;
       AssignInstr cloned;
       cloned.lhs = ai->lhs;
-      cloned.rhs = cloneChecksumExpr(ai->rhs);
+      cloned.rhs = cloneExpr(ai->rhs);
       cloned.span = ai->span;
       exitBlk.instrs.push_back(Instr{std::move(cloned)});
     }
     if (auto *rt = std::get_if<RetTerm>(&fullExit->term)) {
       RetTerm nrt;
       if (rt->value)
-        nrt.value = cloneChecksumExpr(*rt->value);
+        nrt.value = cloneExpr(*rt->value);
       nrt.span = rt->span;
       exitBlk.term = Terminator{std::move(nrt)};
     }

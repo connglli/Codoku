@@ -1,11 +1,9 @@
 #include "reify/twin_probe.hpp"
 
-#include <sstream>
 #include <unordered_set>
 
 #include "analysis/type_utils.hpp"
-#include "ast/sir_printer.hpp"
-#include "frontend/pipeline.hpp"
+#include "ast/clone.hpp"
 #include "reify/common.hpp"
 #include "reify/type_gen.hpp"
 
@@ -25,17 +23,6 @@ namespace refractir::reify {
         h *= 1099511628211ull;
       }
       return h ^ '\n';
-    }
-
-    // The AST is move-only (SelectAtom holds a unique_ptr), so a region's
-    // blocks cannot be copied out of the host program — and the host must
-    // survive intact. Round-tripping through the canonical printer and
-    // parser yields a duplicate we are free to dismantle. Once per region,
-    // not once per probe.
-    Program duplicate(const Program &prog) {
-      std::ostringstream oss;
-      SIRPrinter(oss).print(prog);
-      return parseSource(oss.str());
     }
 
     // The `ret` value of a landing block. Never observed — the effect is
@@ -81,12 +68,9 @@ namespace refractir::reify {
     if (regionLabels.empty() || roots.empty())
       return;
 
-    Program dup;
-    try {
-      dup = duplicate(host);
-    } catch (const std::exception &) {
-      return;
-    }
+    // The region's blocks are moved into the harness, so they come from a
+    // copy: the host must survive intact for the next region.
+    Program dup = cloneProgram(host);
     FunDecl *src = nullptr;
     for (auto &f: dup.funs)
       if (f.name.name == funcName) {

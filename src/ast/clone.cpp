@@ -103,4 +103,137 @@ namespace refractir {
     return out;
   }
 
+  InitVal cloneInitVal(const InitVal &iv) {
+    InitVal out;
+    out.kind = iv.kind;
+    out.span = iv.span;
+    out.value = std::visit(
+        [](const auto &x) -> decltype(InitVal::value) {
+          using T = std::decay_t<decltype(x)>;
+          if constexpr (std::is_same_v<T, std::vector<InitValPtr>>) {
+            std::vector<InitValPtr> kids;
+            kids.reserve(x.size());
+            for (const auto &k: x)
+              kids.push_back(k ? std::make_shared<InitVal>(cloneInitVal(*k)) : nullptr);
+            return kids;
+          } else if constexpr (std::is_same_v<T, AtomPtr>) {
+            return x ? std::make_shared<Atom>(cloneAtom(*x)) : nullptr;
+          } else {
+            return x;
+          }
+        },
+        iv.value
+    );
+    return out;
+  }
+
+  LetDecl cloneLetDecl(const LetDecl &l) {
+    LetDecl out;
+    out.isMutable = l.isMutable;
+    out.name = l.name;
+    out.type = l.type;
+    if (l.init)
+      out.init = cloneInitVal(*l.init);
+    out.span = l.span;
+    return out;
+  }
+
+  Terminator cloneTerminator(const Terminator &t) {
+    return std::visit(
+        [](const auto &x) -> Terminator {
+          using T = std::decay_t<decltype(x)>;
+          if constexpr (std::is_same_v<T, BrTerm>) {
+            BrTerm out;
+            if (x.cond)
+              out.cond = cloneCond(*x.cond);
+            out.dest = x.dest;
+            out.thenLabel = x.thenLabel;
+            out.elseLabel = x.elseLabel;
+            out.isConditional = x.isConditional;
+            out.span = x.span;
+            return out;
+          } else if constexpr (std::is_same_v<T, RetTerm>) {
+            RetTerm out;
+            if (x.value)
+              out.value = cloneExpr(*x.value);
+            out.span = x.span;
+            return out;
+          } else {
+            return x;
+          }
+        },
+        t
+    );
+  }
+
+  Block cloneBlock(const Block &b) {
+    Block out;
+    out.label = b.label;
+    out.instrs = cloneInstrs(b.instrs);
+    out.term = cloneTerminator(b.term);
+    out.span = b.span;
+    return out;
+  }
+
+  FunDecl cloneFunDecl(const FunDecl &f) {
+    FunDecl out;
+    out.name = f.name;
+    out.params = f.params;
+    out.retType = f.retType;
+    out.syms = f.syms;
+    out.lets.reserve(f.lets.size());
+    for (const auto &l: f.lets)
+      out.lets.push_back(cloneLetDecl(l));
+    out.blocks.reserve(f.blocks.size());
+    for (const auto &b: f.blocks)
+      out.blocks.push_back(cloneBlock(b));
+    out.span = f.span;
+    out.sourceStem = f.sourceStem;
+    out.attributes = f.attributes;
+    return out;
+  }
+
+  namespace {
+
+    Contract cloneContract(const Contract &c) {
+      Contract out;
+      out.pres.reserve(c.pres.size());
+      for (const auto &p: c.pres)
+        out.pres.push_back(PreClause{cloneCond(p.cond), p.message, p.span});
+      out.posts.reserve(c.posts.size());
+      for (const auto &p: c.posts)
+        out.posts.push_back(PostClause{cloneCond(p.cond), p.message, p.span});
+      out.span = c.span;
+      return out;
+    }
+
+    ExtDecl cloneExtDecl(const ExtDecl &d) {
+      ExtDecl out;
+      out.name = d.name;
+      out.params = d.params;
+      out.retType = d.retType;
+      if (d.contract)
+        out.contract = cloneContract(*d.contract);
+      // resolvedBody is deliberately not carried: it names a body the clone
+      // owns its own copy of. The link resolver refills it.
+      out.span = d.span;
+      return out;
+    }
+
+  } // namespace
+
+  Program cloneProgram(const Program &p) {
+    Program out;
+    out.structs = p.structs;
+    out.funs.reserve(p.funs.size());
+    for (const auto &f: p.funs)
+      out.funs.push_back(cloneFunDecl(f));
+    out.extDecls.reserve(p.extDecls.size());
+    for (const auto &d: p.extDecls)
+      out.extDecls.push_back(cloneExtDecl(d));
+    out.intrinsics = p.intrinsics;
+    out.span = p.span;
+    return out;
+  }
+
 } // namespace refractir
