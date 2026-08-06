@@ -4,7 +4,7 @@
 //
 // reify/antiopt.hpp is the engine: a statement list, the declarations it may
 // add to, and a predicate deciding whether a rewritten body is still
-// acceptable. rytwin has such a predicate — the interval pass over its guard
+// acceptable. rytwin has such a predicate — the state-set pass over its guard
 // box — and gets the whole catalog. A generator does not: its programs are
 // concrete, there is no set of states to prove anything over, and nothing can
 // judge a rewrite after the fact.

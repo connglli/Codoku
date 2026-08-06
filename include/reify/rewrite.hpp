@@ -49,7 +49,7 @@
 //         - Twin disguise: each identity is value-preserving, but stacking
 //           two can introduce an intermediate that overflows on states the
 //           original body handled. The engine's answer is to re-run the
-//           interval pass over the whole body after each application and
+//           state-set pass over the whole body after each application and
 //           roll back the ones that fail.
 //
 //       A new rule author is responsible for R1 and R2. A new *engine*

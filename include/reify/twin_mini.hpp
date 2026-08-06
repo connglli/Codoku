@@ -17,7 +17,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "analysis/interval.hpp"
+#include "analysis/state_set.hpp"
 #include "analysis/type_utils.hpp"
 #include "ast/ast.hpp"
 #include "reify/state_profile.hpp"

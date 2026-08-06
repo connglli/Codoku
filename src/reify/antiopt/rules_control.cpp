@@ -31,7 +31,7 @@ namespace refractir::reify::antiopt {
     //
     // Not here: the reverse of E1 (mask arithmetic back into a select), which
     // would undo the rule above it and leave the engine oscillating between
-    // two spellings of the same body. Vectors wait on the interval pass being
+    // two spellings of the same body. Vectors wait on the state-set pass being
     // able to say anything per lane, and floats are out of the catalog
     // entirely — every FP operation can trap and reassociation is not
     // value-preserving under RNE.

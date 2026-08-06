@@ -1,4 +1,4 @@
-#include "reify/twin_interval.hpp"
+#include "reify/twin_box.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -32,7 +32,7 @@ namespace refractir::reify {
     const std::vector<BranchObligation> branches = traceObligations(body);
     auto judge = [&](const EntryState &st) {
       ++box.passes;
-      return IntervalAnalysis::check(fn, structs, body.stmts, branches, st, fold);
+      return StateSetAnalysis::check(fn, structs, body.stmts, branches, st, fold);
     };
 
     // Step 1 — the floor. Everything pinned is the guard rytwin already
@@ -50,7 +50,7 @@ namespace refractir::reify {
     // leaf before a single trial is run: one that cannot move at all is pinned
     // for free, and the rest have a bound to search under rather than a
     // doubling sequence that has to discover where to stop.
-    const auto ceil = IntervalAnalysis::ceilings(fn, structs, body.stmts, branches, entry, fold);
+    const auto ceil = StateSetAnalysis::ceilings(fn, structs, body.stmts, branches, entry, fold);
     for (auto &leaf: box.leaves) {
       auto it = ceil.find(leaf.key);
       if (it != ceil.end() && it->second.lo == it->second.hi)
@@ -147,7 +147,7 @@ namespace refractir::reify {
       }
       if (!anyOpen)
         break;
-      const IntervalVerdict v = judge(widen(radii));
+      const StateSetVerdict v = judge(widen(radii));
       if (v.ok) {
         for (auto &o: open)
           if (!o.frozen) {

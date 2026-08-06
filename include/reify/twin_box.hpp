@@ -2,7 +2,7 @@
 
 // The widest set of entry states a region's trace can be proven over.
 //
-// analysis/interval.hpp answers the question for a given set: propagate an
+// analysis/state_set.hpp answers the question for a given set: propagate an
 // interval per leaf through the body and check that nothing the run depends on
 // can differ. This header is the search on top of it — start from the single
 // profiled state and widen until the proof stops going through.
@@ -17,7 +17,7 @@
 #include <string>
 #include <vector>
 
-#include "analysis/interval.hpp"
+#include "analysis/state_set.hpp"
 #include "ast/ast.hpp"
 #include "reify/twin_trace.hpp"
 
@@ -43,14 +43,14 @@ namespace refractir::reify {
   // rounding-aware arithmetic and a pointer has no range to speak of.
   struct Box {
     std::vector<BoxLeaf> leaves;
-    std::size_t passes = 0; // interval passes spent computing it
+    std::size_t passes = 0; // state-set passes spent computing it
   };
 
   // The branch obligations a flattened trace carries, in the form the analysis
   // takes. The conditions stay owned by `body`, which must outlive the result.
   [[nodiscard]] std::vector<BranchObligation> traceObligations(const TraceBody &body);
 
-  // Compute the widest box the interval analysis can prove for `body`, starting
+  // Compute the widest box the state-set analysis can prove for `body`, starting
   // from the profiled state. Leaves are freed where a proof allows, otherwise
   // widened in lockstep — every open leaf advances by the same relative step
   // each round, and a round the analysis refuses freezes only the leaves that

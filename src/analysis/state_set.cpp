@@ -1,4 +1,4 @@
-#include "analysis/interval.hpp"
+#include "analysis/state_set.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -180,7 +180,7 @@ namespace refractir {
       // only the ceiling pass reads this back.
       const std::vector<IntervalEnv> &snapshots() const { return snaps_; }
 
-      IntervalVerdict
+      StateSetVerdict
       run(const std::vector<Instr> &stmts, const std::vector<BranchObligation> &branches) {
         std::size_t next = 0; // next obligation to consult
         for (std::size_t i = 0; i < stmts.size(); ++i) {
@@ -199,11 +199,11 @@ namespace refractir {
         for (; next < branches.size(); ++next)
           if (!decides(branches[next]))
             return fail("branch could go either way: " + reason_);
-        return IntervalVerdict{true, "", {}};
+        return StateSetVerdict{true, "", {}};
       }
 
     private:
-      IntervalVerdict fail(const std::string &why) { return IntervalVerdict{false, why, blamed()}; }
+      StateSetVerdict fail(const std::string &why) { return StateSetVerdict{false, why, blamed()}; }
 
       bool reject(std::string why, std::uint64_t deps = 0) {
         reason_ = std::move(why);
@@ -1436,7 +1436,7 @@ namespace refractir {
 
   } // namespace
 
-  IntervalVerdict IntervalAnalysis::check(
+  StateSetVerdict StateSetAnalysis::check(
       const FunDecl &fn, const TypeUtils::StructTable &structs, const std::vector<Instr> &stmts,
       const std::vector<BranchObligation> &branches, const EntryState &entry,
       const IntrinsicFold *fold
@@ -1444,7 +1444,7 @@ namespace refractir {
     return Checker(fn, structs, entry, /*record=*/false, fold).run(stmts, branches);
   }
 
-  std::vector<IntervalEnv> IntervalAnalysis::snapshots(
+  std::vector<IntervalEnv> StateSetAnalysis::snapshots(
       const FunDecl &fn, const TypeUtils::StructTable &structs, const std::vector<Instr> &stmts,
       const std::vector<BranchObligation> &branches, const EntryState &entry,
       const IntrinsicFold *fold
@@ -1519,7 +1519,7 @@ namespace refractir {
 
   } // namespace
 
-  std::unordered_map<std::string, Interval> IntervalAnalysis::ceilings(
+  std::unordered_map<std::string, Interval> StateSetAnalysis::ceilings(
       const FunDecl &fn, const TypeUtils::StructTable &structs, const std::vector<Instr> &stmts,
       const std::vector<BranchObligation> &branches, const EntryState &entry,
       const IntrinsicFold *fold

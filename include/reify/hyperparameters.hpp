@@ -563,7 +563,7 @@ namespace refractir::reify::rytwin::hp {
   // ===========================================================================
   // Guard box
   //
-  // How far the interval pass is asked to widen a guard. Rounds bound the
+  // How far the state-set pass is asked to widen a guard. Rounds bound the
   // lockstep doubling (each is one pass over the trace, so this is cheap); the
   // trim is a seeded percentage shaved off each proven run, because a maximal
   // run is the same run every time and makes guards recognizable.
@@ -579,7 +579,7 @@ namespace refractir::reify::rytwin::hp {
   // Body disguise
   //
   // How hard a twin body is rewritten before it is grafted. Each application
-  // costs one interval pass over the body (to re-check it) and is rolled back
+  // costs one state-set pass over the body (to re-check it) and is rolled back
   // if that fails, so these bound work, not risk.
   // ===========================================================================
   inline constexpr std::size_t kTwinRewriteRounds = 3;

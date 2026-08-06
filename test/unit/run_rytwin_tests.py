@@ -822,12 +822,12 @@ def trace_stmts(line):
   return int(m.group(1)) if m else None
 
 
-def interval_note(line):
-  m = re.search(r"interval (ok|[^)]+)", line)
+def verdict_note(line):
+  m = re.search(r"verdict (ok|[^)]+)", line)
   return m.group(1) if m else None
 
 
-def test_interval_pass_proves_scalar_traces(rytwin):
+def test_state_set_pass_proves_scalar_traces(rytwin):
   """The pass must prove the profiled state itself: every leaf is a single
   value there, so anything it cannot prove is a gap in the domain rather than
   a genuinely unprovable trace."""
@@ -844,12 +844,12 @@ def test_interval_pass_proves_scalar_traces(rytwin):
         continue
       check(
         f"{name}: proven at the profiled state",
-        interval_note(lines[0]) == "ok",
+        verdict_note(lines[0]) == "ok",
         lines[0],
       )
 
 
-def test_interval_pass_follows_memory(rytwin, symiri):
+def test_state_set_pass_follows_memory(rytwin, symiri):
   """A value that round-trips through memory is still a value: the pass
   follows `addr` provenance, so a store and the load that reads it back
   connect, and a division by the loaded value is provable."""
@@ -858,7 +858,7 @@ def test_interval_pass_follows_memory(rytwin, symiri):
     check("load/div fixture twinned", r.returncode == 0 and lines, r.stderr[:200])
     if not lines:
       return
-    check("the loaded divisor is proven", interval_note(lines[0]) == "ok", lines[0])
+    check("the loaded divisor is proven", verdict_note(lines[0]) == "ok", lines[0])
     r1 = symiri_result(symiri, p1, "@loaddiv", ["3"])
     r2 = symiri_result(symiri, p2, "@loaddiv", ["3"])
     check("memory-bearing twin still equivalent", r1[1:] == r2[1:], f"{r1} vs {r2}")
@@ -1049,7 +1049,7 @@ def test_disguised_body_is_not_a_copy(rytwin, symiri):
 
 def test_disguise_rolls_back_what_it_cannot_prove(rytwin):
   """A rule is sound on its own; two of them together need not be. The
-  interval pass re-checks after every application and the body is restored
+  state-set pass re-checks after every application and the body is restored
   when it no longer proves — so rewrites being undone is the mechanism
   working, not a fault."""
   with tempfile.TemporaryDirectory() as d:
@@ -1133,7 +1133,7 @@ def test_rewrite_rules_selftest(rytwin):
 
 
 # Each family-A fixture puts one shape in front of the rules and bounds the
-# leaf that shape needs bounded: a rewrite the interval pass cannot re-prove
+# leaf that shape needs bounded: a rewrite the state-set pass cannot re-prove
 # over the whole box is rolled back, so an unbounded leaf would leave the
 # rule sound, applicable, and never kept.
 
@@ -1446,7 +1446,7 @@ def widened_leaf(rytwin, fixture, name):
     return box_counts(lines[0]), (widest[1] if widest else 0)
 
 
-def test_interval_pass_bounds_a_shift(rytwin):
+def test_state_set_pass_bounds_a_shift(rytwin):
   """`%x >> 2` is `%x` divided by four rounding down — monotone, so the range
   shifts with it. Calling it unknown poisoned the addition that read it, and
   the leaf behind it had to stay pinned."""
@@ -1457,7 +1457,7 @@ def test_interval_pass_bounds_a_shift(rytwin):
   check("and it is a real one", radius > 1000000, str(radius))
 
 
-def test_interval_pass_bounds_a_logical_shift(rytwin):
+def test_state_set_pass_bounds_a_logical_shift(rytwin):
   """`%x >>> 2` is not monotone across zero — `-1 >>> 1` is the largest value
   there is — but the shifted-out bits are gone either way, so even a value the
   guard admits negative lands well inside the type."""
@@ -1468,7 +1468,7 @@ def test_interval_pass_bounds_a_logical_shift(rytwin):
   check("and it is a real one", radius > 1000000, str(radius))
 
 
-def test_interval_pass_bounds_a_mask(rytwin):
+def test_state_set_pass_bounds_a_mask(rytwin):
   """The bits of `%x & 255` are a subset of 255's, so the result is in
   [0, 255] whatever %x holds — including the negatives this guard admits."""
   counts, radius = widened_leaf(rytwin, MASK_WIDEN_FIXTURE, "maskbox")
@@ -1478,7 +1478,7 @@ def test_interval_pass_bounds_a_mask(rytwin):
   check("and it is a real one", radius > 1000000, str(radius))
 
 
-def test_interval_pass_declines_a_signed_mask(rytwin):
+def test_state_set_pass_declines_a_signed_mask(rytwin):
   """`%x & -8` keeps the sign bit, and with %x negative too there is nothing
   to bound the result by. The pass must decline rather than invent a bound,
   so the leaf behind it stays pinned."""
@@ -1727,7 +1727,7 @@ def test_scratch_declarations_are_shuffled(rytwin):
   )
 
 
-# Family D reads the same interval table that certified the guard, so these
+# Family D reads the same state-set table that certified the guard, so these
 # fixtures are about what the box *knows*: a local pinned to a value, a value
 # the box bounds, and a leaf the guard never mentions at all.
 LICENSED_FIXTURE = """// SOLVED: %p0=3
@@ -1956,7 +1956,7 @@ fun @undefleaf(%p0: i32) : i32 {
 
 
 def test_an_unproven_body_still_gets_trap_free_rewrites(rytwin):
-  """A body the interval pass cannot prove used to be left exactly as the
+  """A body the state-set pass cannot prove used to be left exactly as the
   region wrote it — the worst case for a twin, since it is then a copy. The
   rules that introduce no trapping operation need no proof, so those still
   apply and the rest stand down."""
@@ -1965,7 +1965,7 @@ def test_an_unproven_body_still_gets_trap_free_rewrites(rytwin):
     check("unproven fixture twinned", r.returncode == 0 and lines, r.stderr[:200])
     if not lines:
       return
-    check("the pass declines the trace", interval_note(lines[0]) != "ok", lines[0])
+    check("the pass declines the trace", verdict_note(lines[0]) != "ok", lines[0])
     m = re.search(r"(\d+) rewrites \((\d+) undone", lines[0])
     check("it is still rewritten", m and int(m.group(1)) > 0, lines[0])
     check("the log says why the choice was limited", "trap-free" in lines[0], lines[0])
@@ -2093,7 +2093,7 @@ fun @vecdyn(%p0: i32) : i32 {
 """
 
 
-def test_interval_pass_follows_vector_lanes(rytwin):
+def test_state_set_pass_follows_vector_lanes(rytwin):
   """Lane-wise arithmetic is arithmetic: `%v = %v + %w` is one addition per
   lane, each with the same overflow question as a scalar one. Following it
   is what lets a region that touches a vector prove anything at all."""
@@ -2102,12 +2102,12 @@ def test_interval_pass_follows_vector_lanes(rytwin):
     check("vector fixture twinned", r.returncode == 0 and lines, r.stderr[:200])
     if not lines:
       return
-    check("the vector trace is proven", interval_note(lines[0]) == "ok", lines[0])
+    check("the vector trace is proven", verdict_note(lines[0]) == "ok", lines[0])
     counts = box_counts(lines[0])
     check("and the guard opens", counts and counts[0] + counts[1] > 0, str(counts))
 
 
-def test_interval_pass_follows_a_written_lane(rytwin):
+def test_state_set_pass_follows_a_written_lane(rytwin):
   """A lane written by name is a cell like any other, and the vector it sits
   in keeps its other lanes."""
   with tempfile.TemporaryDirectory() as d:
@@ -2115,7 +2115,7 @@ def test_interval_pass_follows_a_written_lane(rytwin):
     check("lane fixture twinned", r.returncode == 0 and lines, r.stderr[:200])
     if not lines:
       return
-    check("the lane write is followed", interval_note(lines[0]) == "ok", lines[0])
+    check("the lane write is followed", verdict_note(lines[0]) == "ok", lines[0])
     counts = box_counts(lines[0])
     check("and the guard opens", counts and counts[0] + counts[1] > 0, str(counts))
 
@@ -2129,7 +2129,7 @@ def test_an_unknown_lane_index_claims_nothing(rytwin):
     check("dynamic-lane fixture twinned", r.returncode == 0 and lines, r.stderr[:200])
     if not lines:
       return
-    check("the pass declines", interval_note(lines[0]) != "ok", lines[0])
+    check("the pass declines", verdict_note(lines[0]) != "ok", lines[0])
 
 
 def test_vector_twin_agrees_off_the_profile(rytwin, symiri):
@@ -2204,7 +2204,7 @@ def bounded_opens(rytwin, fixture, name):
     return (counts[1] if counts else None), (widest[1] if widest else 0)
 
 
-def test_interval_pass_bounds_a_disjunction(rytwin):
+def test_state_set_pass_bounds_a_disjunction(rytwin):
   """`x | y` only sets bits, so for two non-negative ranges it is at least
   the larger operand and at most the next power of two."""
   ranged, radius = bounded_opens(rytwin, OR_BOUND_FIXTURE, "orbound")
@@ -2214,7 +2214,7 @@ def test_interval_pass_bounds_a_disjunction(rytwin):
   check("and it widens far", radius > 1000, str(radius))
 
 
-def test_interval_pass_bounds_an_exclusive_or(rytwin):
+def test_state_set_pass_bounds_an_exclusive_or(rytwin):
   """`x ^ y` cannot set a bit neither operand has, so the same ceiling holds
   and the result stays non-negative."""
   ranged, radius = bounded_opens(rytwin, XOR_BOUND_FIXTURE, "xorbound")
@@ -2224,7 +2224,7 @@ def test_interval_pass_bounds_an_exclusive_or(rytwin):
   check("and it widens far", radius > 1000, str(radius))
 
 
-def test_interval_pass_bounds_a_quotient(rytwin):
+def test_state_set_pass_bounds_a_quotient(rytwin):
   """Dividing cannot grow a value: with the divisor away from zero, the
   quotient is bounded by the dividend over the smallest divisor there is."""
   ranged, radius = bounded_opens(rytwin, DIV_BOUND_FIXTURE, "divbound")
@@ -2234,7 +2234,7 @@ def test_interval_pass_bounds_a_quotient(rytwin):
   check("and it widens far", radius > 1000, str(radius))
 
 
-def test_interval_pass_bounds_a_remainder(rytwin):
+def test_state_set_pass_bounds_a_remainder(rytwin):
   """A remainder is smaller than its divisor and no larger than its dividend,
   and it takes the dividend's sign."""
   ranged, radius = bounded_opens(rytwin, MOD_BOUND_FIXTURE, "modbound")
@@ -2490,7 +2490,7 @@ def test_box_is_deterministic_for_a_seed(rytwin):
       )
 
 
-def test_interval_pass_follows_floats(rytwin, symiri):
+def test_state_set_pass_follows_floats(rytwin, symiri):
   """A float leaf the guard pins is a constant, so float arithmetic, a branch
   on a float, and a cast back to an integer are all followable — none of them
   should stop a region being proven."""
@@ -2499,14 +2499,14 @@ def test_interval_pass_follows_floats(rytwin, symiri):
     check("float fixture twinned", r.returncode == 0 and lines, r.stderr[:200])
     if not lines:
       return
-    check("float work is proven", interval_note(lines[0]) == "ok", lines[0])
+    check("float work is proven", verdict_note(lines[0]) == "ok", lines[0])
     check("the float branch is settled", "1 path cond" in lines[0], lines[0])
     r1 = symiri_result(symiri, p1, "@floats", ["3"])
     r2 = symiri_result(symiri, p2, "@floats", ["3"])
     check("float program equivalent", r1[1:] == r2[1:], f"{r1} vs {r2}")
 
 
-def test_interval_pass_seeds_pointers_from_the_profile(rytwin):
+def test_state_set_pass_seeds_pointers_from_the_profile(rytwin):
   """A pointer set up before the region has no `addr` inside it to follow.
   The profile recorded where it points, so the load through it is still
   known."""
@@ -2523,21 +2523,21 @@ def test_interval_pass_seeds_pointers_from_the_profile(rytwin):
     hit = [ln for ln in lines if "^work" in ln]
     if hit:
       check(
-        "a pointer from the profile is followed", interval_note(hit[0]) == "ok", hit[0]
+        "a pointer from the profile is followed", verdict_note(hit[0]) == "ok", hit[0]
       )
 
 
-def test_interval_pass_follows_pointer_arithmetic(rytwin):
+def test_state_set_pass_follows_pointer_arithmetic(rytwin):
   """Pointer arithmetic by a known amount lands on a known cell, so the
   region that walks an array is provable too."""
   with tempfile.TemporaryDirectory() as d:
     r, lines, _, _ = graft_log(rytwin, d, PTR_WALK_FIXTURE, "ptrwalk", ["--validate"])
     check("pointer-walk fixture twinned", r.returncode == 0 and lines, r.stderr[:200])
     if lines:
-      check("a walked pointer is proven", interval_note(lines[0]) == "ok", lines[0])
+      check("a walked pointer is proven", verdict_note(lines[0]) == "ok", lines[0])
 
 
-def test_interval_pass_reports_what_it_cannot_prove(rytwin, symiri):
+def test_state_set_pass_reports_what_it_cannot_prove(rytwin, symiri):
   """A pointer that itself comes out of memory has no known target, so what
   it addresses stays unknown — and saying so is the point, since the guard
   cannot widen past it. The graft is unaffected either way."""
@@ -2548,7 +2548,7 @@ def test_interval_pass_reports_what_it_cannot_prove(rytwin, symiri):
     )
     if not lines:
       return
-    check("the pass declines", interval_note(lines[0]) != "ok", lines[0])
+    check("the pass declines", verdict_note(lines[0]) != "ok", lines[0])
     r1 = symiri_result(symiri, p1, "@ptrptr", ["3"])
     r2 = symiri_result(symiri, p2, "@ptrptr", ["3"])
     check(
@@ -3808,12 +3808,12 @@ def main():
       lambda: test_no_solver_linked(rytwin),
     ),
     (
-      "interval: the profiled state is provable",
-      lambda: test_interval_pass_proves_scalar_traces(rytwin),
+      "state-set: the profiled state is provable",
+      lambda: test_state_set_pass_proves_scalar_traces(rytwin),
     ),
     (
-      "interval: values are followed through memory",
-      lambda: test_interval_pass_follows_memory(rytwin, symiri),
+      "state-set: values are followed through memory",
+      lambda: test_state_set_pass_follows_memory(rytwin, symiri),
     ),
     (
       "box: a loop pins its shape and opens its data",
@@ -3952,27 +3952,27 @@ def main():
       lambda: test_an_intrinsic_is_written_out(rytwin, symiri),
     ),
     (
-      "interval: a leaf the box freed stays unknown",
+      "state-set: a leaf the box freed stays unknown",
       lambda: test_a_freed_leaf_stays_unknown(rytwin),
     ),
     (
-      "interval: a shift by a known amount is bounded",
-      lambda: test_interval_pass_bounds_a_shift(rytwin),
+      "state-set: a shift by a known amount is bounded",
+      lambda: test_state_set_pass_bounds_a_shift(rytwin),
     ),
     (
-      "interval: a logical shift is bounded across zero",
-      lambda: test_interval_pass_bounds_a_logical_shift(rytwin),
+      "state-set: a logical shift is bounded across zero",
+      lambda: test_state_set_pass_bounds_a_logical_shift(rytwin),
     ),
     (
-      "interval: a mask by a non-negative constant is bounded",
-      lambda: test_interval_pass_bounds_a_mask(rytwin),
+      "state-set: a mask by a non-negative constant is bounded",
+      lambda: test_state_set_pass_bounds_a_mask(rytwin),
     ),
     (
-      "interval: a signed mask claims nothing",
-      lambda: test_interval_pass_declines_a_signed_mask(rytwin),
+      "state-set: a signed mask claims nothing",
+      lambda: test_state_set_pass_declines_a_signed_mask(rytwin),
     ),
     (
-      "interval: a widened shift guard still agrees",
+      "state-set: a widened shift guard still agrees",
       lambda: test_shifted_program_still_agrees(rytwin, symiri),
     ),
     (
@@ -4012,51 +4012,51 @@ def main():
       lambda: test_comparisons_rewrite_at_any_width(rytwin),
     ),
     (
-      "interval: vector lanes are followed",
-      lambda: test_interval_pass_follows_vector_lanes(rytwin),
+      "state-set: vector lanes are followed",
+      lambda: test_state_set_pass_follows_vector_lanes(rytwin),
     ),
     (
-      "interval: a written lane is followed",
-      lambda: test_interval_pass_follows_a_written_lane(rytwin),
+      "state-set: a written lane is followed",
+      lambda: test_state_set_pass_follows_a_written_lane(rytwin),
     ),
     (
-      "interval: an unknown lane index claims nothing",
+      "state-set: an unknown lane index claims nothing",
       lambda: test_an_unknown_lane_index_claims_nothing(rytwin),
     ),
     (
-      "interval: a vector twin agrees off the profile",
+      "state-set: a vector twin agrees off the profile",
       lambda: test_vector_twin_agrees_off_the_profile(rytwin, symiri),
     ),
     (
-      "interval: a disjunction is bounded",
-      lambda: test_interval_pass_bounds_a_disjunction(rytwin),
+      "state-set: a disjunction is bounded",
+      lambda: test_state_set_pass_bounds_a_disjunction(rytwin),
     ),
     (
-      "interval: an exclusive or is bounded",
-      lambda: test_interval_pass_bounds_an_exclusive_or(rytwin),
+      "state-set: an exclusive or is bounded",
+      lambda: test_state_set_pass_bounds_an_exclusive_or(rytwin),
     ),
     (
-      "interval: a quotient is bounded",
-      lambda: test_interval_pass_bounds_a_quotient(rytwin),
+      "state-set: a quotient is bounded",
+      lambda: test_state_set_pass_bounds_a_quotient(rytwin),
     ),
     (
-      "interval: a remainder is bounded",
-      lambda: test_interval_pass_bounds_a_remainder(rytwin),
+      "state-set: a remainder is bounded",
+      lambda: test_state_set_pass_bounds_a_remainder(rytwin),
     ),
     (
-      "interval: a signed disjunction claims nothing",
+      "state-set: a signed disjunction claims nothing",
       lambda: test_a_signed_disjunction_claims_nothing(rytwin),
     ),
     (
-      "interval: a pinned intrinsic call is folded",
+      "state-set: a pinned intrinsic call is folded",
       lambda: test_a_pinned_intrinsic_is_folded(rytwin),
     ),
     (
-      "interval: an open intrinsic argument folds nothing",
+      "state-set: an open intrinsic argument folds nothing",
       lambda: test_an_open_intrinsic_argument_folds_nothing(rytwin),
     ),
     (
-      "interval: a folded call agrees off the profile",
+      "state-set: a folded call agrees off the profile",
       lambda: test_a_folded_call_agrees_off_the_profile(rytwin, symiri),
     ),
     (
@@ -4076,20 +4076,20 @@ def main():
       lambda: test_box_is_deterministic_for_a_seed(rytwin),
     ),
     (
-      "interval: float values are followed exactly",
-      lambda: test_interval_pass_follows_floats(rytwin, symiri),
+      "state-set: float values are followed exactly",
+      lambda: test_state_set_pass_follows_floats(rytwin, symiri),
     ),
     (
-      "interval: pointers set up before the region are known",
-      lambda: test_interval_pass_seeds_pointers_from_the_profile(rytwin),
+      "state-set: pointers set up before the region are known",
+      lambda: test_state_set_pass_seeds_pointers_from_the_profile(rytwin),
     ),
     (
-      "interval: pointer arithmetic lands on a known cell",
-      lambda: test_interval_pass_follows_pointer_arithmetic(rytwin),
+      "state-set: pointer arithmetic lands on a known cell",
+      lambda: test_state_set_pass_follows_pointer_arithmetic(rytwin),
     ),
     (
-      "interval: an unprovable trace is reported, not hidden",
-      lambda: test_interval_pass_reports_what_it_cannot_prove(rytwin, symiri),
+      "state-set: an unprovable trace is reported, not hidden",
+      lambda: test_state_set_pass_reports_what_it_cannot_prove(rytwin, symiri),
     ),
     (
       "twin body: the trace records the conditions it assumed",

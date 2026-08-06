@@ -29,7 +29,7 @@
 #include "reify/expr_gen.hpp"
 #include "reify/hyperparameters.hpp"
 #include "reify/state_profile.hpp"
-#include "reify/twin_interval.hpp"
+#include "reify/twin_box.hpp"
 #include "reify/twin_mini.hpp"
 #include "reify/twin_probe.hpp"
 #include "reify/twin_trace.hpp"
@@ -897,9 +897,9 @@ namespace refractir::reify {
       std::string label;
       TwinPlan plan;
       bool fellBack = false;
-      // What the interval pass made of the trace at the profiled state. It
+      // What the state-set pass made of the trace at the profiled state. It
       // does not gate the graft; it says how much room a guard has to widen.
-      std::string interval;
+      std::string verdict;
       // How far the guard may open: one class per integer leaf.
       Box box;
       // How much the body was rewritten before grafting.
@@ -1154,7 +1154,7 @@ namespace refractir::reify {
           return false;
         EntryState es = pointBox(ctx.fn, pts[t]->vars, ctx.structs, ctx.layout);
         const IntrinsicFold fold = intrinsicFold();
-        const IntervalVerdict iv = IntervalAnalysis::check(
+        const StateSetVerdict iv = StateSetAnalysis::check(
             ctx.fn, ctx.structs, body->stmts, traceObligations(*body), es, &fold
         );
         note = iv.ok ? "ok" : iv.reason;
@@ -1181,7 +1181,7 @@ namespace refractir::reify {
         }
         c.fellBack = true;
       }
-      c.interval = note;
+      c.verdict = note;
       return c;
     }
 
@@ -1269,7 +1269,7 @@ namespace refractir::reify {
         void refresh(const std::vector<Instr> &stmts) override {
           // The trace outlives the call: the obligations borrow its conditions.
           const TraceBody probed = probe_(stmts);
-          snaps_ = IntervalAnalysis::snapshots(
+          snaps_ = StateSetAnalysis::snapshots(
               fn_, structs_, probed.stmts, traceObligations(probed), state_(), &fold_
           );
         }
@@ -1305,7 +1305,7 @@ namespace refractir::reify {
             // rewrites, and the body being judged may already use them.
             // The trace outlives the call: the obligations borrow its conditions.
             const TraceBody probed = probeOf(s);
-            return IntervalAnalysis::check(
+            return StateSetAnalysis::check(
                        fn, structs, probed.stmts, traceObligations(probed),
                        withConstantCells(guarded), &fold
             )
@@ -1437,7 +1437,7 @@ namespace refractir::reify {
             vlog(
                 fnName + " " + c.label + ": grafted region -> " + c.plan.exitLabel + " (" +
                 std::to_string(c.nBlocks) + " blk, " + std::to_string(traced) + " stmts, " +
-                std::to_string(c.plan.body.checks.size()) + " path cond, interval " + c.interval +
+                std::to_string(c.plan.body.checks.size()) + " path cond, verdict " + c.verdict +
                 ", " + describeBox(c.box) + ", " + std::to_string(c.disguised.applied) +
                 " rewrites (" + std::to_string(c.disguised.rolledBack) + " undone" +
                 (c.disguised.trapFreeOnly ? ", trap-free only" : "") +

@@ -127,7 +127,7 @@ namespace refractir::reify::antiopt {
     // The recomputation is only the same value if nothing it depends on has
     // moved since, which is what `source` checks. Tier1: the copy runs the
     // same arithmetic the original did, so it traps only where the original
-    // would have — but the interval pass has the last word all the same.
+    // would have — but the state-set pass has the last word all the same.
     class UnCseRule : public AntiOptRule {
     public:
       const char *name() const override { return "un-cse"; }

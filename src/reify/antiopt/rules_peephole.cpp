@@ -209,7 +209,7 @@ namespace refractir::reify::antiopt {
     // Licensed, not merely tier-1: RefractIR's `<<` is signed arithmetic and
     // traps on a negative left operand (spec §7.1), so this is right only
     // where the guard's box proves %x >= 0. The rule offers the rewrite and
-    // the interval re-check keeps it exactly there.
+    // the state-set re-check keeps it exactly there.
     class MulShiftRule : public AntiOptRule {
     public:
       MulShiftRule(bool plusOne, const char *nm) : plusOne_(plusOne), name_(nm) {}

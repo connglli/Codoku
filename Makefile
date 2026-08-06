@@ -56,7 +56,7 @@ COMMON_SRCS = src/frontend/lexer.cpp src/frontend/parser.cpp src/frontend/ast_du
               src/frontend/typechecker.cpp src/frontend/semchecker.cpp \
               src/analysis/pass_manager.cpp src/analysis/reachability.cpp \
               src/analysis/unused_name.cpp src/analysis/type_utils.cpp \
-              src/analysis/interval.cpp \
+              src/analysis/state_set.cpp \
               src/frontend/diagnostics.cpp \
               src/solver/solved_header.cpp
 
@@ -110,7 +110,7 @@ REIFY_SRCS = src/reify/cfg_gen.cpp src/reify/path_sampler.cpp \
              src/reify/transform.cpp src/reify/twin_transform.cpp \
              src/reify/twin_mini.cpp \
              src/reify/twin_probe.cpp src/reify/twin_trace.cpp \
-             src/reify/twin_interval.cpp src/reify/antiopt.cpp \
+             src/reify/twin_box.cpp src/reify/antiopt.cpp \
              src/reify/antiopt/common.cpp src/reify/antiopt/rules_peephole.cpp \
              src/reify/antiopt/rules_mba.cpp src/reify/antiopt/rules_structure.cpp \
              src/reify/antiopt/rules_licensed.cpp \

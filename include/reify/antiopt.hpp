@@ -16,7 +16,7 @@
 //
 // The engine is deliberately free of rytwin: it takes a statement list, the
 // declarations it may add to, and a predicate that says whether a rewritten
-// body is still acceptable. rytwin passes the interval pass over its guard
+// body is still acceptable. rytwin supplies the state-set pass over its guard
 // box; a generator with no such obligation can pass one that always accepts
 // and rely on the rules being identities.
 //
@@ -57,7 +57,7 @@ namespace refractir::reify {
   // Whether applying a rule can introduce an operation that traps. Tier0 rules
   // build only from `& | ^ ~ >> >>> cmp select` and copies, so they are safe
   // wherever they match; Tier1 rules introduce `+ - * <<` or `/ %`, which the
-  // interval pass has to clear over the whole box afterwards.
+  // state-set pass has to clear over the whole box afterwards.
   enum class TrapTier { Tier0, Tier1 };
 
   // Where a rule fires: one statement of the body, addressed by index. Rules
@@ -100,7 +100,7 @@ namespace refractir::reify {
   // condition* — a mask that is a no-op because the value is small enough, a
   // literal spelled as a read of something pinned to it — need someone to
   // stand behind the condition. That someone is the caller: rytwin answers
-  // from the same interval pass that certifies its guard, and a caller with
+  // from the same state-set pass that certifies its guard, and a caller with
   // nothing to say passes nothing, which simply stops those rules firing.
   //
   // A licence granted on stale facts is not a licence, so the engine refreshes
@@ -210,7 +210,7 @@ namespace refractir::reify {
 
   // Is a rewritten body still acceptable? Consulted after every application;
   // `false` undoes it. A caller with a correctness obligation puts it here —
-  // for rytwin, that the interval pass still proves the body over every state
+  // for rytwin, that the state-set pass still proves the body over every state
   // its guard admits. An empty predicate says the caller has no oracle at all,
   // and then only the rules that need none are offered.
   using AntiOptAccept = std::function<bool(const std::vector<Instr> &)>;

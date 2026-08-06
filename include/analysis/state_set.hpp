@@ -1,13 +1,15 @@
 #pragma once
 
-// Interval analysis over a straight-line body: does every state in a set run
+// State-set analysis over a straight-line body: does every state in a set run
 // it the same way?
 //
 // The question this answers is not about one state but about a whole set of
 // them. Running the body on each is fine for a handful and hopeless for a
 // range, so instead an interval per scalar leaf is propagated through the body
 // once, and at every step the analysis checks that nothing the run depends on
-// can differ across the set. Two obligations, both checked:
+// can differ across the set. Intervals are the domain, not the point: what is
+// being proven is a property of the whole set, and sharpening the domain would
+// not change the question. Two obligations, both checked:
 //
 //   UB-freedom — every trapping operation stays safe for the whole input
 //   interval: `+ - * <<` cannot leave the type's range, a divisor cannot
@@ -110,7 +112,7 @@ namespace refractir {
     PtrEnv ptrs;
   };
 
-  struct IntervalVerdict {
+  struct StateSetVerdict {
     bool ok = false;
     // Why the body could not be proven — the failing operation and what it
     // needed. Empty when ok.
@@ -146,7 +148,7 @@ namespace refractir {
   using IntrinsicFold = std::function<
       std::optional<std::int64_t>(const CallAtom &, const std::vector<std::int64_t> &)>;
 
-  struct IntervalAnalysis {
+  struct StateSetAnalysis {
     /**
      * Check `stmts` over every state in `entry`, requiring each obligation in
      * `branches` to be decided as it says.
@@ -154,7 +156,7 @@ namespace refractir {
      * `fn` supplies the declared types of the locals the body touches, whose
      * widths bound the arithmetic, and `structs` resolves field types.
      */
-    static IntervalVerdict check(
+    static StateSetVerdict check(
         const FunDecl &fn, const TypeUtils::StructTable &structs, const std::vector<Instr> &stmts,
         const std::vector<BranchObligation> &branches, const EntryState &entry,
         const IntrinsicFold *fold = nullptr

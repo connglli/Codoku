@@ -143,7 +143,7 @@ T1. State profile     - every initialized local at each on-path point, from the
                         .state.json sidecar (rysmith --emit-state) or by interpreting
 T2. Region planning   - pick a dominance region whose live-in state a guard can state
 T3. Trace flattening  - the statements the run executed, branches dropped, loops laid out
-T4. Guard box         - an interval pass opens each leaf as far as it can prove
+T4. Guard box         - a state-set pass opens each leaf as far as it can prove
 T5. Anti-optimization - the W5 engine again, here licensed by the box
 T6. Graft             - splice the guarded diamond; --validate spot-checks the box
 ```
@@ -158,7 +158,7 @@ The graft is a diamond at the region entry:
 
 The guard takes over the region entry's own label, so no predecessor edge is rewritten, and the two arms rejoin at the exit the region left to.
 
-The twin body is the executed trace, which makes it correct for every state that follows the same path UB-free, a far larger set than the one profiled state. The guard therefore states per leaf what the interval pass proves: nothing at all (free), `lo <= x <= hi` (ranged), or `x == v` (pinned). Every comparison the guard makes is total, so the guard itself cannot trap.
+The twin body is the executed trace, which makes it correct for every state that follows the same path UB-free, a far larger set than the one profiled state. The guard therefore states per leaf what the state-set pass proves: nothing at all (free), `lo <= x <= hi` (ranged), or `x == v` (pinned). Every comparison the guard makes is total, so the guard itself cannot trap.
 
 Having a proof also buys the rewriting more than W5 gets. Rules that can trap are kept wherever the box clears them, and a family of rules reads the box's facts directly.
 
