@@ -15,6 +15,7 @@
 #include "ast/ast.hpp"
 #include "frontend/lexer.hpp"
 #include "frontend/parser.hpp"
+#include "frontend/semchecker.hpp"
 
 namespace refractir {
 
@@ -268,14 +269,19 @@ namespace refractir {
     }
 
     // Pull in intrinsic decls from libs (lib funs may call them).
-    std::unordered_set<std::string> mainIntrNames;
+    //
+    // Keyed by signature, not by name: RefractIR intrinsics overload, so a
+    // lib calling `@popcount(i64)` needs that declaration even when the
+    // primary already declares `@popcount(i32)`. Deduplicating by name drops
+    // the second one and the lib body then fails to typecheck against a
+    // program that was valid on its own.
+    std::unordered_set<std::string> mainIntrSigs;
     for (const auto &i: main.intrinsics)
-      mainIntrNames.insert(i.name.name);
+      mainIntrSigs.insert(intrinsicSignature(i));
     for (auto &lib: libs) {
       for (auto it = lib.intrinsics.begin(); it != lib.intrinsics.end();) {
-        if (!mainIntrNames.count(it->name.name)) {
+        if (mainIntrSigs.insert(intrinsicSignature(*it)).second) {
           main.intrinsics.push_back(*it);
-          mainIntrNames.insert(it->name.name);
           it = lib.intrinsics.erase(it);
         } else {
           ++it;

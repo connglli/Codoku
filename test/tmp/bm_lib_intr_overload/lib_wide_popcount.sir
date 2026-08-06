@@ -1,0 +1,11 @@
+// SKIP: ALL — library / fixture file; not a standalone test
+// Declares @popcount at i64. A primary that declares it at i32 must not
+// displace this one: intrinsics overload, so both declarations are needed.
+intrinsic @popcount(%x: i64) : i64;
+
+fun @bm_wide_popcount(%a: i64) : i64 {
+  let mut %r: i64 = 0;
+^entry:
+  %r = call @popcount(%a);
+  ret %r;
+}

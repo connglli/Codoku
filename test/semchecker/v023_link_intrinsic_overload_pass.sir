@@ -1,0 +1,20 @@
+// EXPECT: PASS
+// SPEC v0.2.3 §11.1 + §12.6
+// INTERP_ARGS: -I test/tmp/bm_lib_intr_overload
+// Intention: the primary and an -I library each declare @popcount at a
+// different width. Both declarations must survive the link, or the library
+// body stops typechecking against a program that was valid on its own.
+intrinsic @popcount(%x: i32) : i32;
+
+decl @bm_wide_popcount(%a: i64) : i64;
+
+fun @main() : i32 {
+  let mut %n: i32 = 255;
+  let mut %w: i64 = 1023;
+  let mut %r: i32 = 0;
+  let mut %q: i64 = 0;
+^entry:
+  %r = call @popcount(%n);
+  %q = call @bm_wide_popcount(%w);
+  ret %r;
+}
