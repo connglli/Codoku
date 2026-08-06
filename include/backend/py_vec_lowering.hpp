@@ -93,4 +93,18 @@ namespace refractir {
    */
   std::unique_ptr<PyVecLowering> makePyVecLowering(const std::string &name);
 
+  /**
+   * The names makePyVecLowering accepts, in a stable order.
+   *
+   * A sweep over the strategies has to know what they are, and reading the
+   * factory is not something a caller can do. Keep this beside the factory:
+   * a name added to one and not the other is a strategy that ships and is
+   * never exercised.
+   *
+   * The order is part of the contract. A caller that picks a strategy by
+   * drawing an index reproduces its choice from a seed, so reordering the
+   * existing entries changes what every past seed selects.
+   */
+  const std::vector<std::string> &pyVecLoweringNames();
+
 } // namespace refractir

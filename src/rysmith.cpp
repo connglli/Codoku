@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "ast/sir_printer.hpp"
+#include "backend/emit.hpp"
 #include "backend/py_vec_lowering.hpp"
 #include "backend/wasm_vec_lowering.hpp"
 #include "cxxopts.hpp"
@@ -854,14 +855,14 @@ static void runGenerationLoop(
                           reify::pickStructuredLowering(rng, run.structuredLoweringOpt);
         if (leafCfg.verbose && structured)
           std::cout << "  structured-lowering: true\n";
-        reify::EmitOptions emitOpts;
+        EmitOptions emitOpts;
         emitOpts.keepRequire = !run.noRequire;
         emitOpts.noUbGuards = run.noUbGuards;
         emitOpts.vecLowering = vecLowering;
         emitOpts.structuredLowering = structured;
         emitOpts.emitMain = run.emitMain;
         emitOpts.verbose = leafCfg.verbose;
-        bool ok = compileSirInProcess(p, run.target, outPath, emitOpts);
+        bool ok = emitSirFile(p, run.target, outPath, emitOpts);
         if (ok)
           std::cout << "  compiled: " << outPath << "\n";
         else

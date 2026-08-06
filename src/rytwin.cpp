@@ -29,6 +29,7 @@
 #include <unordered_map>
 
 #include "ast/sir_printer.hpp"
+#include "backend/emit.hpp"
 #include "backend/wasm_vec_lowering.hpp"
 #include "cxxopts.hpp"
 #include "error.hpp"
@@ -415,12 +416,12 @@ int main(int argc, char **argv) {
   if (target != "sir") {
     fs::path outCompiled = outputPath;
     outCompiled.replace_extension(target == "c" ? ".c" : ".wat");
-    reify::EmitOptions emitOpts;
+    EmitOptions emitOpts;
     emitOpts.keepRequire = keepRequire;
     emitOpts.noUbGuards = noUbGuards;
     emitOpts.vecLowering = vecLowering;
     emitOpts.emitMain = emitMain;
-    if (!compileSirInProcess(outputPath, target, outCompiled, emitOpts)) {
+    if (!emitSirFile(outputPath, target, outCompiled, emitOpts)) {
       std::cerr << "rytwin: compile of p2 to " << target << " failed\n";
       return 1;
     }

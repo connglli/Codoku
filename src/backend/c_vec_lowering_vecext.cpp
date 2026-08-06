@@ -145,6 +145,13 @@ namespace refractir {
   std::unique_ptr<CVecLowering> makeCStructArrayLowering();
   std::unique_ptr<CVecLowering> makeCStructScalarsLowering();
 
+  const std::vector<std::string> &cVecLoweringNames() {
+    static const std::vector<std::string> names = {
+        "vecext", "scalars", "array", "structscalars", "structarray"
+    };
+    return names;
+  }
+
   std::unique_ptr<CVecLowering> makeCVecLowering(const std::string &name) {
     if (name == "vecext")
       return std::make_unique<CVecExtLowering>();

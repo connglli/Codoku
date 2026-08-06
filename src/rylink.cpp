@@ -41,6 +41,7 @@
 #include "ast/sir_printer.hpp"
 #include "backend/c_backend.hpp"
 #include "backend/c_vec_lowering.hpp"
+#include "backend/emit.hpp"
 #include "backend/py_vec_lowering.hpp"
 #include "backend/wasm_backend.hpp"
 #include "backend/wasm_vec_lowering.hpp"
@@ -319,7 +320,7 @@ emitBundle(Program &bundle, std::mt19937 &rng, const PerProgConfig &cfg, const E
     bool structured = reify::pickStructuredLowering(rng, cfg.structuredLowering);
     if (cfg.verbose && structured)
       std::cout << "  structured-lowering: true\n";
-    reify::EmitOptions emitOpts;
+    EmitOptions emitOpts;
     emitOpts.keepRequire = cfg.keepRequire;
     emitOpts.noUbGuards = noUbGuards;
     emitOpts.vecLowering = vecLow;
@@ -327,7 +328,7 @@ emitBundle(Program &bundle, std::mt19937 &rng, const PerProgConfig &cfg, const E
     emitOpts.emitMain = cfg.emitMain;
     emitOpts.splitBySource = cfg.splitBySource;
     emitOpts.verbose = cfg.verbose;
-    if (!emitCInProcess(bundle, emitDir, emitStem, emitOpts)) {
+    if (!emitC(bundle, emitDir, emitStem, emitOpts)) {
       if (cfg.verbose)
         std::cerr << "  backend FAIL (" << failTag << ")\n";
       return false;
@@ -343,14 +344,14 @@ emitBundle(Program &bundle, std::mt19937 &rng, const PerProgConfig &cfg, const E
     bool structured = reify::pickStructuredLowering(rng, cfg.structuredLowering);
     if (cfg.verbose && structured)
       std::cout << "  structured-lowering: true\n";
-    reify::EmitOptions emitOpts;
+    EmitOptions emitOpts;
     emitOpts.keepRequire = cfg.keepRequire;
     emitOpts.noUbGuards = noUbGuards;
     emitOpts.vecLowering = vecLow;
     emitOpts.structuredLowering = structured;
     emitOpts.emitMain = cfg.emitMain;
     emitOpts.verbose = cfg.verbose;
-    if (!emitWasmInProcess(bundle, wasmOut, emitOpts)) {
+    if (!emitWasm(bundle, wasmOut, emitOpts)) {
       if (cfg.verbose)
         std::cerr << "  backend FAIL (" << failTag << ")\n";
       return false;
@@ -363,13 +364,13 @@ emitBundle(Program &bundle, std::mt19937 &rng, const PerProgConfig &cfg, const E
     std::string vecLow = reify::pickVecLowering(rng, cfg.vecLowering, "python");
     if (cfg.verbose && !vecLow.empty())
       std::cout << "  vec-lowering: " << vecLow << "\n";
-    reify::EmitOptions emitOpts;
+    EmitOptions emitOpts;
     emitOpts.keepRequire = cfg.keepRequire;
     emitOpts.noUbGuards = noUbGuards;
     emitOpts.vecLowering = vecLow;
     emitOpts.emitMain = cfg.emitMain;
     emitOpts.verbose = cfg.verbose;
-    if (!emitPyInProcess(bundle, pyOut, emitOpts)) {
+    if (!emitPy(bundle, pyOut, emitOpts)) {
       if (cfg.verbose)
         std::cerr << "  backend FAIL (" << failTag << ")\n";
       return false;

@@ -4,6 +4,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 #include "ast/ast.hpp"
 
 namespace refractir {
@@ -108,5 +109,19 @@ namespace refractir {
    *   "scalars" — N separate scalar WASM locals
    */
   std::unique_ptr<WasmVecLowering> makeWasmVecLowering(const std::string &name);
+
+  /**
+   * The names makeWasmVecLowering accepts, in a stable order.
+   *
+   * A sweep over the strategies has to know what they are, and reading the
+   * factory is not something a caller can do. Keep this beside the factory:
+   * a name added to one and not the other is a strategy that ships and is
+   * never exercised.
+   *
+   * The order is part of the contract. A caller that picks a strategy by
+   * drawing an index reproduces its choice from a seed, so reordering the
+   * existing entries changes what every past seed selects.
+   */
+  const std::vector<std::string> &wasmVecLoweringNames();
 
 } // namespace refractir

@@ -14,6 +14,7 @@
 #include <string_view>
 #include <vector>
 #include "ast/ast.hpp"
+#include "backend/emit.hpp"
 #include "reify/state_profile.hpp"
 
 namespace refractir::reify {
@@ -117,61 +118,6 @@ namespace refractir::reify {
   bool programTraps(
       const std::filesystem::path &sirPath, const std::string &funcName,
       const std::vector<std::string> &paramArgs
-  );
-
-  // ---------------------------------------------------------------------------
-  // Shared backend compiler helpers
-  // ---------------------------------------------------------------------------
-
-  /**
-   * How a Program is lowered, shared by every entry point below so the four
-   * of them cannot drift apart. Each field means the same thing whichever
-   * backend reads it; a backend that has no use for one ignores it.
-   */
-  struct EmitOptions {
-    // Keep `require` statements in the emitted code rather than dropping them.
-    bool keepRequire = false;
-    // Drop the dynamic UB guards (see CBackend::setNoUbGuards). Sound only
-    // when the program is known UB-free.
-    bool noUbGuards = false;
-    // Vector-lowering strategy name; empty selects the backend's default
-    // ("vecext" for C and WASM, "array" for python). A name the target does
-    // not implement is an error, not a fallback.
-    std::string vecLowering;
-    // Reconstruct while/if control flow instead of C's goto or WASM's `$__pc`
-    // dispatch loop. Requires a reducible program. Python always structures
-    // and ignores this.
-    bool structuredLowering = false;
-    // Emit the program's `main` unmangled, as a real entry point.
-    bool emitMain = false;
-    // C only: write one `<stem>.c` per source file instead of one unit.
-    bool splitBySource = false;
-    bool verbose = false;
-  };
-
-  // Compile a Program to C (in-process). Writes `<outDir>/<primaryStem>.c`,
-  // or one file per source stem under `opts.splitBySource`.
-  bool emitCInProcess(
-      refractir::Program &prog, const std::filesystem::path &outDir, const std::string &primaryStem,
-      const EmitOptions &opts
-  );
-
-  // Compile a Program to WASM (in-process).
-  bool emitWasmInProcess(
-      refractir::Program &prog, const std::filesystem::path &outFile, const EmitOptions &opts
-  );
-
-  // Compile a Program to Python (in-process). Requires a reducible program,
-  // since the backend structurizes unconditionally.
-  bool emitPyInProcess(
-      refractir::Program &prog, const std::filesystem::path &outFile, const EmitOptions &opts
-  );
-
-  // Parse a .sir file and compile it with the C / WASM / Python backend.
-  // Returns true on success.
-  bool compileSirInProcess(
-      const std::filesystem::path &sirPath, const std::string &target,
-      const std::filesystem::path &outPath, const EmitOptions &opts
   );
 
 } // namespace refractir::reify

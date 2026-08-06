@@ -59,6 +59,13 @@ namespace refractir {
   std::unique_ptr<PyVecLowering> makePyStructArrayLowering();
   std::unique_ptr<PyVecLowering> makePyStructScalarsLowering();
 
+  const std::vector<std::string> &pyVecLoweringNames() {
+    static const std::vector<std::string> names = {
+        "array", "scalars", "structscalars", "structarray"
+    };
+    return names;
+  }
+
   std::unique_ptr<PyVecLowering> makePyVecLowering(const std::string &name) {
     if (name == "array" || name.empty())
       return std::make_unique<PyArrayLowering>();

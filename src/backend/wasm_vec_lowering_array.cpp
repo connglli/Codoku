@@ -93,6 +93,11 @@ namespace refractir {
   std::unique_ptr<WasmVecLowering> makeWasmScalarsLowering();
   std::unique_ptr<WasmVecLowering> makeWasmVecextLowering();
 
+  const std::vector<std::string> &wasmVecLoweringNames() {
+    static const std::vector<std::string> names = {"vecext", "array", "scalars"};
+    return names;
+  }
+
   std::unique_ptr<WasmVecLowering> makeWasmVecLowering(const std::string &name) {
     if (name == "array")
       return std::make_unique<WasmArrayLowering>();

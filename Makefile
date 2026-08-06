@@ -59,7 +59,8 @@ COMMON_SRCS = src/frontend/lexer.cpp src/frontend/parser.cpp src/frontend/ast_du
               src/frontend/diagnostics.cpp
 
 TEST_SRCS =
-BACKEND_SRCS = src/backend/c_backend.cpp src/backend/wasm_backend.cpp \
+BACKEND_SRCS = src/backend/emit.cpp \
+               src/backend/c_backend.cpp src/backend/wasm_backend.cpp \
                src/backend/c_expr.cpp src/backend/c_vec.cpp \
                src/backend/c_lvalue.cpp src/backend/c_types.cpp \
                src/backend/c_structured.cpp \
