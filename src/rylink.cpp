@@ -1,22 +1,5 @@
 /**
  * rylink — whole-program generator over a rysmith function pool.
- *
- * Pipeline per generated program:
- *   1. Pick K functions from the pool (K from --n-nodes, capped by pool size).
- *   2. Build a DAG call-graph over those nodes (cg_gen).
- *   3. Parse each chosen .sir and merge into one bundled Program
- *      (deduplicating struct decls by name; rysmith already namespaces
- *      structs by genID so collisions only happen across same-id picks).
- *   4. For each (caller→callee) edge in the CG, drive CallRealizeTransform
- *      to splice a `call @callee(args)` into the caller body.
- *   5. Emit `prog_<id>_<i>/program.sir` (bundled, with CG/PARAMS/RET
- *      header comments). The bundled file is the source of truth for
- *      every downstream consumer.
- *   6. (--target c) Invoke symirc --split-by-source on program.sir to
- *      emit common.h + one .c per FunDecl::sourceStem.
- *   7. (--validate) Run symiri on program.sir with the entry's solved
- *      parameter values and assert the returned value equals the entry
- *      descriptor's ret.
  */
 
 #include <algorithm>

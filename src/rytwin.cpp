@@ -1,22 +1,5 @@
 /**
  * rytwin — equivalence-preserving RefractIR program transformer.
- *
- * Given a generated program `p1` (a rysmith leaf or a rylink whole
- * program), rytwin produces an equivalent program `p2`. It first obtains
- * `p1`'s state profile — loading the `.state.json` sidecar (rysmith
- * --emit-state) when present, and otherwise interpreting `p1` in-process:
- * from `@main` when the program has one (so callee-frame states match what
- * runtime execution sees), else on the entry's solved input (descriptor
- * realization or `// SOLVED:` header). It then grafts, into selected
- * basic blocks of any profiled function, a synthesized twin block `B'`
- * that reproduces `B`'s effect on the exact state `B` sees, guarded by a
- * check on that live-in state so `B'` runs only on it and the original
- * `B` runs otherwise. Thus `p1(i) == p2(i)` for every input `i` (see
- * docs/reify.md).
- *
- * This driver wires the CLI, infers and loads the descriptor from the
- * input path, obtains the profile, runs the transform pipeline
- * (TwinTransform), and optionally validates and compiles the result.
  */
 
 #include <cctype>

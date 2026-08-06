@@ -1,15 +1,5 @@
 /**
  * rysmith — C++ random RefractIR leaf-function generator.
- *
- * Builds RefractIR Programs directly in memory (no text generation/parsing),
- * then calls SymbolicExecutor in-process (no subprocess) to concretize them.
- *
- * Pipeline per leaf function:
- *   S1. Random CFG with n interior blocks
- *   S2. Sample a random execution path (EP)
- *   S3. Build symbolic Program AST directly (func_gen)
- *   S4. Validate (SemChecker + TypeChecker) and solve in-process
- *   S5. Emit concrete .sir via SIRPrinter
  */
 
 #include <algorithm>
