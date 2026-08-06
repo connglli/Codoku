@@ -1,4 +1,5 @@
 #include <cmath>
+#include <cstdio>
 #include <sstream>
 #include <stdexcept>
 #include "analysis/type_utils.hpp"
@@ -8,6 +9,10 @@
 
 namespace refractir {
 
+  // The `--dump-trace` rendering, which is for a person reading along and is
+  // deliberately lossy: floats print at default precision and aggregates
+  // collapse to an ellipsis. formatRuntimeValue is the bit-exact one; the two
+  // are not interchangeable, and cross-validation depends on that.
   std::string Interpreter::rvToString(const RuntimeValue &rv) const {
     switch (rv.kind) {
       case RuntimeValue::Kind::Int:
@@ -249,4 +254,24 @@ namespace refractir {
     }
     return v;
   }
+
+  std::string formatRuntimeValue(const RuntimeValue &v) {
+    switch (v.kind) {
+      case RuntimeValue::Kind::Int:
+        return std::to_string(v.intVal);
+      case RuntimeValue::Kind::Float: {
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "%a", v.floatVal);
+        return buf;
+      }
+      case RuntimeValue::Kind::Ptr: {
+        std::ostringstream os;
+        os << "ptr(0x" << std::hex << v.ptrVal << std::dec << ")";
+        return os.str();
+      }
+      default:
+        return {};
+    }
+  }
+
 } // namespace refractir

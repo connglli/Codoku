@@ -190,34 +190,30 @@ namespace refractir::reify {
 
       std::string canonical = funcName.empty() || funcName[0] == '@' ? funcName : "@" + funcName;
 
-      // Capture "Result: <value>" via a local sink rather than redirecting
-      // the process-global std::cout, which races with concurrent worker
-      // threads (rysmith runs one generation thread per function).
-      std::stringstream capturedStream;
+      // The interpreter's `Result:` line goes to a local sink rather than the
+      // process-global std::cout, which races with concurrent worker threads
+      // (rysmith runs one generation thread per function). The value itself
+      // comes back from run().
+      std::stringstream sink;
+      std::optional<RuntimeValue> result;
       try {
-        Interpreter interp(prog, capturedStream);
+        Interpreter interp(prog, sink);
         // Capture the state profile from this same run when requested.
         if (outProfile) {
           outProfile->func = canonical;
           outProfile->granularity = gran;
           attachStateProfile(interp, *outProfile, gran);
         }
-        interp.run(canonical, {}, paramArgs);
+        result = interp.run(canonical, {}, paramArgs);
       } catch (...) {
         return std::nullopt;
       }
 
-      std::string out = capturedStream.str();
-      auto pos = out.rfind("Result:");
-      if (pos == std::string::npos)
-        return std::nullopt;
-      pos += 7; // past "Result:"
-      while (pos < out.size() && (out[pos] == ' ' || out[pos] == '\t'))
-        ++pos;
-      auto end = out.find_first_of("\r\n", pos);
-      std::string val = out.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+      if (!result)
+        return std::nullopt; // the entry returned nothing to record
+      std::string val = formatRuntimeValue(*result);
       if (val.empty())
-        return std::nullopt;
+        return std::nullopt; // an aggregate or vector, which has no one-line form
       return val;
     } catch (...) {
       return std::nullopt;

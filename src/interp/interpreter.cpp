@@ -22,7 +22,7 @@ namespace refractir {
   Interpreter::Interpreter(const Program &prog, std::ostream &out) :
       prog_(prog), out_(out), typeLayout_(prog), memory_(typeLayout_) {}
 
-  void Interpreter::run(
+  std::optional<RuntimeValue> Interpreter::run(
       const std::string &entryFuncName, const SymBindings &symBindings,
       const std::vector<std::string> &paramArgs, bool dumpExec
   ) {
@@ -100,11 +100,29 @@ namespace refractir {
       args.push_back(v);
     }
     symBindings_ = &symBindings;
-    execFunction(*entry, args, symBindings);
+    std::optional<RuntimeValue> result = execFunction(*entry, args, symBindings);
     symBindings_ = nullptr;
+    printResult(result);
+    return result;
   }
 
-  void Interpreter::execFunction(
+  // The `Result:` line the command-line tools read. Its payload is
+  // formatRuntimeValue's, so a caller reading the value in process and a
+  // reader of this line see the same text.
+  void Interpreter::printResult(const std::optional<RuntimeValue> &res) {
+    if (!res) {
+      out_ << "Result: void\n";
+      return;
+    }
+    // An aggregate or vector has no one-line rendering, and formatRuntimeValue
+    // says so with an empty string. The line is omitted rather than emitted
+    // with nothing after it.
+    const std::string text = formatRuntimeValue(*res);
+    if (!text.empty())
+      out_ << "Result: " << text << "\n";
+  }
+
+  std::optional<RuntimeValue> Interpreter::execFunction(
       const FunDecl &f, const std::vector<RuntimeValue> &args, const SymBindings &symBindings
   ) {
     // Reset per-function memory state
@@ -155,7 +173,9 @@ namespace refractir {
       }
     }
 
-    runBlocks(f, store, /*outRet=*/nullptr);
+    std::optional<RuntimeValue> ret;
+    runBlocks(f, store, &ret);
+    return ret;
   }
 
   RuntimeValue Interpreter::callFunction(const FunDecl &f, std::vector<RuntimeValue> args) {
@@ -236,7 +256,7 @@ namespace refractir {
         store[l.name.name] = makeUndef(l.type);
     }
 
-    RuntimeValue ret;
+    std::optional<RuntimeValue> ret;
     try {
       runBlocks(f, store, &ret);
     } catch (...) {
@@ -246,7 +266,7 @@ namespace refractir {
     }
     restoreTypes();
     memory_.addrMap() = std::move(savedAddrMap);
-    return ret;
+    return ret.value_or(RuntimeValue{});
   }
 
   // §9.6.1 step 5: refresh caller-side Store entries from heap.
@@ -303,7 +323,7 @@ namespace refractir {
     }
   }
 
-  void Interpreter::runBlocks(const FunDecl &f, Store &store, RuntimeValue *outRet) {
+  void Interpreter::runBlocks(const FunDecl &f, Store &store, std::optional<RuntimeValue> *outRet) {
     DiagBag diags;
     CFG cfg = CFG::build(f, diags);
     if (diags.hasErrors())
@@ -527,25 +547,8 @@ namespace refractir {
                 RuntimeValue res = evalExpr(*t.value, store);
                 if (res.kind == RuntimeValue::Kind::Undef)
                   throw UndefinedBehaviorError("UB: Reading undef in ret");
-                if (outRet) {
+                if (outRet)
                   *outRet = res;
-                  return;
-                }
-                if (res.kind == RuntimeValue::Kind::Int)
-                  out_ << "Result: " << res.intVal << "\n";
-                else if (res.kind == RuntimeValue::Kind::Float) {
-                  // Print floats as IEEE 754 hex (printf %a) so the output is
-                  // bit-exact: round-trips losslessly, distinguishes +0/-0,
-                  // and handles subnormals correctly. This is the format used
-                  // for interp ⇄ compiled-C cross-validation in the xval
-                  // tests; decimal would silently lose bits at the boundary.
-                  char buf[64];
-                  std::snprintf(buf, sizeof(buf), "%a", res.floatVal);
-                  out_ << "Result: " << buf << "\n";
-                } else if (res.kind == RuntimeValue::Kind::Ptr)
-                  out_ << "Result: ptr(0x" << std::hex << res.ptrVal << std::dec << ")\n";
-              } else {
-                out_ << "Result: void\n";
               }
               return;
             } else if constexpr (std::is_same_v<T, UnreachableTerm>) {

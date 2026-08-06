@@ -32,4 +32,21 @@ namespace refractir {
   /// Local variable store: name → current value.
   using Store = std::unordered_map<std::string, RuntimeValue>;
 
+  /**
+   * The canonical text of a runtime value — what the `Result:` line carries.
+   *
+   * Floats render as IEEE 754 hex (`printf %a`), which round-trips losslessly,
+   * distinguishes +0 from -0, and handles subnormals. Cross-validating the
+   * interpreter against compiled C compares these strings, so decimal would
+   * lose bits exactly at that boundary.
+   *
+   * One formatter, so a caller that wants the value as text and a caller that
+   * reads the printed line cannot disagree about what a value looks like.
+   *
+   * Returns an empty string for an aggregate, a vector, or undef: those have
+   * no one-line form, and a caller decides what to do about it rather than
+   * being handed a placeholder it might record as a value.
+   */
+  [[nodiscard]] std::string formatRuntimeValue(const RuntimeValue &v);
+
 } // namespace refractir

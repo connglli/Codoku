@@ -51,7 +51,13 @@ namespace refractir {
     // `paramArgs` supplies one decimal-int / hex-float string
     // per parameter of the entry function. Empty when the entry is
     // parameterless (the common case).
-    void
+    //
+    // Returns what the entry function returned, or nullopt when it returned
+    // nothing. The `Result:` line still goes to the output stream: it is what
+    // the command-line tools print, not how a caller reads the value. An
+    // in-process caller takes the returned RuntimeValue and neither renders
+    // nor re-parses it.
+    std::optional<RuntimeValue>
     run(const std::string &entryFuncName, const SymBindings &symBindings,
         const std::vector<std::string> &paramArgs = {}, bool dumpExec = false);
 
@@ -116,7 +122,7 @@ namespace refractir {
     RuntimeValue evalInit(const InitVal &iv, const TypePtr &t, const Store &store);
     std::string rvToString(const RuntimeValue &rv) const;
 
-    void execFunction(
+    std::optional<RuntimeValue> execFunction(
         const FunDecl &f, const std::vector<RuntimeValue> &args, const SymBindings &symBindings
     );
 
@@ -136,9 +142,13 @@ namespace refractir {
 
     // Run the body of a function whose Store has already been
     // populated. Used by both execFunction (top-level) and callFunction
-    // (nested). When `outRet` is non-null, the ret value is written
-    // there and no "Result:" line is printed.
-    void runBlocks(const FunDecl &f, Store &store, RuntimeValue *outRet);
+    // (nested). A `ret` with a value writes it to `outRet` when that is
+    // non-null; a `ret` without one leaves it alone, so an empty optional
+    // means the function returned nothing.
+    void runBlocks(const FunDecl &f, Store &store, std::optional<RuntimeValue> *outRet);
+
+    // Render the `Result:` line for the value the entry function returned.
+    void printResult(const std::optional<RuntimeValue> &res);
 
     // Sym bindings live on the interpreter (so nested calls
     // share the same SAT model). Captured in run() / execFunction.
