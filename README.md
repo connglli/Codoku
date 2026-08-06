@@ -219,9 +219,9 @@ The annotated source is [examples/minicipher_v022.sir](./examples/minicipher_v02
 ```text
 .
 ├── include/          # Header files
-│   ├── ast/          # AST definitions
-│   ├── frontend/     # Lexer, parser, type checker
-│   ├── analysis/     # CFG, dataflow, dominators/loops/structurizer, pass manager
+│   ├── ast/          # AST definitions, cloning, construction
+│   ├── frontend/     # Lexer, parser, type checker, parse-and-check pipeline
+│   ├── analysis/     # CFG, dataflow, intervals, dominators/loops/structurizer, pass manager
 │   ├── backend/      # C, WASM, and Python backends
 │   ├── solver/       # SMT integration
 │   └── reify/        # Reify generators (rysmith, rylink, rytwin)
