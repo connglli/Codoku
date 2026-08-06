@@ -5,6 +5,16 @@
 
 namespace refractir {
 
+  bool sameStructDecl(const StructDecl &a, const StructDecl &b) {
+    if (a.fields.size() != b.fields.size())
+      return false;
+    for (std::size_t i = 0; i < a.fields.size(); ++i)
+      if (a.fields[i].name != b.fields[i].name ||
+          !TypeUtils::areTypesEqual(a.fields[i].type, b.fields[i].type))
+        return false;
+    return true;
+  }
+
   std::string intrinsicSignature(const IntrinsicDecl &d) {
     // One token per parameter, naming the type precisely enough that two
     // overloads never collide: the width for an integer, the precision for a

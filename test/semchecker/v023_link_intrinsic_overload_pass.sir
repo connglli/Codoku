@@ -1,6 +1,7 @@
 // EXPECT: PASS
 // SPEC v0.2.3 §11.1 + §12.6
 // INTERP_ARGS: -I test/tmp/bm_lib_intr_overload
+// COMPILER_ARGS: -I test/tmp/bm_lib_intr_overload
 // Intention: the primary and an -I library each declare @popcount at a
 // different width. Both declarations must survive the link, or the library
 // body stops typechecking against a program that was valid on its own.

@@ -108,27 +108,6 @@ pickPoolIndices(std::mt19937 &rng, std::size_t k, std::size_t poolSize) {
   return all;
 }
 
-// Same-name structs in two merged programs must be structurally
-// identical — otherwise a callee that returns a `@struct_X` would
-// access fields that mean something different in the caller. With the
-// `--id` flag gone, generation IDs are seed-derived 24-bit hex; two
-// runs with different seeds in a 16M-wide space *can* collide, and
-// rysmith's funcIdx-based suffix only protects siblings within the
-// same run. We compare by field name + SIR-surface type string so a
-// collision is detected up front instead of silently keeping the
-// first decl and miscompiling the second program.
-[[nodiscard]] static bool structsEqual(const StructDecl &a, const StructDecl &b) {
-  if (a.fields.size() != b.fields.size())
-    return false;
-  for (std::size_t i = 0; i < a.fields.size(); ++i) {
-    if (a.fields[i].name != b.fields[i].name)
-      return false;
-    if (SIRPrinter::typeToString(a.fields[i].type) != SIRPrinter::typeToString(b.fields[i].type))
-      return false;
-  }
-  return true;
-}
-
 // Merge a per-fn Program into the bundle. Returns a pointer to the
 // just-moved FunDecl, or nullptr on failure. Struct decls are
 // deduplicated by name and *also* validated structurally — a same-name
@@ -157,7 +136,7 @@ pickPoolIndices(std::mt19937 &rng, std::size_t k, std::size_t poolSize) {
     if (it == haveStructs.end()) {
       haveStructs.emplace(s.name.name, bundle.structs.size());
       bundle.structs.push_back(std::move(s));
-    } else if (!structsEqual(bundle.structs[it->second], s)) {
+    } else if (!sameStructDecl(bundle.structs[it->second], s)) {
       std::cerr << "rylink: struct " << s.name.name
                 << " conflicts across merged programs — bailing out of this bundle\n";
       return nullptr;

@@ -253,16 +253,31 @@ namespace refractir {
     }
 
     // Pull in structs from libs that aren't already in main.
-    std::unordered_set<std::string> mainStructNames;
+    //
+    // A same-name struct that declares something else is a conflict, not a
+    // duplicate. Layout is packed and sequential, so keeping whichever was
+    // seen first leaves the other file's code reading fields at the wrong
+    // offsets -- and when the two agree on field types but not their order,
+    // that still typechecks and silently computes the wrong answer.
+    std::unordered_map<std::string, const StructDecl *> mainStructs;
     for (const auto &s: main.structs)
-      mainStructNames.insert(s.name.name);
+      mainStructs.emplace(s.name.name, &s);
     for (auto &lib: libs) {
       for (auto it = lib.structs.begin(); it != lib.structs.end();) {
-        if (!mainStructNames.count(it->name.name)) {
+        auto seen = mainStructs.find(it->name.name);
+        if (seen == mainStructs.end()) {
           main.structs.push_back(std::move(*it));
-          mainStructNames.insert(main.structs.back().name.name);
+          // main.structs may reallocate, so re-point every entry.
+          mainStructs.clear();
+          for (const auto &s: main.structs)
+            mainStructs.emplace(s.name.name, &s);
           it = lib.structs.erase(it);
         } else {
+          if (!sameStructDecl(*seen->second, *it))
+            throw std::runtime_error(
+                "Conflicting declarations for struct `" + it->name.name +
+                "`: the same name declares different fields in two linked files"
+            );
           ++it;
         }
       }

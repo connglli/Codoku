@@ -1,0 +1,13 @@
+// SKIP: ALL — library / fixture file; not a standalone test
+// Declares @S with fields in the order a, b and reads the second one. A
+// primary declaring the same names in the opposite order describes a
+// different object, and this body would read the wrong field.
+struct @S { a: i32; b: i32; }
+
+fun @bm_second_field(%unused: i32) : i32 {
+  let mut %s: @S = {10, 20};
+  let mut %r: i32 = 0;
+^entry:
+  %r = %s.b;
+  ret %r;
+}

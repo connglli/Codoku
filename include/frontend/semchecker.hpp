@@ -26,6 +26,17 @@ namespace refractir {
   [[nodiscard]] std::string intrinsicSignature(const IntrinsicDecl &d);
 
   /**
+   * Whether two struct declarations declare the same type: the same fields,
+   * in the same order, with the same types.
+   *
+   * Order counts. Layout is packed and sequential (spec §4), so two
+   * declarations that agree on names and types but not on order describe
+   * different objects, and code compiled against one reads the other's fields
+   * at the wrong offsets while still typechecking.
+   */
+  [[nodiscard]] bool sameStructDecl(const StructDecl &a, const StructDecl &b);
+
+  /**
    * Performs semantic analysis on the RefractIR program.
    * Checks for duplicate declarations, invalid sigils, and other
    * well-formedness constraints not captured by the grammar or type checker.

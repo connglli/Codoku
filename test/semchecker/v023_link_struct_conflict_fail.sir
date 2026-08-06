@@ -1,0 +1,18 @@
+// EXPECT: FAIL
+// SPEC v0.2.3 §4 + §11.1
+// INTERP_ARGS: -I test/tmp/bm_lib_struct_order
+// COMPILER_ARGS: -I test/tmp/bm_lib_struct_order
+// Intention: the primary and an -I library declare @S with the same field
+// names and types in opposite order. Layout is packed and sequential, so the
+// two describe different objects; linking must reject rather than keep one
+// and let the other file read fields at the wrong offsets, which typechecks.
+struct @S { b: i32; a: i32; }
+
+decl @bm_second_field(%unused: i32) : i32;
+
+fun @main() : i32 {
+  let mut %r: i32 = 0;
+^entry:
+  %r = call @bm_second_field(0);
+  ret %r;
+}
