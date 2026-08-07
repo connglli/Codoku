@@ -118,33 +118,135 @@ namespace refractir::reify {
       }
     };
 
-    // `k ^ %v`, with `k` the target XOR what the variable is pinned to. XOR is
-    // its own inverse, so the pin cancels and the target is what is left.
+    // Variables of `bits` width live at every visit. Their values may differ
+    // between visits — that is what a construction reading several states has
+    // to cope with, and what makes them worth reading.
+    [[nodiscard]] std::vector<std::string> liveVars(const DataflowSite &site, std::uint32_t bits) {
+      if (site.visits.empty())
+        return {};
+      std::vector<std::string> live;
+      for (const Pin &pin: site.visits.front()) {
+        if (pin.bits != bits)
+          continue;
+        const bool everywhere = std::all_of(
+            site.visits.begin() + 1, site.visits.end(), [&](const std::vector<Pin> &visit) {
+              return std::any_of(visit.begin(), visit.end(), [&](const Pin &other) {
+                return other.name == pin.name;
+              });
+            }
+        );
+        if (everywhere)
+          live.push_back(pin.name);
+      }
+      return live;
+    }
+
+    [[nodiscard]] std::int64_t valueAt(const std::vector<Pin> &visit, const std::string &name) {
+      const auto it = std::find_if(visit.begin(), visit.end(), [&](const Pin &pin) {
+        return pin.name == name;
+      });
+      return it == visit.end() ? 0 : it->value;
+    }
+
+    // Draw a non-empty subset, capped so an argument stays readable.
+    [[nodiscard]] std::vector<std::string>
+    pickSubset(std::vector<std::string> vars, std::size_t cap, std::mt19937 &rng) {
+      std::shuffle(vars.begin(), vars.end(), rng);
+      std::uniform_int_distribution<std::size_t> howMany(1, std::min(cap, vars.size()));
+      vars.resize(howMany(rng));
+      return vars;
+    }
+
+    // `target ^ (⋀ⱼ (g ^ gⱼ))`, with `g` the XOR of a chosen set of the
+    // caller's variables and `gⱼ` the values it takes at each recorded visit.
     //
-    // It is total: `^` cannot trap, and its constant fits the argument's width
-    // whatever the pin holds, so no pin is ever too far from the target to
-    // state. That edge over a bias is real but narrow, since a bias reaches
-    // nearly every target as well. What this is in the catalog for is the
-    // surface — bit patterns are a different body of optimizer rules from
-    // sums, and a site draws one construction or the other.
+    // One factor is zero at every visit, so the chain collapses and the target
+    // is what remains — at each visit, whatever the variables hold there. That
+    // is what lets the set include variables that move between visits: each
+    // distinct value they drive `g` to simply contributes another factor.
+    //
+    // Every operation is `^` or `&`, neither of which can trap at any width, so
+    // the construction owes no magnitude argument at all.
     class BitwisePolicy : public DataflowPolicy {
     public:
-      const char *name() const override { return "xor-pin"; }
+      const char *name() const override { return "xor-mask"; }
 
       std::optional<DataflowResult> build(
-          const DataflowSite &site, std::uint32_t bits, std::int64_t target, NameAllocator &,
+          const DataflowSite &site, std::uint32_t bits, std::int64_t target, NameAllocator &names,
           std::mt19937 &rng
       ) override {
-        std::vector<Pin> pins = stablePins(site, bits);
-        if (pins.empty())
+        const std::vector<std::string> live = liveVars(site, bits);
+        if (live.empty())
           return std::nullopt;
-        std::uniform_int_distribution<std::size_t> pick(0, pins.size() - 1);
-        const Pin &pin = pins[pick(rng)];
+        const std::vector<std::string> probe = pickSubset(live, kMaxProbeVars, rng);
+
+        std::vector<std::int64_t> seen;
+        for (const auto &visit: site.visits) {
+          std::int64_t g = 0;
+          for (const auto &name: probe)
+            g ^= valueAt(visit, name);
+          seen.push_back(signExtend(g, bits));
+        }
+        std::sort(seen.begin(), seen.end());
+        seen.erase(std::unique(seen.begin(), seen.end()), seen.end());
+        if (seen.empty() || !maskVaries(seen, bits, rng))
+          return std::nullopt;
+
         DataflowResult result;
-        result.value = buildExpr(buildOpAtom(
-            Coef{IntLit{signExtend(target ^ pin.value, bits), {}}}, AtomOpKind::Xor, pin.name
-        ));
+        const TypePtr type = buildIntType(static_cast<int>(bits));
+        const std::string g = foldProbe(probe, type, names, result);
+        const std::string mask = names.fresh(type, result.lets);
+        emit(result, mask, buildOpAtom(Coef{IntLit{seen.front(), {}}}, AtomOpKind::Xor, g));
+        if (seen.size() > 1) {
+          const std::string factor = names.fresh(type, result.lets);
+          for (std::size_t i = 1; i < seen.size(); ++i) {
+            emit(result, factor, buildOpAtom(Coef{IntLit{seen[i], {}}}, AtomOpKind::Xor, g));
+            emit(result, mask, buildBinAtom(mask, AtomOpKind::And, factor));
+          }
+        }
+        result.value = buildExpr(buildOpAtom(Coef{IntLit{target, {}}}, AtomOpKind::Xor, mask));
         return result;
+      }
+
+    private:
+      // More than a few variables buries what the argument does without making
+      // it harder to see through.
+      static constexpr std::size_t kMaxProbeVars = 3;
+
+      // The name holding `g`. A single variable is already the fold, so only a
+      // longer probe needs a cell of its own.
+      [[nodiscard]] static std::string foldProbe(
+          const std::vector<std::string> &probe, const TypePtr &type, NameAllocator &names,
+          DataflowResult &out
+      ) {
+        if (probe.size() == 1)
+          return probe.front();
+        const std::string g = names.fresh(type, out.lets);
+        emit(out, g, buildLocalAtom(probe.front()));
+        for (std::size_t i = 1; i < probe.size(); ++i)
+          emit(out, g, buildBinAtom(g, AtomOpKind::Xor, probe[i]));
+        return g;
+      }
+
+      // Is the chain non-zero somewhere? A mask that vanishes everywhere leaves
+      // the target spelled out, which is the one thing this is not for. Only a
+      // sample can answer, since the domain is the whole width.
+      [[nodiscard]] static bool
+      maskVaries(const std::vector<std::int64_t> &seen, std::uint32_t bits, std::mt19937 &rng) {
+        std::uniform_int_distribution<std::uint64_t> anyValue;
+        for (int attempt = 0; attempt < 8; ++attempt) {
+          const std::int64_t g = signExtend(static_cast<std::int64_t>(anyValue(rng)), bits);
+          std::int64_t mask = ~std::int64_t{0};
+          for (std::int64_t value: seen)
+            mask &= g ^ value;
+          if (signExtend(mask, bits) != 0)
+            return true;
+        }
+        return false;
+      }
+
+      static void emit(DataflowResult &out, const std::string &dst, Atom rhs) {
+        out.stmts.push_back(buildAssign(buildLValue(dst), buildExpr(std::move(rhs))));
       }
     };
 
