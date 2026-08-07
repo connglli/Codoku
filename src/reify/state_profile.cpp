@@ -164,7 +164,8 @@ namespace refractir::reify {
 
   std::optional<LValue> resolvePointee(
       const StateValue &leaf, const TypePtr &ptrType, const FunDecl &fn,
-      const TypeUtils::StructTable &structs, const TypeLayout &layout, const char **why
+      const TypeUtils::StructTable &structs, const TypeLayout &layout, bool mustBeAddressable,
+      const char **why
   ) {
     (void) structs;
     const auto no = [&](const char *reason) -> std::optional<LValue> {
@@ -179,12 +180,11 @@ namespace refractir::reify {
     if (leaf.ptrRoot.empty())
       return no("an opaque pointer"); // no provenance, no way to name the cell
 
-    // `addr` needs a `let mut` root, so a parameter or an immutable local is
-    // not something a reconstructed pointer may be taken of.
     const TypePtr *rootType = nullptr;
     for (const auto &l: fn.lets)
       if (l.name.name == leaf.ptrRoot) {
-        if (!l.isMutable)
+        // `addr` needs a `let mut` root; reading through the pointer does not.
+        if (mustBeAddressable && !l.isMutable)
           return no("a pointer into an immutable root");
         rootType = &l.type;
       }

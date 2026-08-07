@@ -133,11 +133,16 @@ namespace refractir::reify {
   //
   // Returns nullopt, and sets `why` when given, for a pointer that names
   // nothing reconstructible: the null pointer, provenance the interpreter
-  // could not resolve, a root the function does not declare, a root no `addr`
-  // may be taken of, or an offset no access path reaches (one past the end).
+  // could not resolve, a root the function does not declare, or an offset no
+  // access path reaches (one past the end).
+  //
+  // `mustBeAddressable` additionally refuses a root that is not a `let mut`,
+  // which is what a caller rebuilding the pointer with `addr` needs and a
+  // caller only reading through it does not.
   [[nodiscard]] std::optional<LValue> resolvePointee(
       const StateValue &leaf, const TypePtr &ptrType, const FunDecl &fn,
-      const TypeUtils::StructTable &structs, const TypeLayout &layout, const char **why = nullptr
+      const TypeUtils::StructTable &structs, const TypeLayout &layout, bool mustBeAddressable,
+      const char **why = nullptr
   );
 
   // Bit-exact structural equality of two state trees. Floats compare by

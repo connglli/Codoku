@@ -372,7 +372,7 @@ namespace refractir::reify {
       leaf.ptrType = t;
       if (leaf.val.ptrNull)
         return true;
-      auto target = resolvePointee(leaf.val, t, fn, structs, layout, why);
+      auto target = resolvePointee(leaf.val, t, fn, structs, layout, true, why);
       if (!target)
         return false;
       leaf.ptrTarget = std::move(*target);
