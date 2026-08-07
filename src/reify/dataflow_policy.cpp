@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 
 #include "analysis/type_utils.hpp"
@@ -288,17 +289,112 @@ namespace refractir::reify {
       return r < 0 ? r + p : r;
     }
 
-    // A line through the pin, over the field: `P(r) = (a1*r + a0) mod p`, with
-    // `r` the probe reduced into the field. `a1` is drawn non-zero, which is
-    // what makes `P` non-constant — the off-point a general interpolation adds
-    // to square its system is, for a line, just the slope being chosen rather
-    // than solved. `a0` then follows in closed form.
+    // --- linear algebra over F_p ---------------------------------------------
+
+    // `a^-1` mod `p`, by extended Euclid. `a` must not be a multiple of `p`,
+    // which is what the pivot search establishes before calling.
+    [[nodiscard]] std::int64_t modInverse(std::int64_t a, std::int64_t p) {
+      std::int64_t coef = 0, nextCoef = 1, rem = p, nextRem = residue(a, p);
+      while (nextRem != 0) {
+        const std::int64_t q = rem / nextRem;
+        std::int64_t tmp = coef - q * nextCoef;
+        coef = nextCoef;
+        nextCoef = tmp;
+        tmp = rem - q * nextRem;
+        rem = nextRem;
+        nextRem = tmp;
+      }
+      return residue(coef, p);
+    }
+
+    // Solve `matrix * a = rhs` over `F_p` by Gauss-Jordan elimination, or
+    // nullopt when the matrix is singular — which a caller answers by drawing
+    // different monomials rather than by giving up. Every product formed here
+    // is between two residues, so `p*p <= hi` keeps it inside `int64_t`.
+    [[nodiscard]] std::optional<std::vector<std::int64_t>> solveModP(
+        std::vector<std::vector<std::int64_t>> matrix, std::vector<std::int64_t> rhs, std::int64_t p
+    ) {
+      const std::size_t n = rhs.size();
+      for (std::size_t col = 0; col < n; ++col) {
+        std::size_t pivot = n;
+        for (std::size_t row = col; row < n; ++row)
+          if (residue(matrix[row][col], p) != 0) {
+            pivot = row;
+            break;
+          }
+        if (pivot == n)
+          return std::nullopt;
+        std::swap(matrix[col], matrix[pivot]);
+        std::swap(rhs[col], rhs[pivot]);
+        const std::int64_t inv = modInverse(matrix[col][col], p);
+        for (std::size_t k = col; k < n; ++k)
+          matrix[col][k] = residue(matrix[col][k] * inv, p);
+        rhs[col] = residue(rhs[col] * inv, p);
+        for (std::size_t row = 0; row < n; ++row) {
+          if (row == col)
+            continue;
+          const std::int64_t factor = residue(matrix[row][col], p);
+          if (factor == 0)
+            continue;
+          for (std::size_t k = col; k < n; ++k)
+            matrix[row][k] = residue(matrix[row][k] - factor * matrix[col][k], p);
+          rhs[row] = residue(rhs[row] - factor * rhs[col], p);
+        }
+      }
+      return rhs;
+    }
+
+    // Exponent vectors over `nvars` variables in increasing total degree, until
+    // there are at least `need` of them. A system with `need` constraints wants
+    // that many monomials, and the smallest degrees are the ones whose
+    // evaluation costs the fewest statements.
+    [[nodiscard]] std::vector<std::vector<int>> monomialBasis(std::size_t nvars, std::size_t need) {
+      std::vector<std::vector<int>> all;
+      std::vector<int> expo(nvars, 0);
+      const std::function<void(std::size_t, int)> compose = [&](std::size_t idx, int left) {
+        if (idx + 1 == nvars) {
+          expo[idx] = left;
+          all.push_back(expo);
+          return;
+        }
+        for (int e = left; e >= 0; --e) {
+          expo[idx] = e;
+          compose(idx + 1, left - e);
+        }
+      };
+      for (int degree = 0; all.size() < need && degree <= rylink::hp::kMaxMonomialDegree; ++degree)
+        compose(0, degree);
+      return all;
+    }
+
+    // One monomial at one point, `Π point[k]^expo[k] mod p`.
+    [[nodiscard]] std::int64_t evalMonomial(
+        const std::vector<std::int64_t> &point, const std::vector<int> &expo, std::int64_t p
+    ) {
+      std::int64_t value = 1;
+      for (std::size_t k = 0; k < expo.size(); ++k)
+        for (int e = 0; e < expo[k]; ++e)
+          value = residue(value * point[k], p);
+      return value;
+    }
+
+    // A polynomial over `F_p` in a drawn set of the caller's variables, pinned
+    // to the target at every state the profiled run passes the splice point in,
+    // and offset back onto the target's own value.
     //
-    // The statements mirror the arithmetic the coefficients were solved
-    // against, step for step, including that `%` truncates toward zero.
+    // Each visit contributes one interpolation constraint, so a block the run
+    // enters several times is met by one polynomial that holds at all of them
+    // — this is what lets the probe set include variables that move. One
+    // further point, off every recorded state and carrying a different value,
+    // squares the system and forces the polynomial to be non-constant; without
+    // it the constant `target` is a solution and the argument folds.
+    //
+    // The field bounds the arithmetic: every product is between two residues
+    // and every sum under `2p`, with a reduction after each, so no step can
+    // leave the argument's width whatever the caller's variables hold.
     class ArithmeticPolicy : public DataflowPolicy {
     public:
-      const char *name() const override { return "prime-line"; }
+      const char *name() const override { return "prime-interp"; }
 
       std::optional<DataflowResult> build(
           const DataflowSite &site, std::uint32_t bits, std::int64_t target, NameAllocator &names,
@@ -307,35 +403,129 @@ namespace refractir::reify {
         const std::int64_t p = fieldFor(bits);
         if (p == 0)
           return std::nullopt;
-        std::vector<Pin> pins = stablePins(site, bits);
-        if (pins.empty())
+        const std::vector<std::string> live = liveVars(site, bits);
+        if (live.empty())
           return std::nullopt;
-        std::uniform_int_distribution<std::size_t> pickPin(0, pins.size() - 1);
-        const Pin &pin = pins[pickPin(rng)];
+        const std::vector<std::string> probe = pickSubset(live, rylink::hp::kMaxProbeVars, rng);
 
-        const std::int64_t r = residue(pin.value, p);
+        std::vector<std::vector<std::int64_t>> points = constraintPoints(site, probe, p);
+        if (points.empty() || points.size() >= rylink::hp::kMaxConstraintPoints)
+          return std::nullopt;
+
         const std::int64_t cm = residue(target, p);
-        std::uniform_int_distribution<std::int64_t> pickSlope(1, p - 1);
-        const std::int64_t a1 = pickSlope(rng);
-        const std::int64_t a0 = residue(cm - a1 * r, p);
+        std::vector<std::int64_t> rhs(points.size(), cm);
+        if (!addOffPoint(points, rhs, cm, p, rng))
+          return std::nullopt;
 
+        auto basis = monomialBasis(probe.size(), points.size());
+        if (basis.size() < points.size())
+          return std::nullopt;
+        std::vector<std::vector<int>> chosen;
+        std::vector<std::int64_t> coefficients;
+        for (int attempt = 0; attempt < rylink::hp::kSolveAttempts; ++attempt) {
+          std::shuffle(basis.begin(), basis.end(), rng);
+          chosen.assign(basis.begin(), basis.begin() + static_cast<long>(points.size()));
+          std::vector<std::vector<std::int64_t>> matrix;
+          matrix.reserve(points.size());
+          for (const auto &point: points) {
+            std::vector<std::int64_t> row;
+            row.reserve(chosen.size());
+            for (const auto &expo: chosen)
+              row.push_back(evalMonomial(point, expo, p));
+            matrix.push_back(std::move(row));
+          }
+          if (auto solved = solveModP(std::move(matrix), rhs, p)) {
+            coefficients = std::move(*solved);
+            break;
+          }
+        }
+        if (coefficients.empty())
+          return std::nullopt;
+
+        return emitPolynomial(probe, chosen, coefficients, p, cm, target, bits, names);
+      }
+
+    private:
+      // The distinct residue vectors the probe takes across the visits. Two
+      // visits agreeing on the probe are one constraint, not two.
+      [[nodiscard]] static std::vector<std::vector<std::int64_t>> constraintPoints(
+          const DataflowSite &site, const std::vector<std::string> &probe, std::int64_t p
+      ) {
+        std::vector<std::vector<std::int64_t>> points;
+        for (const auto &visit: site.visits) {
+          std::vector<std::int64_t> point;
+          point.reserve(probe.size());
+          for (const auto &name: probe)
+            point.push_back(residue(valueAt(visit, name), p));
+          if (std::find(points.begin(), points.end(), point) == points.end())
+            points.push_back(std::move(point));
+        }
+        return points;
+      }
+
+      // Append a point no visit occupies, carrying a value the target does not.
+      // It is what makes the polynomial non-constant, so failing to find one is
+      // a reason to decline rather than to emit something that folds.
+      [[nodiscard]] static bool addOffPoint(
+          std::vector<std::vector<std::int64_t>> &points, std::vector<std::int64_t> &rhs,
+          std::int64_t cm, std::int64_t p, std::mt19937 &rng
+      ) {
+        std::uniform_int_distribution<std::int64_t> anyResidue(0, p - 1);
+        for (int attempt = 0; attempt < rylink::hp::kSolveAttempts; ++attempt) {
+          std::vector<std::int64_t> point;
+          point.reserve(points.front().size());
+          for (std::size_t k = 0; k < points.front().size(); ++k)
+            point.push_back(anyResidue(rng));
+          if (std::find(points.begin(), points.end(), point) != points.end())
+            continue;
+          std::int64_t value = anyResidue(rng);
+          if (value == cm)
+            value = residue(value + 1, p);
+          points.push_back(std::move(point));
+          rhs.push_back(value);
+          return true;
+        }
+        return false;
+      }
+
+      // Evaluate the polynomial, then carry its residue back onto the target.
+      [[nodiscard]] static DataflowResult emitPolynomial(
+          const std::vector<std::string> &probe, const std::vector<std::vector<int>> &chosen,
+          const std::vector<std::int64_t> &coefficients, std::int64_t p, std::int64_t cm,
+          std::int64_t target, std::uint32_t bits, NameAllocator &names
+      ) {
         DataflowResult result;
         const TypePtr type = buildIntType(static_cast<int>(bits));
         const std::string mod = names.literal(p, type, result.lets);
-        const std::string acc = names.fresh(type, result.lets);
 
-        // r = ((%v % p) + p) % p, so the residue is non-negative before it is
-        // scaled — a truncated `%` on a negative variable would otherwise put
-        // the line's input outside the field.
-        emit(result, acc, buildBinAtom(pin.name, AtomOpKind::Mod, mod));
-        emitTail(result, acc, AddOp::Plus, p);
-        emit(result, acc, buildBinAtom(acc, AtomOpKind::Mod, mod));
-        // P(r), reduced after the product so the sum that follows stays under
-        // 2p rather than p*p + p.
-        emit(result, acc, buildOpAtom(Coef{IntLit{a1, {}}}, AtomOpKind::Mul, acc));
-        emit(result, acc, buildBinAtom(acc, AtomOpKind::Mod, mod));
-        emitTail(result, acc, AddOp::Plus, a0);
-        emit(result, acc, buildBinAtom(acc, AtomOpKind::Mod, mod));
+        // Each variable enters the field first: a truncated `%` on a negative
+        // value lands outside `[0, p)`, which every product below assumes.
+        std::vector<std::string> residues;
+        for (const auto &name: probe) {
+          const std::string cell = names.fresh(type, result.lets);
+          emit(result, cell, buildBinAtom(name, AtomOpKind::Mod, mod));
+          emitTail(result, cell, AddOp::Plus, p);
+          emit(result, cell, buildBinAtom(cell, AtomOpKind::Mod, mod));
+          residues.push_back(cell);
+        }
+
+        const std::string acc = names.fresh(type, result.lets);
+        const std::string term = names.fresh(type, result.lets);
+        emit(result, acc, buildIntAtom(0));
+        for (std::size_t j = 0; j < chosen.size(); ++j) {
+          if (coefficients[j] == 0)
+            continue;
+          emit(result, term, buildIntAtom(coefficients[j]));
+          for (std::size_t k = 0; k < probe.size(); ++k)
+            for (int e = 0; e < chosen[j][k]; ++e) {
+              emit(result, term, buildBinAtom(term, AtomOpKind::Mul, residues[k]));
+              emit(result, term, buildBinAtom(term, AtomOpKind::Mod, mod));
+            }
+          Expr sum = buildExpr(buildLocalAtom(acc));
+          appendTail(sum, AddOp::Plus, buildLocalAtom(term));
+          result.stmts.push_back(buildAssign(buildLValue(acc), std::move(sum)));
+          emit(result, acc, buildBinAtom(acc, AtomOpKind::Mod, mod));
+        }
 
         // `- cm + target` rather than one folded constant: `target - cm` can
         // fall outside the width when the target sits near its end, while the
@@ -348,7 +538,6 @@ namespace refractir::reify {
         return result;
       }
 
-    private:
       static void emit(DataflowResult &out, const std::string &dst, Atom rhs) {
         out.stmts.push_back(buildAssign(buildLValue(dst), buildExpr(std::move(rhs))));
       }

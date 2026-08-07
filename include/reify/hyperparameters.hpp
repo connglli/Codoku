@@ -498,23 +498,39 @@ namespace refractir::reify::rylink::hp {
   // Dataflow policies
   //
   // How an argument is stated in terms of what the caller holds where the call
-  // lands (reify/dataflow_policy.hpp). These bound the size of a construction,
-  // never its correctness: at any setting the argument still evaluates to the
-  // callee's solved input.
+  // lands (reify/dataflow_policy.hpp). The knobs below bound the size of the
+  // constructions, not their correctness: every one of them, at any setting,
+  // yields an argument that evaluates to the callee's solved input.
   // ===========================================================================
 
-  // How many of the caller's variables one argument may read.
+  // How many of the caller's variables one argument may read. More of them
+  // lowers the polynomial degree a given number of constraints needs, so a
+  // wider probe is not a longer expression; what it costs is legibility.
   inline constexpr std::size_t kMaxProbeVars = 3;
 
-  // Samples drawn to convince the xor policy its mask is non-zero somewhere. A
-  // mask that vanishes everywhere leaves the target spelled out, and only a
+  // Samples drawn to convince the xor policy its mask is non-zero somewhere.
+  // A mask that vanishes everywhere leaves the target spelled out, and only a
   // sample can tell, since the domain is the whole width.
   inline constexpr int kMaskSamples = 8;
 
-  // The smallest field worth working over. It shrinks with the argument's
-  // width — 46337 at i32, 181 at i16, 11 at i8 — and below this there are too
-  // few residues to say anything with.
+  // The smallest prime field worth interpolating over. The field shrinks with
+  // the argument's width — 46337 at i32, 181 at i16, 11 at i8 — and below this
+  // there are too few residues for the polynomial to say anything.
   inline constexpr std::int64_t kMinModulus = 11;
+
+  // The most constraint points an interpolation will carry. Each one is
+  // another monomial to evaluate in the emitted code, so a site whose block is
+  // entered more often than this is left to a cheaper construction.
+  inline constexpr std::size_t kMaxConstraintPoints = 5;
+
+  // Redraws allowed when a monomial set gives a singular system, or when an
+  // off-point lands on a state the run already visits.
+  inline constexpr int kSolveAttempts = 8;
+
+  // A ceiling on the total degree the monomial basis is grown to. It is a
+  // backstop against an unbounded search, not a tuning choice: kMaxConstraintPoints
+  // monomials are reached far below it at every probe width.
+  inline constexpr int kMaxMonomialDegree = 16;
 
   // ===========================================================================
   // Per-program retry budget
