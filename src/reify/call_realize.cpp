@@ -412,8 +412,9 @@ namespace refractir::reify {
 
       bool apply(
           FunDecl &caller, const FuncDescriptor &callerDesc, const StateProfile *callerProfile,
-          const TypeUtils::StructTable &structs, const CallRewriteSite &site,
-          const FuncDescriptor &callee, std::size_t realizationIdx, std::mt19937 &rng
+          const TypeUtils::StructTable &structs, const TypeLayout &layout,
+          const CallRewriteSite &site, const FuncDescriptor &callee, std::size_t realizationIdx,
+          std::mt19937 &rng
       ) override {
         if (site.letIdx < 0 || (size_t) site.letIdx >= caller.lets.size())
           return false;
@@ -424,7 +425,8 @@ namespace refractir::reify {
         if (!retVal)
           return false;
 
-        const auto target = chooseTarget(caller, callerDesc, callerProfile, structs, site, rng);
+        const auto target =
+            chooseTarget(caller, callerDesc, callerProfile, structs, layout, site, rng);
         if (!target)
           return false;
         const std::size_t targetBlock = target->blockIdx;
@@ -577,7 +579,7 @@ namespace refractir::reify {
       [[nodiscard]] std::optional<Target> chooseTarget(
           const FunDecl &caller, const FuncDescriptor &callerDesc,
           const StateProfile *callerProfile, const TypeUtils::StructTable &structs,
-          const CallRewriteSite &site, std::mt19937 &rng
+          const TypeLayout &layout, const CallRewriteSite &site, std::mt19937 &rng
       ) const {
         const std::string &varName = caller.lets[site.letIdx].name.name;
         const std::unordered_set<std::string> onPath(
@@ -603,8 +605,9 @@ namespace refractir::reify {
         // steering them toward any one kind of block.
         const auto leaves = declaredLeafTypes(caller, structs);
         for (std::size_t blockIdx: executed) {
-          DataflowSite pins =
-              pinsAtBlock(*callerProfile, caller.blocks[blockIdx].label.name, leaves);
+          DataflowSite pins = pinsAtBlock(
+              *callerProfile, caller.blocks[blockIdx].label.name, leaves, caller, structs, layout
+          );
           if (auto held = stableValue(pins, varName))
             return Target{blockIdx, *held, std::move(pins)};
         }
@@ -1036,8 +1039,9 @@ namespace refractir::reify {
 
       bool apply(
           FunDecl &caller, const FuncDescriptor &, const StateProfile *callerProfile,
-          const TypeUtils::StructTable &structs, const CallRewriteSite &site,
-          const FuncDescriptor &callee, std::size_t realizationIdx, std::mt19937 &rng
+          const TypeUtils::StructTable &structs, const TypeLayout &layout,
+          const CallRewriteSite &site, const FuncDescriptor &callee, std::size_t realizationIdx,
+          std::mt19937 &rng
       ) override {
         if (!callerProfile)
           return false;
@@ -1053,8 +1057,10 @@ namespace refractir::reify {
             std::string(kDataflowLocalPrefix) + "a" + std::to_string(spliceSeq_++) + "_",
             &caller.lets
         );
-        const DataflowSite pins =
-            pinsAtBlock(*callerProfile, site.blockLabel, declaredLeafTypes(caller, structs));
+        const DataflowSite pins = pinsAtBlock(
+            *callerProfile, site.blockLabel, declaredLeafTypes(caller, structs), caller, structs,
+            layout
+        );
         auto found = pickKnown(caller, *block, site.sirType, steadyIn(caller, *block, pins), rng);
         if (!found)
           return false;
@@ -1265,8 +1271,8 @@ namespace refractir::reify {
 
   RewriteReport CallRealizeTransform::rewriteEdge(
       FunDecl &caller, const FuncDescriptor &callerDesc, const StateProfile *callerProfile,
-      const TypeUtils::StructTable &structs, const FunDecl &calleeFn, const FuncDescriptor &callee,
-      std::size_t fixedRealizationIdx, std::mt19937 &rng
+      const TypeUtils::StructTable &structs, const TypeLayout &layout, const FunDecl &calleeFn,
+      const FuncDescriptor &callee, std::size_t fixedRealizationIdx, std::mt19937 &rng
   ) {
     RewriteReport res;
 
@@ -1331,7 +1337,8 @@ namespace refractir::reify {
         if (uni(rng) >= pAccept)
           continue;
         if (c.rule->apply(
-                caller, callerDesc, callerProfile, structs, c.site, callee, fixedRealizationIdx, rng
+                caller, callerDesc, callerProfile, structs, layout, c.site, callee,
+                fixedRealizationIdx, rng
             )) {
           if (c.site.consumesSite)
             consumed_.insert({&caller, c.site.letIdx});
@@ -1378,6 +1385,7 @@ namespace refractir::reify {
     TypeUtils::StructTable structs;
     for (const auto &sd: prog.structs)
       structs.emplace(sd.name.name, &sd);
+    const TypeLayout layout(prog);
 
     for (const auto &e: plan_.edges) {
       auto callerIt = byName.find(e.caller);
@@ -1392,7 +1400,7 @@ namespace refractir::reify {
       auto callerProfile = ctx.profiles.find(e.caller);
       RewriteReport r = rewriteEdge(
           *callerIt->second, callerDesc->second,
-          callerProfile == ctx.profiles.end() ? nullptr : &callerProfile->second, structs,
+          callerProfile == ctx.profiles.end() ? nullptr : &callerProfile->second, structs, layout,
           *calleeIt->second, calleeDesc->second, e.calleeRealizationIdx, ctx.rng
       );
       rep.sites += static_cast<std::size_t>(r.applied);

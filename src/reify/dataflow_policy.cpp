@@ -41,10 +41,23 @@ namespace refractir::reify {
         const Pin &pin, std::uint32_t bits, const TypePtr &type, NameAllocator &names,
         DataflowResult &out
     ) {
-      if (pin.path.empty() && !pin.viaFloat && pin.bits == bits)
+      if (pin.path.empty() && !pin.viaFloat && !pin.viaLoad && pin.bits == bits)
         return pin.root;
       const LValue source = buildLValue(pin.root, pin.path);
       const std::string cell = names.fresh(type, out.lets);
+      if (pin.viaLoad) {
+        // A cast cannot wrap a load, so the loaded cell is named first and
+        // narrowed after.
+        const TypePtr loaded = buildIntType(static_cast<int>(pin.bits));
+        const std::string held = names.fresh(loaded, out.lets);
+        LoadAtom la;
+        la.rval = source;
+        out.stmts.push_back(buildAssign(buildLValue(held), buildExpr(Atom{std::move(la), {}})));
+        if (pin.bits == bits)
+          return held;
+        out.stmts.push_back(buildAssign(buildLValue(cell), buildExpr(buildCastAtom(held, type))));
+        return cell;
+      }
       if (pin.viaFloat) {
         const std::string wide = names.fresh(buildI64(), out.lets);
         out.stmts.push_back(
@@ -604,9 +617,17 @@ namespace refractir::reify {
     const auto record = [&](const std::string &root, const TypePtr &type) {
       for (const auto &[path, leafType]: TypeUtils::scalarLeaves(type, structs)) {
         if (auto bits = TypeUtils::getIntBitWidth(leafType))
-          leaves.emplace(leafKey(root, path), LeafType{static_cast<std::uint32_t>(*bits), false});
+          leaves.emplace(
+              leafKey(root, path),
+              LeafType{leafType, static_cast<std::uint32_t>(*bits), false, false}
+          );
         else if (auto fbits = TypeUtils::getFloatBitWidth(leafType))
-          leaves.emplace(leafKey(root, path), LeafType{static_cast<std::uint32_t>(*fbits), true});
+          leaves.emplace(
+              leafKey(root, path),
+              LeafType{leafType, static_cast<std::uint32_t>(*fbits), true, false}
+          );
+        else if (TypeUtils::isPtr(leafType))
+          leaves.emplace(leafKey(root, path), LeafType{leafType, 0, false, true});
       }
     };
     for (const auto &param: fn.params)
@@ -618,10 +639,16 @@ namespace refractir::reify {
 
   DataflowSite pinsAtBlock(
       const StateProfile &profile, const std::string &blockLabel,
-      const std::unordered_map<std::string, LeafType> &leaves
+      const std::unordered_map<std::string, LeafType> &leaves, const FunDecl &fn,
+      const TypeUtils::StructTable &structs, const TypeLayout &layout
   ) {
     DataflowSite site;
     for (const auto &visit: leavesAtBlock(profile, blockLabel)) {
+      // What each leaf held at this visit, so a pointer can be answered by the
+      // cell it names rather than by the address it holds.
+      std::unordered_map<std::string, const RecordedLeaf *> byKey;
+      for (const RecordedLeaf &leaf: visit)
+        byKey.emplace(leaf.key, &leaf);
       std::vector<Pin> pins;
       for (const RecordedLeaf &leaf: visit) {
         const auto decl = leaves.find(leaf.key);
@@ -644,7 +671,29 @@ namespace refractir::reify {
           if (!(f > -9.2e18 && f < 9.2e18))
             continue;
           pins.push_back(
-              Pin{leaf.root, leaf.path, leaf.key, static_cast<std::int64_t>(f), 64, true}
+              Pin{leaf.root, leaf.path, leaf.key, static_cast<std::int64_t>(f), 64, true, false}
+          );
+        } else if (leaf.value.kind == StateValue::Kind::Ptr && decl->second.isPtr) {
+          // A pointer is worth a pin for what it points at, which a profile
+          // does not record directly: it records provenance, and the cell that
+          // names is looked up among the leaves recorded beside it. A cell
+          // absent from them is one the run had not initialised, which is
+          // exactly the load that would be UB.
+          auto cell = resolvePointee(leaf.value, decl->second.type, fn, structs, layout, false);
+          if (!cell)
+            continue;
+          const auto pointee = byKey.find(leafKey(cell->base.name, cell->accesses));
+          if (pointee == byKey.end() || pointee->second->value.kind != StateValue::Kind::Int)
+            continue;
+          const auto pointeeType = leaves.find(pointee->second->key);
+          if (pointeeType == leaves.end() || pointeeType->second.isFloat)
+            continue;
+          const SignedRange range = signedRange(pointeeType->second.bits);
+          if (pointee->second->value.intVal < range.lo || pointee->second->value.intVal > range.hi)
+            continue;
+          pins.push_back(
+              Pin{leaf.root, leaf.path, leaf.key, pointee->second->value.intVal,
+                  pointeeType->second.bits, false, true}
           );
         }
       }

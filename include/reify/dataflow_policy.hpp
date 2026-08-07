@@ -31,6 +31,7 @@
 
 #include "analysis/type_utils.hpp"
 #include "ast/ast.hpp"
+#include "interp/type_layout.hpp"
 #include "reify/name_alloc.hpp"
 #include "reify/state_profile.hpp"
 
@@ -55,6 +56,9 @@ namespace refractir::reify {
     std::int64_t value = 0;
     std::uint32_t bits = 0;
     bool viaFloat = false;
+    // The leaf named by `root`/`path` is a pointer, and the value is what it
+    // points at — reached by a load rather than by reading the leaf itself.
+    bool viaLoad = false;
   };
 
   // The caller's state where the argument is built, one pin set per execution
@@ -115,8 +119,10 @@ namespace refractir::reify {
   // declaration's agree by construction rather than by both spelling it the
   // same way.
   struct LeafType {
-    std::uint32_t bits = 0;
+    TypePtr type;
+    std::uint32_t bits = 0; // scalar width; 0 for a pointer
     bool isFloat = false;
+    bool isPtr = false;
   };
 
   [[nodiscard]] std::unordered_map<std::string, LeafType>
@@ -133,7 +139,8 @@ namespace refractir::reify {
   // dropped for the same reason.
   [[nodiscard]] DataflowSite pinsAtBlock(
       const StateProfile &profile, const std::string &blockLabel,
-      const std::unordered_map<std::string, LeafType> &leaves
+      const std::unordered_map<std::string, LeafType> &leaves, const FunDecl &fn,
+      const TypeUtils::StructTable &structs, const TypeLayout &layout
   );
 
   // Ask the policies in a uniformly random order and take the first argument
