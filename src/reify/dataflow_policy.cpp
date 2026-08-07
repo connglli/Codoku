@@ -5,6 +5,7 @@
 #include <functional>
 #include <limits>
 
+#include "analysis/state_set.hpp"
 #include "analysis/type_utils.hpp"
 #include "ast/build.hpp"
 #include "reify/hyperparameters.hpp"
@@ -28,6 +29,35 @@ namespace refractir::reify {
       return {-hi - 1, hi};
     }
 
+    // A plain local of `bits` holding what the leaf holds. A leaf reached
+    // through a path, a leaf of another width, and a float leaf all need a cell
+    // of their own; only a plain local of the right width is already one.
+    //
+    // A float goes through `i64` first. Casting it straight to a narrow type is
+    // UB when the value does not fit, while `i64` always does — the pin would
+    // not exist otherwise — and narrowing between integers truncates rather
+    // than traps.
+    [[nodiscard]] std::string materialize(
+        const Pin &pin, std::uint32_t bits, const TypePtr &type, NameAllocator &names,
+        DataflowResult &out
+    ) {
+      if (pin.path.empty() && !pin.viaFloat && pin.bits == bits)
+        return pin.root;
+      const LValue source = buildLValue(pin.root, pin.path);
+      const std::string cell = names.fresh(type, out.lets);
+      if (pin.viaFloat) {
+        const std::string wide = names.fresh(buildI64(), out.lets);
+        out.stmts.push_back(
+            buildAssign(buildLValue(wide), buildExpr(buildCastAtom(source, buildI64())))
+        );
+        out.stmts.push_back(buildAssign(buildLValue(cell), buildExpr(buildCastAtom(wide, type))));
+        return cell;
+      }
+      Atom rhs = pin.bits == bits ? buildRValAtom(source) : buildCastAtom(source, type);
+      out.stmts.push_back(buildAssign(buildLValue(cell), buildExpr(std::move(rhs))));
+      return cell;
+    }
+
     // Variables of `bits` width that hold one value across every visit. A
     // policy leaning on a variable that moves has nothing to pin to, and a
     // variable missing from a visit is not live there at all.
@@ -41,7 +71,7 @@ namespace refractir::reify {
         const bool everywhere = std::all_of(
             site.visits.begin() + 1, site.visits.end(), [&](const std::vector<Pin> &visit) {
               return std::any_of(visit.begin(), visit.end(), [&](const Pin &other) {
-                return other.name == pin.name && other.value == pin.value;
+                return other.key == pin.key && other.value == pin.value;
               });
             }
         );
@@ -63,9 +93,9 @@ namespace refractir::reify {
       return static_cast<std::int64_t>((low ^ signBit) - signBit);
     }
 
-    // `%v + bias`, or bare `%v` when the variable already holds the target.
-    [[nodiscard]] Expr biasExpr(const Pin &pin, std::int64_t bias) {
-      Expr e = buildExpr(buildLocalAtom(pin.name));
+    // `%cell + bias`, or bare `%cell` when it already holds the target.
+    [[nodiscard]] Expr biasExpr(const std::string &cell, std::int64_t bias) {
+      Expr e = buildExpr(buildLocalAtom(cell));
       if (bias > 0)
         appendTail(e, AddOp::Plus, buildIntAtom(bias));
       else if (bias < 0)
@@ -78,7 +108,7 @@ namespace refractir::reify {
       const char *name() const override { return "literal-or-bias"; }
 
       std::optional<DataflowResult> build(
-          const DataflowSite &site, std::uint32_t bits, std::int64_t target, NameAllocator &,
+          const DataflowSite &site, std::uint32_t bits, std::int64_t target, NameAllocator &names,
           std::mt19937 &rng
       ) override {
         std::vector<Pin> pins = stablePins(site, bits);
@@ -98,7 +128,8 @@ namespace refractir::reify {
           if (bias < -range.hi || bias > range.hi)
             continue;
           DataflowResult result;
-          result.value = biasExpr(pin, bias);
+          const TypePtr type = buildIntType(static_cast<int>(bits));
+          result.value = biasExpr(materialize(pin, bits, type, names, result), bias);
           return result;
         }
         return std::nullopt;
@@ -111,52 +142,33 @@ namespace refractir::reify {
     // reading. Width is carried rather than filtered on: a variable of another
     // width is reached by casting, which for integers truncates rather than
     // traps and so costs nothing but a statement.
-    struct LiveVar {
-      std::string name;
-      std::uint32_t bits = 0;
-    };
-
-    [[nodiscard]] std::vector<LiveVar> liveVars(const DataflowSite &site) {
+    [[nodiscard]] std::vector<Pin> liveVars(const DataflowSite &site) {
       if (site.visits.empty())
         return {};
-      std::vector<LiveVar> live;
+      std::vector<Pin> live;
       for (const Pin &pin: site.visits.front()) {
         const bool everywhere = std::all_of(
             site.visits.begin() + 1, site.visits.end(), [&](const std::vector<Pin> &visit) {
               return std::any_of(visit.begin(), visit.end(), [&](const Pin &other) {
-                return other.name == pin.name;
+                return other.key == pin.key;
               });
             }
         );
         if (everywhere)
-          live.push_back(LiveVar{pin.name, pin.bits});
+          live.push_back(pin);
       }
       return live;
     }
 
-    // A cell holding `v` at `bits`, which is `v` itself when it is already
-    // that wide and a cast into a fresh cell when it is not.
-    [[nodiscard]] std::string atWidth(
-        const LiveVar &v, std::uint32_t bits, const TypePtr &type, NameAllocator &names,
-        DataflowResult &out
-    ) {
-      if (v.bits == bits)
-        return v.name;
-      const std::string cell = names.fresh(type, out.lets);
-      out.stmts.push_back(buildAssign(buildLValue(cell), buildExpr(buildCastAtom(v.name, type))));
-      return cell;
-    }
-
-    [[nodiscard]] std::int64_t valueAt(const std::vector<Pin> &visit, const std::string &name) {
-      const auto it = std::find_if(visit.begin(), visit.end(), [&](const Pin &pin) {
-        return pin.name == name;
-      });
+    [[nodiscard]] std::int64_t valueAt(const std::vector<Pin> &visit, const std::string &key) {
+      const auto it =
+          std::find_if(visit.begin(), visit.end(), [&](const Pin &pin) { return pin.key == key; });
       return it == visit.end() ? 0 : it->value;
     }
 
     // Draw a non-empty subset, capped so an argument stays readable.
-    [[nodiscard]] std::vector<LiveVar>
-    pickSubset(std::vector<LiveVar> vars, std::size_t cap, std::mt19937 &rng) {
+    [[nodiscard]] std::vector<Pin>
+    pickSubset(std::vector<Pin> vars, std::size_t cap, std::mt19937 &rng) {
       std::shuffle(vars.begin(), vars.end(), rng);
       std::uniform_int_distribution<std::size_t> howMany(1, std::min(cap, vars.size()));
       vars.resize(howMany(rng));
@@ -181,16 +193,16 @@ namespace refractir::reify {
           const DataflowSite &site, std::uint32_t bits, std::int64_t target, NameAllocator &names,
           std::mt19937 &rng
       ) override {
-        const std::vector<LiveVar> live = liveVars(site);
+        const std::vector<Pin> live = liveVars(site);
         if (live.empty())
           return std::nullopt;
-        const std::vector<LiveVar> probe = pickSubset(live, rylink::hp::kMaxProbeVars, rng);
+        const std::vector<Pin> probe = pickSubset(live, rylink::hp::kMaxProbeVars, rng);
 
         std::vector<std::int64_t> seen;
         for (const auto &visit: site.visits) {
           std::int64_t g = 0;
           for (const auto &v: probe)
-            g ^= signExtend(valueAt(visit, v.name), bits);
+            g ^= signExtend(valueAt(visit, v.key), bits);
           seen.push_back(signExtend(g, bits));
         }
         std::sort(seen.begin(), seen.end());
@@ -218,13 +230,13 @@ namespace refractir::reify {
       // The name holding `g`. A single variable is already the fold, so only a
       // longer probe needs a cell of its own.
       [[nodiscard]] static std::string foldProbe(
-          const std::vector<LiveVar> &probe, std::uint32_t bits, const TypePtr &type,
+          const std::vector<Pin> &probe, std::uint32_t bits, const TypePtr &type,
           NameAllocator &names, DataflowResult &out
       ) {
         std::vector<std::string> cells;
         cells.reserve(probe.size());
         for (const auto &v: probe)
-          cells.push_back(atWidth(v, bits, type, names, out));
+          cells.push_back(materialize(v, bits, type, names, out));
         if (cells.size() == 1)
           return cells.front();
         const std::string g = names.fresh(type, out.lets);
@@ -412,10 +424,10 @@ namespace refractir::reify {
         const std::int64_t p = fieldFor(bits);
         if (p == 0)
           return std::nullopt;
-        const std::vector<LiveVar> live = liveVars(site);
+        const std::vector<Pin> live = liveVars(site);
         if (live.empty())
           return std::nullopt;
-        const std::vector<LiveVar> probe = pickSubset(live, rylink::hp::kMaxProbeVars, rng);
+        const std::vector<Pin> probe = pickSubset(live, rylink::hp::kMaxProbeVars, rng);
 
         std::vector<std::vector<std::int64_t>> points = constraintPoints(site, probe, bits, p);
         if (points.empty() || points.size() >= rylink::hp::kMaxConstraintPoints)
@@ -458,7 +470,7 @@ namespace refractir::reify {
       // The distinct residue vectors the probe takes across the visits. Two
       // visits agreeing on the probe are one constraint, not two.
       [[nodiscard]] static std::vector<std::vector<std::int64_t>> constraintPoints(
-          const DataflowSite &site, const std::vector<LiveVar> &probe, std::uint32_t bits,
+          const DataflowSite &site, const std::vector<Pin> &probe, std::uint32_t bits,
           std::int64_t p
       ) {
         std::vector<std::vector<std::int64_t>> points;
@@ -466,7 +478,7 @@ namespace refractir::reify {
           std::vector<std::int64_t> point;
           point.reserve(probe.size());
           for (const auto &v: probe)
-            point.push_back(residue(signExtend(valueAt(visit, v.name), bits), p));
+            point.push_back(residue(signExtend(valueAt(visit, v.key), bits), p));
           if (std::find(points.begin(), points.end(), point) == points.end())
             points.push_back(std::move(point));
         }
@@ -500,7 +512,7 @@ namespace refractir::reify {
 
       // Evaluate the polynomial, then carry its residue back onto the target.
       [[nodiscard]] static DataflowResult emitPolynomial(
-          const std::vector<LiveVar> &probe, const std::vector<std::vector<int>> &chosen,
+          const std::vector<Pin> &probe, const std::vector<std::vector<int>> &chosen,
           const std::vector<std::int64_t> &coefficients, std::int64_t p, std::int64_t cm,
           std::int64_t target, std::uint32_t bits, NameAllocator &names
       ) {
@@ -512,7 +524,7 @@ namespace refractir::reify {
         // value lands outside `[0, p)`, which every product below assumes.
         std::vector<std::string> residues;
         for (const auto &v: probe) {
-          const std::string source = atWidth(v, bits, type, names, result);
+          const std::string source = materialize(v, bits, type, names, result);
           const std::string cell = names.fresh(type, result.lets);
           emit(result, cell, buildBinAtom(source, AtomOpKind::Mod, mod));
           emitTail(result, cell, AddOp::Plus, p);
@@ -575,9 +587,8 @@ namespace refractir::reify {
   std::optional<std::int64_t> stableValue(const DataflowSite &site, const std::string &name) {
     std::optional<std::int64_t> held;
     for (const auto &visit: site.visits) {
-      const auto it = std::find_if(visit.begin(), visit.end(), [&](const Pin &pin) {
-        return pin.name == name;
-      });
+      const auto it =
+          std::find_if(visit.begin(), visit.end(), [&](const Pin &pin) { return pin.key == name; });
       if (it == visit.end())
         return std::nullopt;
       if (held && *held != it->value)
@@ -587,22 +598,56 @@ namespace refractir::reify {
     return held;
   }
 
-  std::unordered_map<std::string, std::uint32_t> declaredIntWidths(const FunDecl &fn) {
-    std::unordered_map<std::string, std::uint32_t> widths;
-    const auto record = [&widths](const std::string &name, const TypePtr &type) {
-      if (auto bits = TypeUtils::getIntBitWidth(type))
-        widths.emplace(name, static_cast<std::uint32_t>(*bits));
+  std::unordered_map<std::string, LeafType>
+  declaredLeafTypes(const FunDecl &fn, const TypeUtils::StructTable &structs) {
+    std::unordered_map<std::string, LeafType> leaves;
+    // Walk a declaration's type to its scalars, naming each by the steps that
+    // reach it. Vectors are walked like arrays: a lane is not addressable, but
+    // it is readable by subscript, which is all a pin needs.
+    const std::function<void(const std::string &, const TypePtr &, std::vector<Access> &)> walk =
+        [&](const std::string &root, const TypePtr &type, std::vector<Access> &path) {
+          if (!type)
+            return;
+          if (auto bits = TypeUtils::getIntBitWidth(type)) {
+            leaves.emplace(leafKey(root, path), LeafType{static_cast<std::uint32_t>(*bits), false});
+            return;
+          }
+          if (auto bits = TypeUtils::getFloatBitWidth(type)) {
+            leaves.emplace(leafKey(root, path), LeafType{static_cast<std::uint32_t>(*bits), true});
+            return;
+          }
+          const auto descend = [&](Access step) {
+            path.push_back(step);
+            walk(root, TypeUtils::stepType(type, path.back(), structs), path);
+            path.pop_back();
+          };
+          if (auto arr = std::get_if<ArrayType>(&type->v)) {
+            for (std::uint64_t i = 0; i < arr->size; ++i)
+              descend(Access{AccessIndex{Index{IntLit{static_cast<std::int64_t>(i), {}}}, {}}});
+          } else if (auto vec = std::get_if<VecType>(&type->v)) {
+            for (std::uint64_t i = 0; i < vec->size; ++i)
+              descend(Access{AccessIndex{Index{IntLit{static_cast<std::int64_t>(i), {}}}, {}}});
+          } else if (auto str = std::get_if<StructType>(&type->v)) {
+            const auto decl = structs.find(str->name.name);
+            if (decl != structs.end() && decl->second)
+              for (const auto &field: decl->second->fields)
+                descend(Access{AccessField{field.name, {}}});
+          }
+        };
+    const auto record = [&](const std::string &name, const TypePtr &type) {
+      std::vector<Access> path;
+      walk(name, type, path);
     };
     for (const auto &param: fn.params)
       record(param.name.name, param.type);
     for (const auto &let: fn.lets)
       record(let.name.name, let.type);
-    return widths;
+    return leaves;
   }
 
   DataflowSite pinsAtBlock(
       const StateProfile &profile, const std::string &blockLabel,
-      const std::unordered_map<std::string, std::uint32_t> &widths
+      const std::unordered_map<std::string, LeafType> &leaves
   ) {
     DataflowSite site;
     for (const StatePoint &point: profile.trace) {
@@ -610,15 +655,31 @@ namespace refractir::reify {
         continue;
       std::vector<Pin> pins;
       for (const auto &[name, value]: point.vars) {
-        if (value.kind != StateValue::Kind::Int)
-          continue;
-        const auto width = widths.find(name);
-        if (width == widths.end())
-          continue;
-        const SignedRange range = signedRange(width->second);
-        if (value.intVal < range.lo || value.intVal > range.hi)
-          continue;
-        pins.push_back(Pin{name, value.intVal, width->second});
+        std::vector<StateLeaf> scalars;
+        bool hasPtr = false, hasUndef = false;
+        enumStateLeaves(value, scalars, hasPtr, hasUndef);
+        for (const StateLeaf &leaf: scalars) {
+          const std::string key = leafKey(name, leaf.path);
+          const auto decl = leaves.find(key);
+          if (decl == leaves.end())
+            continue;
+          if (leaf.val.kind == StateValue::Kind::Int && !decl->second.isFloat) {
+            // A value the declaration cannot hold means the two disagree about
+            // this leaf, and the declaration is the one an argument answers to.
+            const SignedRange range = signedRange(decl->second.bits);
+            if (leaf.val.intVal < range.lo || leaf.val.intVal > range.hi)
+              continue;
+            pins.push_back(Pin{name, leaf.path, key, leaf.val.intVal, decl->second.bits, false});
+          } else if (leaf.val.kind == StateValue::Kind::Float && decl->second.isFloat) {
+            // Carried as what it truncates to. A float whose truncation leaves
+            // `i64` cannot be cast into the integer arithmetic at all, since
+            // float-to-integer out of range is UB (spec §6.7).
+            const double f = leaf.val.floatVal;
+            if (!(f > -9.2e18 && f < 9.2e18))
+              continue;
+            pins.push_back(Pin{name, leaf.path, key, static_cast<std::int64_t>(f), 64, true});
+          }
+        }
       }
       site.visits.push_back(std::move(pins));
     }

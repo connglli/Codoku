@@ -23,6 +23,7 @@
 #include <utility>
 #include <vector>
 
+#include "analysis/type_utils.hpp"
 #include "ast/ast.hpp"
 #include "reify/func_desc.hpp"
 #include "reify/rewrite.hpp"
@@ -94,8 +95,8 @@ namespace refractir::reify {
     // with the engine's shuffled-candidates order.
     virtual bool apply(
         FunDecl &caller, const FuncDescriptor &callerDesc, const StateProfile *callerProfile,
-        const CallRewriteSite &site, const FuncDescriptor &callee, std::size_t realizationIdx,
-        std::mt19937 &rng
+        const TypeUtils::StructTable &structs, const CallRewriteSite &site,
+        const FuncDescriptor &callee, std::size_t realizationIdx, std::mt19937 &rng
     ) = 0;
   };
 
@@ -172,8 +173,8 @@ namespace refractir::reify {
     // the concretized execution path to target unexecuted blocks safely).
     RewriteReport rewriteEdge(
         FunDecl &caller, const FuncDescriptor &callerDesc, const StateProfile *callerProfile,
-        const FunDecl &calleeFn, const FuncDescriptor &callee, std::size_t fixedRealizationIdx,
-        std::mt19937 &rng
+        const TypeUtils::StructTable &structs, const FunDecl &calleeFn,
+        const FuncDescriptor &callee, std::size_t fixedRealizationIdx, std::mt19937 &rng
     );
 
     CallRealizePlan plan_;

@@ -29,6 +29,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "analysis/type_utils.hpp"
 #include "ast/ast.hpp"
 #include "reify/name_alloc.hpp"
 #include "reify/state_profile.hpp"
@@ -40,13 +41,20 @@ namespace refractir::reify {
   // never offers one back as a rewrite site.
   inline constexpr const char *kDataflowLocalPrefix = "%__df";
 
-  // One integer variable the caller holds where the argument is built, and the
-  // value it holds there. Only integer scalars appear: they are what an
-  // argument expression can be built out of.
+  // One scalar leaf the caller holds where the argument is built, and the
+  // value it holds there. A leaf is any scalar the declarations reach: a plain
+  // local, an array or vector element, a struct field, at any depth.
+  //
+  // A float leaf is carried as the integer its value truncates to, reached by
+  // a cast — `key` still names the float, and `viaFloat` says a cast stands
+  // between it and the integer arithmetic every construction is written in.
   struct Pin {
-    std::string name;
+    std::string root;         // the declaration, `%a`
+    std::vector<Access> path; // the steps to the leaf, empty for a plain local
+    std::string key;          // `%a[1]`, `%s.f0` — identity across visits
     std::int64_t value = 0;
     std::uint32_t bits = 0;
+    bool viaFloat = false;
   };
 
   // The caller's state where the argument is built, one pin set per execution
@@ -102,8 +110,17 @@ namespace refractir::reify {
   [[nodiscard]] std::optional<std::int64_t>
   stableValue(const DataflowSite &site, const std::string &name);
 
-  // The integer locals and parameters `fn` declares, by name and width.
-  [[nodiscard]] std::unordered_map<std::string, std::uint32_t> declaredIntWidths(const FunDecl &fn);
+  // What each scalar leaf of `fn`'s declarations is: its width, and whether it
+  // is a float. Keyed by leafKey, so a profile's recorded leaf and a
+  // declaration's agree by construction rather than by both spelling it the
+  // same way.
+  struct LeafType {
+    std::uint32_t bits = 0;
+    bool isFloat = false;
+  };
+
+  [[nodiscard]] std::unordered_map<std::string, LeafType>
+  declaredLeafTypes(const FunDecl &fn, const TypeUtils::StructTable &structs);
 
   // The pins at `blockLabel`, one set per visit the profiled run made to it.
   // Points inside a block are ignored — an argument is built at a block's head,
@@ -116,7 +133,7 @@ namespace refractir::reify {
   // dropped for the same reason.
   [[nodiscard]] DataflowSite pinsAtBlock(
       const StateProfile &profile, const std::string &blockLabel,
-      const std::unordered_map<std::string, std::uint32_t> &widths
+      const std::unordered_map<std::string, LeafType> &leaves
   );
 
   // Ask the policies in a uniformly random order and take the first argument
