@@ -36,8 +36,22 @@ namespace refractir::reify {
   // apply it. Kind discriminates so the engine can sort or filter by
   // category.
   struct CallRewriteSite {
-    enum class Kind { LetInitIntLit, LetInitFloatLit };
+    // LetInit*: a declaration's initializer, realized by an assignment
+    // prepended to a block. OnPathIntAtom: an integer literal inside a
+    // statement the run executes, realized by hoisting the call into a cell
+    // above that statement and reading the cell where the literal stood.
+    enum class Kind { LetInitIntLit, LetInitFloatLit, OnPathIntAtom };
     Kind kind;
+    // OnPathIntAtom: the block holding the statement. The atom itself is found
+    // again when the rewrite fires, since any earlier splice into the same
+    // block has moved it.
+    std::string blockLabel;
+    // Whether rewriting this site once rules it out for good. A literal spliced
+    // into becomes a call, and stacking a second on it would build a
+    // left-to-right chain whose prefix sums can wrap; an atom replaced by a
+    // read is no longer a literal and cannot be found again, so it needs no
+    // bookkeeping.
+    bool consumesSite = true;
     // Index into FunDecl::lets. The rule that emitted this site is
     // responsible for re-validating the index before applying (cheap
     // because literal rewriting mutates the init value, not the lets vector).
@@ -57,7 +71,11 @@ namespace refractir::reify {
   public:
     virtual ~CallRewriteRule() = default;
     [[nodiscard]] virtual const char *name() const = 0;
-    [[nodiscard]] virtual std::vector<CallRewriteSite> findSites(const FunDecl &caller) = 0;
+    // `callerDesc` carries the concretized path, so a rule that only rewrites
+    // code the run executes can say so here rather than proposing candidates
+    // the engine spends its budget rejecting.
+    [[nodiscard]] virtual std::vector<CallRewriteSite>
+    findSites(const FunDecl &caller, const FuncDescriptor &callerDesc) = 0;
     // Decide whether the site can be rewritten by calling into
     // `callee` using `fixedRealizationIdx` as the bundled realization
     // (the engine has already locked which realization runs at the
@@ -83,6 +101,12 @@ namespace refractir::reify {
 
   // Rule for scalar Int/Float literal let initializers.
   [[nodiscard]] std::unique_ptr<CallRewriteRule> makeLiteralToCallRule();
+
+  // Rule for integer literals inside the statements the run executes. The call
+  // is hoisted into a cell of its own above the statement, because RefractIR
+  // evaluates a flat expression left to right: splicing `call + (k - o)` into
+  // the middle of one would reassociate everything after it.
+  [[nodiscard]] std::unique_ptr<CallRewriteRule> makeAtomToCallRule();
 
   // One planned call-graph edge: realize a call from `caller` into `callee`,
   // pinned to `calleeRealizationIdx`. Functions are named (canonical "@...")

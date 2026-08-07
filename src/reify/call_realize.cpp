@@ -11,6 +11,7 @@
 #include <unordered_set>
 
 #include "analysis/type_utils.hpp"
+#include "ast/build.hpp"
 #include "ast/sir_printer.hpp"
 #include "reify/dataflow_policy.hpp"
 #include "reify/hyperparameters.hpp"
@@ -236,6 +237,98 @@ namespace refractir::reify {
   }
 
   // ---------------------------------------------------------------------------
+  // The spliced expression
+  //
+  // Both rules produce the same thing — `call @callee(args) + (target - o)`,
+  // which evaluates to `target` because the callee returns its solved `o` — and
+  // differ only in where they put it and what it displaces. This builds it,
+  // along with the statements the arguments need.
+  // ---------------------------------------------------------------------------
+
+  namespace {
+
+    struct SplicedCall {
+      std::vector<LetDecl> lets;
+      std::vector<Instr> stmts;
+      Expr value;
+    };
+
+    // `target` is the value the caller had here and must still have. Returns
+    // nullopt when an argument has no expressible form, or when the offset has
+    // no literal at the destination's width.
+    [[nodiscard]] std::optional<SplicedCall> buildSplicedCall(
+        const FuncDescriptor &callee, std::size_t realizationIdx, const DataflowSite &pins,
+        const std::vector<std::unique_ptr<DataflowPolicy>> &policies, std::int64_t target,
+        int destBits, NameAllocator &names, std::mt19937 &rng
+    ) {
+      const auto &rz = callee.realizations[realizationIdx];
+      if (rz.paramValues.size() != callee.params.size())
+        return std::nullopt;
+      const auto retVal = parseI64(rz.retValue);
+      if (!retVal)
+        return std::nullopt;
+
+      SplicedCall out;
+      CallAtom ca;
+      GlobalId gid;
+      gid.name = callee.name;
+      ca.callee = gid;
+      std::uniform_real_distribution<double> coin(0.0, 1.0);
+      for (std::size_t i = 0; i < callee.params.size(); ++i) {
+        const auto &paramType = callee.params[i].type;
+        const auto &paramValStr = rz.paramValues[i].second;
+        std::optional<Expr> argExpr;
+        const int paramBits = intTypeBits(paramType);
+        // Whether this argument is stated in terms of the caller's state at
+        // all. The solved literal is the alternative, and keeping some of them
+        // is what leaves a compiler something to compare against.
+        const bool replace = coin(rng) < rylink::hp::kPReplaceParam;
+        if (auto want = replace && paramBits > 0 ? parseI64(paramValStr) : std::nullopt) {
+          if (auto built = buildArgument(
+                  policies, pins, static_cast<std::uint32_t>(paramBits), *want, names, rng
+              )) {
+            out.lets.insert(
+                out.lets.end(), std::make_move_iterator(built->lets.begin()),
+                std::make_move_iterator(built->lets.end())
+            );
+            out.stmts.insert(
+                out.stmts.end(), std::make_move_iterator(built->stmts.begin()),
+                std::make_move_iterator(built->stmts.end())
+            );
+            argExpr = std::move(built->value);
+          }
+        }
+        if (!argExpr)
+          argExpr = makeScalarLitExpr(paramType, paramValStr);
+        if (!argExpr)
+          return std::nullopt;
+        ca.args.push_back(std::make_shared<Expr>(std::move(*argExpr)));
+      }
+
+      // `target - o` under bit-vector arithmetic reproduces `target`, but the C
+      // backend emits the site as a signed addition and UBSan trips when the
+      // intermediate leaves the destination's range even though the wrapped
+      // result is right. Declining costs one splice; the engine tries another.
+      std::int64_t offset = 0;
+      if (__builtin_sub_overflow(target, *retVal, &offset))
+        return std::nullopt;
+      if (destBits > 0 && destBits < 64) {
+        const std::int64_t maxv = (std::int64_t{1} << (destBits - 1)) - 1;
+        if (offset < -maxv - 1 || offset > maxv)
+          return std::nullopt;
+      }
+
+      Atom callAtom;
+      callAtom.v = std::move(ca);
+      out.value = buildExpr(std::move(callAtom));
+      if (offset != 0)
+        appendTail(out.value, AddOp::Plus, buildIntAtom(offset));
+      return out;
+    }
+
+  } // namespace
+
+  // ---------------------------------------------------------------------------
   // LiteralToCallRule
   // ---------------------------------------------------------------------------
 
@@ -251,7 +344,8 @@ namespace refractir::reify {
 
       const char *name() const override { return "LiteralToCall"; }
 
-      std::vector<CallRewriteSite> findSites(const FunDecl &caller) override {
+      std::vector<CallRewriteSite>
+      findSites(const FunDecl &caller, const FuncDescriptor &) override {
         std::vector<CallRewriteSite> sites;
         for (size_t i = 0; i < caller.lets.size(); ++i) {
           const auto &ld = caller.lets[i];
@@ -866,6 +960,205 @@ namespace refractir::reify {
   }
 
   // ---------------------------------------------------------------------------
+  // AtomToCallRule
+  //
+  // An integer literal standing inside a statement the run executes is a value
+  // the caller computes, so a call can carry it. It cannot stand where the
+  // literal stands: a flat expression evaluates left to right with no
+  // parentheses, so `a + k * b` with `call + (k - o)` put in place of `k` would
+  // reassociate everything after it. The call is hoisted into a cell above the
+  // statement instead, and the literal becomes a read of that cell.
+  //
+  // Hoisting also settles composition. The call lands in an expression of its
+  // own rather than joining someone else's `+` chain, so no prefix sum can
+  // wrap, and the atom it replaced is no longer a literal for a later edge to
+  // find.
+  // ---------------------------------------------------------------------------
+
+  namespace {
+
+    class AtomToCallRule : public CallRewriteRule {
+    public:
+      AtomToCallRule() {
+        policies_.push_back(makeBaselinePolicy());
+        policies_.push_back(makeBitwisePolicy());
+        policies_.push_back(makeArithmeticPolicy());
+      }
+
+      const char *name() const override { return "AtomToCall"; }
+
+      // One site per (executed block, integer width) that holds a literal of
+      // that width. Which literal is settled when the rewrite fires, since an
+      // earlier splice into the same block will have moved them.
+      std::vector<CallRewriteSite>
+      findSites(const FunDecl &caller, const FuncDescriptor &callerDesc) override {
+        const std::unordered_set<std::string> onPath(
+            callerDesc.path.begin(), callerDesc.path.end()
+        );
+        std::vector<CallRewriteSite> sites;
+        for (const auto &block: caller.blocks) {
+          if (!onPath.count(block.label.name))
+            continue;
+          std::unordered_set<std::string> widths;
+          for (const auto &type: literalTypes(caller, block))
+            widths.insert(type);
+          for (const auto &type: widths) {
+            CallRewriteSite s;
+            s.kind = CallRewriteSite::Kind::OnPathIntAtom;
+            s.blockLabel = block.label.name;
+            s.sirType = type;
+            s.consumesSite = false;
+            sites.push_back(std::move(s));
+          }
+        }
+        return sites;
+      }
+
+      bool matchCallee(
+          const CallRewriteSite &site, const FuncDescriptor &callee, std::size_t realizationIdx
+      ) override {
+        if (site.kind != CallRewriteSite::Kind::OnPathIntAtom)
+          return false;
+        if (callee.retType != site.sirType)
+          return false;
+        if (realizationIdx >= callee.realizations.size())
+          return false;
+        const auto &rz = callee.realizations[realizationIdx];
+        return !rz.retValue.empty() && parseI64(rz.retValue).has_value();
+      }
+
+      bool apply(
+          FunDecl &caller, const FuncDescriptor &, const StateProfile *callerProfile,
+          const CallRewriteSite &site, const FuncDescriptor &callee, std::size_t realizationIdx,
+          std::mt19937 &rng
+      ) override {
+        if (!callerProfile)
+          return false;
+        Block *block = nullptr;
+        for (auto &b: caller.blocks)
+          if (b.label.name == site.blockLabel)
+            block = &b;
+        if (!block)
+          return false;
+
+        auto found = pickLiteral(caller, *block, site.sirType, rng);
+        if (!found)
+          return false;
+
+        const int bits = intTypeBits(site.sirType);
+        NameAllocator names(
+            std::string(kDataflowLocalPrefix) + "a" + std::to_string(spliceSeq_++) + "_"
+        );
+        const DataflowSite pins =
+            pinsAtBlock(*callerProfile, site.blockLabel, declaredIntWidths(caller));
+        auto spliced = buildSplicedCall(
+            callee, realizationIdx, pins, policies_, found->value, bits, names, rng
+        );
+        if (!spliced)
+          return false;
+
+        // Everything that can fail has failed by here, so the two mutations
+        // below cannot leave a half-rewritten body. The atom is overwritten
+        // first: inserting into the statement list reallocates it and every
+        // pointer into it, this one included.
+        //
+        // The call goes at the head of the block, not just above the statement
+        // that reads it. Its arguments are stated against the state on entry,
+        // and by the middle of a block the caller's variables have moved on;
+        // the cell is fresh, so nothing between the two points can disturb it.
+        const std::string cell = names.fresh(buildIntType(bits), spliced->lets);
+        found->atom->v = RValueAtom{buildLValue(cell), {}};
+        spliced->stmts.push_back(buildAssign(buildLValue(cell), std::move(spliced->value)));
+        block->instrs.insert(
+            block->instrs.begin(), std::make_move_iterator(spliced->stmts.begin()),
+            std::make_move_iterator(spliced->stmts.end())
+        );
+        caller.lets.insert(
+            caller.lets.end(), std::make_move_iterator(spliced->lets.begin()),
+            std::make_move_iterator(spliced->lets.end())
+        );
+        return true;
+      }
+
+    private:
+      struct Found {
+        Atom *atom;
+        std::int64_t value;
+      };
+
+      // The SIR types of the integer literals this block holds, by the type
+      // each one is read at rather than its own — a literal takes the type of
+      // where it stands.
+      [[nodiscard]] static std::vector<std::string>
+      literalTypes(const FunDecl &caller, const Block &block) {
+        std::vector<std::string> types;
+        Block &mutableBlock = const_cast<Block &>(block);
+        for (std::size_t i = 0; i < mutableBlock.instrs.size(); ++i)
+          for (const auto &type: kIntTypes(caller))
+            if (!collect(caller, mutableBlock.instrs[i], type).empty())
+              types.push_back(type);
+        return types;
+      }
+
+      // Integer widths any of the caller's own declarations use. A callee
+      // returning some other width has nowhere to land anyway.
+      [[nodiscard]] static std::vector<std::string> kIntTypes(const FunDecl &caller) {
+        std::vector<std::string> types;
+        std::unordered_set<std::string> seen;
+        const auto add = [&](const TypePtr &t) {
+          if (!TypeUtils::getIntBitWidth(t))
+            return;
+          const std::string s = SIRPrinter::typeToString(t);
+          if (seen.insert(s).second)
+            types.push_back(s);
+        };
+        for (const auto &p: caller.params)
+          add(p.type);
+        for (const auto &l: caller.lets)
+          add(l.type);
+        return types;
+      }
+
+      // Integer-literal atoms in one instruction that are read at `sirType`.
+      [[nodiscard]] static std::vector<Atom *>
+      collect(const FunDecl &caller, Instr &instr, const std::string &sirType) {
+        const int bits = intTypeBits(sirType);
+        if (bits <= 0)
+          return {};
+        CallReplacer replacer(buildIntType(bits), caller);
+        replacer.collect(instr);
+        std::vector<Atom *> lits;
+        for (Atom *a: replacer.candidates)
+          if (auto coef = std::get_if<CoefAtom>(&a->v))
+            if (std::holds_alternative<IntLit>(coef->coef))
+              lits.push_back(a);
+        return lits;
+      }
+
+      [[nodiscard]] static std::optional<Found> pickLiteral(
+          const FunDecl &caller, Block &block, const std::string &sirType, std::mt19937 &rng
+      ) {
+        std::vector<Found> all;
+        for (auto &instr: block.instrs)
+          for (Atom *a: collect(caller, instr, sirType))
+            all.push_back(Found{a, std::get<IntLit>(std::get<CoefAtom>(a->v).coef).value});
+        if (all.empty())
+          return std::nullopt;
+        std::uniform_int_distribution<std::size_t> pick(0, all.size() - 1);
+        return all[pick(rng)];
+      }
+
+      std::vector<std::unique_ptr<DataflowPolicy>> policies_;
+      std::size_t spliceSeq_ = 0;
+    };
+
+  } // namespace
+
+  std::unique_ptr<CallRewriteRule> makeAtomToCallRule() {
+    return std::make_unique<AtomToCallRule>();
+  }
+
+  // ---------------------------------------------------------------------------
   // insertCallInUnexecBlock
   //
   // Attempts to realize a call edge in a block of the caller.
@@ -925,14 +1218,14 @@ namespace refractir::reify {
 
     std::vector<Candidate> cands;
     for (auto &rule: rules_) {
-      auto sites = rule->findSites(caller);
+      auto sites = rule->findSites(caller, callerDesc);
       for (auto &s: sites) {
         // Skip sites already consumed by an earlier rewriteEdge call —
         // stacking calls on the same let-init produces left-to-right
         // chains like `f1() + f2() + ...` whose prefix sums can wrap
         // in unintended ways even though each individual rewrite is
         // BV-sound. See CallRealizeTransform class header for the full note.
-        if (consumed_.count({&caller, s.letIdx}))
+        if (s.consumesSite && consumed_.count({&caller, s.letIdx}))
           continue;
         cands.push_back({rule.get(), s});
       }
@@ -973,14 +1266,15 @@ namespace refractir::reify {
         // CallRealizeTransform header note. Without break we now re-check here.
         // A workaround is to introduce new variables and statements first.
         // A complete solution would land when RefractIR support parentheses.
-        if (consumed_.count({&caller, c.site.letIdx}))
+        if (c.site.consumesSite && consumed_.count({&caller, c.site.letIdx}))
           continue;
         if (uni(rng) >= pAccept)
           continue;
         if (c.rule->apply(
                 caller, callerDesc, callerProfile, c.site, callee, fixedRealizationIdx, rng
             )) {
-          consumed_.insert({&caller, c.site.letIdx});
+          if (c.site.consumesSite)
+            consumed_.insert({&caller, c.site.letIdx});
           ++res.applied;
         }
       }
@@ -1046,6 +1340,7 @@ namespace refractir::reify {
   std::unique_ptr<Transform> makeCallRealizeTransform(CallRealizePlan plan) {
     auto t = std::make_unique<CallRealizeTransform>(std::move(plan));
     t->addRule(makeLiteralToCallRule());
+    t->addRule(makeAtomToCallRule());
     return t;
   }
 
