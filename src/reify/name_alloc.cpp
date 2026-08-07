@@ -45,7 +45,7 @@ namespace refractir::reify {
     // allocator, and they all declare into the same list — so a name is only
     // fresh once nothing else has claimed it.
     std::string nm = prefix_ + std::to_string(next_++);
-    while (nameTaken(lets, nm))
+    while (nameTaken(lets, nm) || (taken_ && nameTaken(*taken_, nm)))
       nm = prefix_ + std::to_string(next_++);
     lets.push_back(makeLet(nm, type, 0, /*mut=*/true));
     return nm;
@@ -58,7 +58,7 @@ namespace refractir::reify {
       if (v == value && k == key)
         return nm;
     std::string nm = prefix_ + "k" + std::to_string(next_++);
-    while (nameTaken(lets, nm))
+    while (nameTaken(lets, nm) || (taken_ && nameTaken(*taken_, nm)))
       nm = prefix_ + "k" + std::to_string(next_++);
     lets.push_back(makeLet(nm, type, value, /*mut=*/false));
     pool_.emplace_back(value, key, nm);

@@ -440,7 +440,10 @@ namespace refractir::reify {
         std::vector<LetDecl> argLets;
         std::vector<Instr> argStmts;
         std::uniform_real_distribution<double> coin(0.0, 1.0);
-        NameAllocator names(std::string(kDataflowLocalPrefix) + std::to_string(spliceSeq_++) + "_");
+        NameAllocator names(
+            std::string(kDataflowLocalPrefix) + "l" + std::to_string(spliceSeq_++) + "_",
+            &caller.lets
+        );
         for (size_t i = 0; i < callee.params.size(); ++i) {
           const auto &paramType = callee.params[i].type;
           const auto &paramValStr = rz.paramValues[i].second;
@@ -1047,7 +1050,8 @@ namespace refractir::reify {
 
         const int bits = intTypeBits(site.sirType);
         NameAllocator names(
-            std::string(kDataflowLocalPrefix) + "a" + std::to_string(spliceSeq_++) + "_"
+            std::string(kDataflowLocalPrefix) + "a" + std::to_string(spliceSeq_++) + "_",
+            &caller.lets
         );
         const DataflowSite pins =
             pinsAtBlock(*callerProfile, site.blockLabel, declaredIntWidths(caller));
