@@ -1,5 +1,7 @@
 #include "analysis/type_utils.hpp"
 
+#include <functional>
+
 namespace refractir {
 
   std::optional<std::uint32_t> TypeUtils::getIntBitWidth(const TypePtr &t) {
@@ -218,6 +220,43 @@ namespace refractir {
       off += packedSizeof(f.type, structs);
     }
     return off;
+  }
+
+  std::vector<std::pair<std::vector<Access>, TypePtr>>
+  TypeUtils::scalarLeaves(const TypePtr &t, const StructTable &structs) {
+    std::vector<std::pair<std::vector<Access>, TypePtr>> leaves;
+    std::vector<Access> path;
+    const std::function<void(const TypePtr &)> walk = [&](const TypePtr &type) {
+      if (!type)
+        return;
+      if (getIntBitWidth(type) || getFloatBitWidth(type) || isPtr(type)) {
+        leaves.emplace_back(path, type);
+        return;
+      }
+      const auto descend = [&](Access step, const TypePtr &elem) {
+        path.push_back(std::move(step));
+        walk(elem);
+        path.pop_back();
+      };
+      const auto index = [](std::uint64_t i) {
+        return Access{AccessIndex{Index{IntLit{static_cast<std::int64_t>(i), {}}}, {}}};
+      };
+      if (auto arr = std::get_if<ArrayType>(&type->v)) {
+        for (std::uint64_t i = 0; i < arr->size; ++i)
+          descend(index(i), arr->elem);
+      } else if (auto vec = std::get_if<VecType>(&type->v)) {
+        for (std::uint64_t i = 0; i < vec->size; ++i)
+          descend(index(i), vec->elem);
+      } else if (auto str = std::get_if<StructType>(&type->v)) {
+        const auto decl = structs.find(str->name.name);
+        if (decl == structs.end() || !decl->second)
+          return;
+        for (const auto &field: decl->second->fields)
+          descend(Access{AccessField{field.name, {}}}, field.type);
+      }
+    };
+    walk(t);
+    return leaves;
   }
 
 } // namespace refractir

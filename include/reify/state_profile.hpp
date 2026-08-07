@@ -25,6 +25,7 @@
 #include <utility>
 #include <vector>
 
+#include "analysis/type_utils.hpp"
 #include "ast/ast.hpp"
 #include "interp/value.hpp"
 
@@ -107,6 +108,37 @@ namespace refractir::reify {
   // follow the StateValue's own (name-sorted) order.
   void
   enumStateLeaves(const StateValue &v, std::vector<StateLeaf> &out, bool &hasPtr, bool &hasUndef);
+
+  // One scalar the run recorded at a program point: the declaration it belongs
+  // to, the steps that reach it, its leafKey, and what it held.
+  struct RecordedLeaf {
+    std::string root;
+    std::vector<Access> path;
+    std::string key;
+    StateValue value;
+  };
+
+  // The scalars recorded at `blockLabel`, one set per visit the run made to
+  // it. Points inside a block are ignored: a caller reads the state a block
+  // starts from, and a block entered twice yields two sets rather than one.
+  [[nodiscard]] std::vector<std::vector<RecordedLeaf>>
+  leavesAtBlock(const StateProfile &profile, const std::string &blockLabel);
+
+  // Where a recorded pointer leaf points, as an lvalue the function can name.
+  //
+  // A profile records provenance — the originating local and a byte offset —
+  // rather than the cell itself, so recovering the cell means walking the
+  // root's declared type to the access path that offset falls on. `ptrType` is
+  // the leaf's own static type, which fixes what is being pointed *at*.
+  //
+  // Returns nullopt, and sets `why` when given, for a pointer that names
+  // nothing reconstructible: the null pointer, provenance the interpreter
+  // could not resolve, a root the function does not declare, a root no `addr`
+  // may be taken of, or an offset no access path reaches (one past the end).
+  [[nodiscard]] std::optional<LValue> resolvePointee(
+      const StateValue &leaf, const TypePtr &ptrType, const FunDecl &fn,
+      const TypeUtils::StructTable &structs, const TypeLayout &layout, const char **why = nullptr
+  );
 
   // Bit-exact structural equality of two state trees. Floats compare by
   // bit pattern (so +0.0 != -0.0), ints by value, aggregates recursively;

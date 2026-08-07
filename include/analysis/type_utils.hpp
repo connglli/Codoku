@@ -150,6 +150,19 @@ namespace refractir {
      * Returns nullptr as soon as a step does not apply, and `t` itself when
      * `accesses` is empty.
      */
+    /**
+     * Every scalar `t` reaches, as the access path that reaches it paired with
+     * the scalar's own type. An `iN` or `fN` is its own only leaf; arrays,
+     * vectors and structs are walked through, at any depth.
+     *
+     * A vector is walked like an array. Its lanes are not addressable
+     * (SPEC §6.8.1), but they are readable by subscript, which is what a
+     * caller enumerating scalars is after. A pointer is a leaf: what it points
+     * at is a question about a value, not about a type.
+     */
+    static std::vector<std::pair<std::vector<Access>, TypePtr>>
+    scalarLeaves(const TypePtr &t, const StructTable &structs);
+
     static TypePtr accessPathType(
         const TypePtr &t, const std::vector<Access> &accesses, const StructTable &structs
     );

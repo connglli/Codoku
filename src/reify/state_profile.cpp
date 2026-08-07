@@ -6,6 +6,7 @@
 #include <ostream>
 #include <sstream>
 
+#include "analysis/state_set.hpp"
 #include "analysis/type_utils.hpp"
 #include "interp/interpreter.hpp"
 #include "interp/memory.hpp"
@@ -138,6 +139,62 @@ namespace refractir::reify {
   enumStateLeaves(const StateValue &v, std::vector<StateLeaf> &out, bool &hasPtr, bool &hasUndef) {
     std::vector<Access> path;
     enumStateLeavesRec(v, path, out, hasPtr, hasUndef);
+  }
+
+  std::vector<std::vector<RecordedLeaf>>
+  leavesAtBlock(const StateProfile &profile, const std::string &blockLabel) {
+    std::vector<std::vector<RecordedLeaf>> visits;
+    for (const StatePoint &point: profile.trace) {
+      if (point.block != blockLabel || point.instr != -1)
+        continue;
+      std::vector<RecordedLeaf> leaves;
+      for (const auto &[root, value]: point.vars) {
+        std::vector<StateLeaf> scalars;
+        bool hasPtr = false, hasUndef = false;
+        enumStateLeaves(value, scalars, hasPtr, hasUndef);
+        for (StateLeaf &leaf: scalars)
+          leaves.push_back(
+              RecordedLeaf{root, leaf.path, leafKey(root, leaf.path), std::move(leaf.val)}
+          );
+      }
+      visits.push_back(std::move(leaves));
+    }
+    return visits;
+  }
+
+  std::optional<LValue> resolvePointee(
+      const StateValue &leaf, const TypePtr &ptrType, const FunDecl &fn,
+      const TypeUtils::StructTable &structs, const TypeLayout &layout, const char **why
+  ) {
+    (void) structs;
+    const auto no = [&](const char *reason) -> std::optional<LValue> {
+      if (why)
+        *why = reason;
+      return std::nullopt;
+    };
+    if (!ptrType || !TypeUtils::isPtr(ptrType))
+      return no("a pointer leaf of non-pointer type");
+    if (leaf.ptrNull)
+      return no("the null pointer");
+    if (leaf.ptrRoot.empty())
+      return no("an opaque pointer"); // no provenance, no way to name the cell
+
+    // `addr` needs a `let mut` root, so a parameter or an immutable local is
+    // not something a reconstructed pointer may be taken of.
+    const TypePtr *rootType = nullptr;
+    for (const auto &l: fn.lets)
+      if (l.name.name == leaf.ptrRoot) {
+        if (!l.isMutable)
+          return no("a pointer into an immutable root");
+        rootType = &l.type;
+      }
+    if (!rootType)
+      return no("a pointer into something the function does not declare");
+
+    auto path = layout.accessPathAtOffset(*rootType, leaf.ptrOfs, TypeUtils::pointee(ptrType));
+    if (!path)
+      return no("a pointer to an offset no access path reaches");
+    return LValue{LocalId{leaf.ptrRoot, {}}, std::move(*path), {}};
   }
 
   bool bitExactEq(const StateValue &a, const StateValue &b) {

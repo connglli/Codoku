@@ -350,39 +350,32 @@ namespace refractir::reify {
     }
 
     // Fill a ptr leaf's static type and reconstruction target. Returns
-    // false when the leaf cannot be reproduced or guarded: unresolved
-    // provenance, a target root that is missing / immutable / not
-    // addressable, or an offset the static type cannot express as an
-    // access path (e.g. one-past-the-end).
+    // false when the leaf cannot be reproduced or guarded; the cell it names
+    // is recovered by reify/state_profile.hpp, which owns what a recorded
+    // pointer means, and the null pointer is reproducible here even though it
+    // names no cell.
     bool fillPtrLeaf(
         LeafRef &leaf, const FunDecl &fn, const StructMap &structs, const TypeLayout &layout,
         const TypePtr &rootType, const char **why = nullptr
     ) {
-      auto no = [&](const char *reason) {
-        if (why)
-          *why = reason;
-        return false;
-      };
-      // Static type of the cell: walk the root type along the leaf path.
       TypePtr t = TypeUtils::accessPathType(rootType, leaf.path, structs);
-      if (!t)
-        return no("a leaf whose type does not follow the root's");
-      if (!TypeUtils::isPtr(t))
-        return no("a pointer leaf of non-pointer type");
+      if (!t) {
+        if (why)
+          *why = "a leaf whose type does not follow the root's";
+        return false;
+      }
+      if (!TypeUtils::isPtr(t)) {
+        if (why)
+          *why = "a pointer leaf of non-pointer type";
+        return false;
+      }
       leaf.ptrType = t;
       if (leaf.val.ptrNull)
         return true;
-      if (leaf.val.ptrRoot.empty())
-        return no("an opaque pointer"); // no provenance, no way to reproduce it
-      auto target = findRoot(fn, leaf.val.ptrRoot);
+      auto target = resolvePointee(leaf.val, t, fn, structs, layout, why);
       if (!target)
-        return no("a pointer into something the function does not declare");
-      if (!target->isMutable)
-        return no("a pointer into an immutable root"); // `addr` needs a let mut
-      auto path = layout.accessPathAtOffset(target->type, leaf.val.ptrOfs, TypeUtils::pointee(t));
-      if (!path)
-        return no("a pointer to an offset no access path reaches");
-      leaf.ptrTarget = LValue{LocalId{leaf.val.ptrRoot, {}}, std::move(*path), {}};
+        return false;
+      leaf.ptrTarget = std::move(*target);
       return true;
     }
 

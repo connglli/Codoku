@@ -601,42 +601,13 @@ namespace refractir::reify {
   std::unordered_map<std::string, LeafType>
   declaredLeafTypes(const FunDecl &fn, const TypeUtils::StructTable &structs) {
     std::unordered_map<std::string, LeafType> leaves;
-    // Walk a declaration's type to its scalars, naming each by the steps that
-    // reach it. Vectors are walked like arrays: a lane is not addressable, but
-    // it is readable by subscript, which is all a pin needs.
-    const std::function<void(const std::string &, const TypePtr &, std::vector<Access> &)> walk =
-        [&](const std::string &root, const TypePtr &type, std::vector<Access> &path) {
-          if (!type)
-            return;
-          if (auto bits = TypeUtils::getIntBitWidth(type)) {
-            leaves.emplace(leafKey(root, path), LeafType{static_cast<std::uint32_t>(*bits), false});
-            return;
-          }
-          if (auto bits = TypeUtils::getFloatBitWidth(type)) {
-            leaves.emplace(leafKey(root, path), LeafType{static_cast<std::uint32_t>(*bits), true});
-            return;
-          }
-          const auto descend = [&](Access step) {
-            path.push_back(step);
-            walk(root, TypeUtils::stepType(type, path.back(), structs), path);
-            path.pop_back();
-          };
-          if (auto arr = std::get_if<ArrayType>(&type->v)) {
-            for (std::uint64_t i = 0; i < arr->size; ++i)
-              descend(Access{AccessIndex{Index{IntLit{static_cast<std::int64_t>(i), {}}}, {}}});
-          } else if (auto vec = std::get_if<VecType>(&type->v)) {
-            for (std::uint64_t i = 0; i < vec->size; ++i)
-              descend(Access{AccessIndex{Index{IntLit{static_cast<std::int64_t>(i), {}}}, {}}});
-          } else if (auto str = std::get_if<StructType>(&type->v)) {
-            const auto decl = structs.find(str->name.name);
-            if (decl != structs.end() && decl->second)
-              for (const auto &field: decl->second->fields)
-                descend(Access{AccessField{field.name, {}}});
-          }
-        };
-    const auto record = [&](const std::string &name, const TypePtr &type) {
-      std::vector<Access> path;
-      walk(name, type, path);
+    const auto record = [&](const std::string &root, const TypePtr &type) {
+      for (const auto &[path, leafType]: TypeUtils::scalarLeaves(type, structs)) {
+        if (auto bits = TypeUtils::getIntBitWidth(leafType))
+          leaves.emplace(leafKey(root, path), LeafType{static_cast<std::uint32_t>(*bits), false});
+        else if (auto fbits = TypeUtils::getFloatBitWidth(leafType))
+          leaves.emplace(leafKey(root, path), LeafType{static_cast<std::uint32_t>(*fbits), true});
+      }
     };
     for (const auto &param: fn.params)
       record(param.name.name, param.type);
@@ -650,35 +621,31 @@ namespace refractir::reify {
       const std::unordered_map<std::string, LeafType> &leaves
   ) {
     DataflowSite site;
-    for (const StatePoint &point: profile.trace) {
-      if (point.block != blockLabel || point.instr != -1)
-        continue;
+    for (const auto &visit: leavesAtBlock(profile, blockLabel)) {
       std::vector<Pin> pins;
-      for (const auto &[name, value]: point.vars) {
-        std::vector<StateLeaf> scalars;
-        bool hasPtr = false, hasUndef = false;
-        enumStateLeaves(value, scalars, hasPtr, hasUndef);
-        for (const StateLeaf &leaf: scalars) {
-          const std::string key = leafKey(name, leaf.path);
-          const auto decl = leaves.find(key);
-          if (decl == leaves.end())
+      for (const RecordedLeaf &leaf: visit) {
+        const auto decl = leaves.find(leaf.key);
+        if (decl == leaves.end())
+          continue;
+        if (leaf.value.kind == StateValue::Kind::Int && !decl->second.isFloat) {
+          // A value the declaration cannot hold means the two disagree about
+          // this leaf, and the declaration is the one an argument answers to.
+          const SignedRange range = signedRange(decl->second.bits);
+          if (leaf.value.intVal < range.lo || leaf.value.intVal > range.hi)
             continue;
-          if (leaf.val.kind == StateValue::Kind::Int && !decl->second.isFloat) {
-            // A value the declaration cannot hold means the two disagree about
-            // this leaf, and the declaration is the one an argument answers to.
-            const SignedRange range = signedRange(decl->second.bits);
-            if (leaf.val.intVal < range.lo || leaf.val.intVal > range.hi)
-              continue;
-            pins.push_back(Pin{name, leaf.path, key, leaf.val.intVal, decl->second.bits, false});
-          } else if (leaf.val.kind == StateValue::Kind::Float && decl->second.isFloat) {
-            // Carried as what it truncates to. A float whose truncation leaves
-            // `i64` cannot be cast into the integer arithmetic at all, since
-            // float-to-integer out of range is UB (spec §6.7).
-            const double f = leaf.val.floatVal;
-            if (!(f > -9.2e18 && f < 9.2e18))
-              continue;
-            pins.push_back(Pin{name, leaf.path, key, static_cast<std::int64_t>(f), 64, true});
-          }
+          pins.push_back(
+              Pin{leaf.root, leaf.path, leaf.key, leaf.value.intVal, decl->second.bits, false}
+          );
+        } else if (leaf.value.kind == StateValue::Kind::Float && decl->second.isFloat) {
+          // Carried as what it truncates to. A float whose truncation leaves
+          // `i64` cannot be cast into the integer arithmetic at all, since
+          // float-to-integer out of range is UB (spec §6.7).
+          const double f = leaf.value.floatVal;
+          if (!(f > -9.2e18 && f < 9.2e18))
+            continue;
+          pins.push_back(
+              Pin{leaf.root, leaf.path, leaf.key, static_cast<std::int64_t>(f), 64, true}
+          );
         }
       }
       site.visits.push_back(std::move(pins));
