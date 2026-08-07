@@ -140,7 +140,17 @@ The leaves arrive already satisfying the three clauses, and composition adds a f
 
 What collapses it is that `f` is known at the inputs it was concretized on and nowhere else. A non-constant `e1` would demand `f`'s behaviour at every state in `S` — behaviour nobody has computed, on inputs the callee was never proven UB-free for.
 
-In `rylink`, `e1` is therefore constant, an input `f` was concretized on. Then `f(e1(s))` is the known `o` whatever `s` is, the callee runs on an input it was proven safe for, and `e2` is left alone and first-order: for a constant `v = c`, it is `+ (c - o)`.
+In `rylink`, `e1` is therefore *value*-constant, pinned to an input `f` was concretized on. Then `f(e1(s))` is the known `o` whatever `s` is, the callee runs on an input it was proven safe for, and `e2` is left alone and first-order: for a constant `v = c`, it is `+ (c - o)`.
+
+Being pinned in value does not make `e1` a literal. It is drawn from a catalog of constructions, each of which reaches the same `i` from whatever the caller holds where the call lands — writing `σ₁…σₘ` for the distinct states the profiled run passes that point in:
+
+```
+literal-or-bias   e1 = %x + (i - x)                  %x steady at x across every σⱼ
+xor-mask          e1 = i ^ ⋀ⱼ (g ^ gⱼ)               g a chosen XOR-fold, gⱼ its value at σⱼ
+prime-interp      e1 = P(vars) - (i mod p) + i       P(σⱼ) = i mod p, P(t) ≠ i mod p off S
+```
+
+The first holds only where a variable does; the other two answer to every `σⱼ` at once, so the variables they read are free to move between visits.
 
 `rylink` implements this:
 
