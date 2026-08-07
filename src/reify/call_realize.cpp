@@ -495,14 +495,24 @@ namespace refractir::reify {
           return std::nullopt;
         }
 
+        // Among the qualifying blocks, prefer the one the run enters most
+        // often. A block visited once leaves a policy a single state to satisfy
+        // and the constructions collapse to their degenerate form; every extra
+        // visit is another state they have to hold for at once, which is the
+        // case they exist for. `executed` is already shuffled, so blocks that
+        // tie keep a random order.
         const auto widths = declaredIntWidths(caller);
+        std::optional<Target> best;
         for (std::size_t blockIdx: executed) {
           DataflowSite pins =
               pinsAtBlock(*callerProfile, caller.blocks[blockIdx].label.name, widths);
-          if (auto held = stableValue(pins, varName))
-            return Target{blockIdx, *held, std::move(pins)};
+          const auto held = stableValue(pins, varName);
+          if (!held)
+            continue;
+          if (!best || pins.visits.size() > best->pins.visits.size())
+            best = Target{blockIdx, *held, std::move(pins)};
         }
-        return std::nullopt;
+        return best;
       }
 
       // Drawn from per argument. The order they are asked in is the draw; each
