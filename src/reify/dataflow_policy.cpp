@@ -1,6 +1,7 @@
 #include "reify/dataflow_policy.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 
 #include "ast/build.hpp"
@@ -75,7 +76,8 @@ namespace refractir::reify {
       const char *name() const override { return "literal-or-bias"; }
 
       std::optional<DataflowResult> build(
-          const DataflowSite &site, std::uint32_t bits, std::int64_t target, std::mt19937 &rng
+          const DataflowSite &site, std::uint32_t bits, std::int64_t target, NameAllocator &,
+          std::mt19937 &rng
       ) override {
         DataflowResult result;
         result.value = biasedOrLiteral(site, bits, target, rng);
@@ -124,7 +126,8 @@ namespace refractir::reify {
       const char *name() const override { return "xor-pin"; }
 
       std::optional<DataflowResult> build(
-          const DataflowSite &site, std::uint32_t bits, std::int64_t target, std::mt19937 &rng
+          const DataflowSite &site, std::uint32_t bits, std::int64_t target, NameAllocator &,
+          std::mt19937 &rng
       ) override {
         std::vector<Pin> pins = stablePins(site, bits);
         if (pins.empty())
@@ -139,7 +142,126 @@ namespace refractir::reify {
       }
     };
 
+    // The largest prime `p` with `p*p` inside the signed range of `bits`, or 0
+    // when none is worth using. Squaring is the bound that matters: every
+    // product the evaluation forms is between two residues, so `p*p` in range
+    // means no step can overflow whatever the caller's variable holds.
+    //
+    // The field therefore shrinks with the width — 46337 at `i32`, 181 at
+    // `i16`, 11 at `i8` — and below `kMinModulus` there are too few residues
+    // for a line through them to be worth emitting.
+    [[nodiscard]] std::int64_t fieldFor(std::uint32_t bits) {
+      constexpr std::int64_t kMinModulus = 11;
+      const auto isPrime = [](std::int64_t n) {
+        if (n < 2)
+          return false;
+        for (std::int64_t d = 2; d * d <= n; ++d)
+          if (n % d == 0)
+            return false;
+        return true;
+      };
+      // Largest `p` with `p*p <= hi`, from a floating-point root corrected
+      // both ways so the bound holds exactly at every width.
+      const std::int64_t hi = signedRange(bits).hi;
+      std::int64_t ceiling = static_cast<std::int64_t>(std::sqrt(static_cast<double>(hi)));
+      while (ceiling > 0 && ceiling > hi / ceiling)
+        --ceiling;
+      while ((ceiling + 1) <= hi / (ceiling + 1))
+        ++ceiling;
+      for (std::int64_t p = ceiling; p >= kMinModulus; --p)
+        if (isPrime(p))
+          return p;
+      return 0;
+    }
+
+    // Truncated `%`, as RefractIR and C both define it, so the coefficients are
+    // solved against the arithmetic the emitted statements actually perform.
+    [[nodiscard]] std::int64_t truncMod(std::int64_t a, std::int64_t p) { return a % p; }
+
+    // The residue in `[0, p)`, which is where field arithmetic wants its
+    // representatives and truncated `%` does not put them.
+    [[nodiscard]] std::int64_t residue(std::int64_t a, std::int64_t p) {
+      const std::int64_t r = truncMod(a, p);
+      return r < 0 ? r + p : r;
+    }
+
+    // A line through the pin, over the field: `P(r) = (a1*r + a0) mod p`, with
+    // `r` the probe reduced into the field. `a1` is drawn non-zero, which is
+    // what makes `P` non-constant — the off-point a general interpolation adds
+    // to square its system is, for a line, just the slope being chosen rather
+    // than solved. `a0` then follows in closed form.
+    //
+    // The statements mirror the arithmetic the coefficients were solved
+    // against, step for step, including that `%` truncates toward zero.
+    class ArithmeticPolicy : public DataflowPolicy {
+    public:
+      const char *name() const override { return "prime-line"; }
+
+      std::optional<DataflowResult> build(
+          const DataflowSite &site, std::uint32_t bits, std::int64_t target, NameAllocator &names,
+          std::mt19937 &rng
+      ) override {
+        const std::int64_t p = fieldFor(bits);
+        if (p == 0)
+          return std::nullopt;
+        std::vector<Pin> pins = stablePins(site, bits);
+        if (pins.empty())
+          return std::nullopt;
+        std::uniform_int_distribution<std::size_t> pickPin(0, pins.size() - 1);
+        const Pin &pin = pins[pickPin(rng)];
+
+        const std::int64_t r = residue(pin.value, p);
+        const std::int64_t cm = residue(target, p);
+        std::uniform_int_distribution<std::int64_t> pickSlope(1, p - 1);
+        const std::int64_t a1 = pickSlope(rng);
+        const std::int64_t a0 = residue(cm - a1 * r, p);
+
+        DataflowResult result;
+        const TypePtr type = buildIntType(static_cast<int>(bits));
+        const std::string mod = names.literal(p, type, result.lets);
+        const std::string acc = names.fresh(type, result.lets);
+
+        // r = ((%v % p) + p) % p, so the residue is non-negative before it is
+        // scaled — a truncated `%` on a negative variable would otherwise put
+        // the line's input outside the field.
+        emit(result, acc, buildBinAtom(pin.name, AtomOpKind::Mod, mod));
+        emitTail(result, acc, AddOp::Plus, p);
+        emit(result, acc, buildBinAtom(acc, AtomOpKind::Mod, mod));
+        // P(r), reduced after the product so the sum that follows stays under
+        // 2p rather than p*p + p.
+        emit(result, acc, buildOpAtom(Coef{IntLit{a1, {}}}, AtomOpKind::Mul, acc));
+        emit(result, acc, buildBinAtom(acc, AtomOpKind::Mod, mod));
+        emitTail(result, acc, AddOp::Plus, a0);
+        emit(result, acc, buildBinAtom(acc, AtomOpKind::Mod, mod));
+
+        // `- cm + target` rather than one folded constant: `target - cm` can
+        // fall outside the width when the target sits near its end, while the
+        // two steps each stay inside it.
+        result.value = buildExpr(buildLocalAtom(acc));
+        if (cm != 0)
+          appendTail(result.value, AddOp::Minus, buildIntAtom(cm));
+        if (target != 0)
+          appendTail(result.value, AddOp::Plus, buildIntAtom(target));
+        return result;
+      }
+
+    private:
+      static void emit(DataflowResult &out, const std::string &dst, Atom rhs) {
+        out.stmts.push_back(buildAssign(buildLValue(dst), buildExpr(std::move(rhs))));
+      }
+
+      static void emitTail(DataflowResult &out, const std::string &dst, AddOp op, std::int64_t v) {
+        Expr e = buildExpr(buildLocalAtom(dst));
+        appendTail(e, op, buildIntAtom(v));
+        out.stmts.push_back(buildAssign(buildLValue(dst), std::move(e)));
+      }
+    };
+
   } // namespace
+
+  std::unique_ptr<DataflowPolicy> makeArithmeticPolicy() {
+    return std::make_unique<ArithmeticPolicy>();
+  }
 
   std::unique_ptr<DataflowPolicy> makeBaselinePolicy() {
     return std::make_unique<BaselinePolicy>();
@@ -164,7 +286,7 @@ namespace refractir::reify {
 
   std::optional<DataflowResult> buildArgument(
       const std::vector<std::unique_ptr<DataflowPolicy>> &policies, const DataflowSite &site,
-      std::uint32_t bits, std::int64_t target, std::mt19937 &rng
+      std::uint32_t bits, std::int64_t target, NameAllocator &names, std::mt19937 &rng
   ) {
     std::vector<DataflowPolicy *> order;
     order.reserve(policies.size());
@@ -172,7 +294,7 @@ namespace refractir::reify {
       order.push_back(policy.get());
     std::shuffle(order.begin(), order.end(), rng);
     for (DataflowPolicy *policy: order) {
-      if (auto result = policy->build(site, bits, target, rng))
+      if (auto result = policy->build(site, bits, target, names, rng))
         return result;
     }
     return std::nullopt;

@@ -29,9 +29,15 @@
 #include <vector>
 
 #include "ast/ast.hpp"
+#include "reify/name_alloc.hpp"
 #include "reify/state_profile.hpp"
 
 namespace refractir::reify {
+
+  // Every local a policy introduces starts with this, so the rule that splices
+  // calls can tell a policy's scratch from the program's own variables and
+  // never offers one back as a rewrite site.
+  inline constexpr const char *kDataflowLocalPrefix = "%__df";
 
   // One integer variable the caller holds where the argument is built, and the
   // value it holds there. Only integer scalars appear: they are what an
@@ -65,9 +71,12 @@ namespace refractir::reify {
     virtual const char *name() const = 0;
 
     // An argument of `bits` width evaluating to `target` at every visit in
-    // `site`, or nullopt to decline.
-    [[nodiscard]] virtual std::optional<DataflowResult>
-    build(const DataflowSite &site, std::uint32_t bits, std::int64_t target, std::mt19937 &rng) = 0;
+    // `site`, or nullopt to decline. `names` allocates any temporaries the
+    // construction needs, declaring them into the result's own `lets`.
+    [[nodiscard]] virtual std::optional<DataflowResult> build(
+        const DataflowSite &site, std::uint32_t bits, std::int64_t target, NameAllocator &names,
+        std::mt19937 &rng
+    ) = 0;
   };
 
   // A literal, or `%v + bias` over a variable the profiled run pins. The floor
@@ -80,6 +89,12 @@ namespace refractir::reify {
   // pinned.
   [[nodiscard]] std::unique_ptr<DataflowPolicy> makeBitwisePolicy();
 
+  // A line through the pin over a prime field, evaluated in the argument's own
+  // width. The field bounds every intermediate, which is what lets the
+  // construction carry a coefficient at all; it also shrinks with the width,
+  // so this declines where no usable prime fits.
+  [[nodiscard]] std::unique_ptr<DataflowPolicy> makeArithmeticPolicy();
+
   // The pins at `blockLabel`, one set per visit the profiled run made to it.
   // Points inside a block are ignored — an argument is built at a block's head,
   // so the state on entry is the state it sees.
@@ -91,7 +106,7 @@ namespace refractir::reify {
   // site gets among those that can serve it.
   [[nodiscard]] std::optional<DataflowResult> buildArgument(
       const std::vector<std::unique_ptr<DataflowPolicy>> &policies, const DataflowSite &site,
-      std::uint32_t bits, std::int64_t target, std::mt19937 &rng
+      std::uint32_t bits, std::int64_t target, NameAllocator &names, std::mt19937 &rng
   );
 
 } // namespace refractir::reify

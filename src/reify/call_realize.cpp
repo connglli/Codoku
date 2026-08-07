@@ -191,6 +191,7 @@ namespace refractir::reify {
       LiteralToCallRule() {
         policies_.push_back(makeBaselinePolicy());
         policies_.push_back(makeBitwisePolicy());
+        policies_.push_back(makeArithmeticPolicy());
       }
 
       const char *name() const override { return "LiteralToCall"; }
@@ -214,6 +215,10 @@ namespace refractir::reify {
           // is dead computation. Filtering it out at the source rule
           // saves a wasted attempt budget per edge.
           if (ld.name.name == "%_chk")
+            continue;
+          // A local an earlier splice introduced to compute an argument. Its
+          // initializer is scaffolding, not a constant the program computes.
+          if (ld.name.name.rfind(kDataflowLocalPrefix, 0) == 0)
             continue;
           // Only scalar literal initializers — Atom-form inits are
           // skipped (they're already calls/loads/etc.) and aggregate
@@ -390,6 +395,7 @@ namespace refractir::reify {
         ca.callee = gid;
         std::vector<LetDecl> argLets;
         std::vector<Instr> argStmts;
+        NameAllocator names(std::string(kDataflowLocalPrefix) + std::to_string(spliceSeq_++) + "_");
         for (size_t i = 0; i < callee.params.size(); ++i) {
           const auto &paramType = callee.params[i].type;
           const auto &paramValStr = rz.paramValues[i].second;
@@ -397,7 +403,7 @@ namespace refractir::reify {
           const int paramBits = intTypeBits(paramType);
           if (auto target = paramBits > 0 ? parseI64(paramValStr) : std::nullopt) {
             if (auto built = buildArgument(
-                    policies_, pins, static_cast<std::uint32_t>(paramBits), *target, rng
+                    policies_, pins, static_cast<std::uint32_t>(paramBits), *target, names, rng
                 )) {
               argLets.insert(
                   argLets.end(), std::make_move_iterator(built->lets.begin()),
@@ -498,6 +504,9 @@ namespace refractir::reify {
       // Drawn from per argument. The order they are asked in is the draw; each
       // one either states the target or passes.
       std::vector<std::unique_ptr<DataflowPolicy>> policies_;
+      // Distinguishes one splice's scratch locals from the next's, since each
+      // allocator only sees the declarations it makes itself.
+      std::size_t spliceSeq_ = 0;
     };
 
   } // namespace

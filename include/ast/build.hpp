@@ -39,6 +39,16 @@ namespace refractir {
     return std::make_shared<Type>(Type{IntType{IntType::Kind::ICustom, 1, {}}, {}});
   }
 
+  // `iN` for a width computed at run time. `i32` and `i64` keep their own
+  // spelling, since those two are what the rest of the tree compares against.
+  [[nodiscard]] inline TypePtr buildIntType(int bits) {
+    if (bits == 32)
+      return buildI32();
+    if (bits == 64)
+      return buildI64();
+    return std::make_shared<Type>(Type{IntType{IntType::Kind::ICustom, bits, {}}, {}});
+  }
+
   // --- lvalues --------------------------------------------------------------
 
   [[nodiscard]] inline LValue buildLValue(const std::string &name) {
