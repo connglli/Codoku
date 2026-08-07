@@ -48,6 +48,18 @@ namespace refractir::reify {
       return stable;
     }
 
+    // The signed `iN` value whose low `bits` bits are `value`'s. Bitwise work
+    // is done on 64-bit patterns and has to come back as a literal the
+    // argument's own width can carry.
+    [[nodiscard]] std::int64_t signExtend(std::int64_t value, std::uint32_t bits) {
+      if (bits == 0 || bits >= 64)
+        return value;
+      const std::uint64_t low =
+          static_cast<std::uint64_t>(value) & ((std::uint64_t{1} << bits) - 1);
+      const std::uint64_t signBit = std::uint64_t{1} << (bits - 1);
+      return static_cast<std::int64_t>((low ^ signBit) - signBit);
+    }
+
     // `%v + bias`, or bare `%v` when the variable already holds the target.
     [[nodiscard]] Expr biasExpr(const Pin &pin, std::int64_t bias) {
       Expr e = buildExpr(buildLocalAtom(pin.name));
@@ -98,11 +110,42 @@ namespace refractir::reify {
       }
     };
 
+    // `k ^ %v`, with `k` the target XOR what the variable is pinned to. XOR is
+    // its own inverse, so the pin cancels and the target is what is left.
+    //
+    // It is total: `^` cannot trap, and its constant fits the argument's width
+    // whatever the pin holds, so no pin is ever too far from the target to
+    // state. That edge over a bias is real but narrow, since a bias reaches
+    // nearly every target as well. What this is in the catalog for is the
+    // surface — bit patterns are a different body of optimizer rules from
+    // sums, and a site draws one construction or the other.
+    class BitwisePolicy : public DataflowPolicy {
+    public:
+      const char *name() const override { return "xor-pin"; }
+
+      std::optional<DataflowResult> build(
+          const DataflowSite &site, std::uint32_t bits, std::int64_t target, std::mt19937 &rng
+      ) override {
+        std::vector<Pin> pins = stablePins(site, bits);
+        if (pins.empty())
+          return std::nullopt;
+        std::uniform_int_distribution<std::size_t> pick(0, pins.size() - 1);
+        const Pin &pin = pins[pick(rng)];
+        DataflowResult result;
+        result.value = buildExpr(buildOpAtom(
+            Coef{IntLit{signExtend(target ^ pin.value, bits), {}}}, AtomOpKind::Xor, pin.name
+        ));
+        return result;
+      }
+    };
+
   } // namespace
 
   std::unique_ptr<DataflowPolicy> makeBaselinePolicy() {
     return std::make_unique<BaselinePolicy>();
   }
+
+  std::unique_ptr<DataflowPolicy> makeBitwisePolicy() { return std::make_unique<BitwisePolicy>(); }
 
   DataflowSite pinsAtBlock(const StateProfile &profile, const std::string &blockLabel) {
     DataflowSite site;

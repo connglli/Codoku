@@ -188,7 +188,10 @@ namespace refractir::reify {
 
     class LiteralToCallRule : public CallRewriteRule {
     public:
-      LiteralToCallRule() { policies_.push_back(makeBaselinePolicy()); }
+      LiteralToCallRule() {
+        policies_.push_back(makeBaselinePolicy());
+        policies_.push_back(makeBitwisePolicy());
+      }
 
       const char *name() const override { return "LiteralToCall"; }
 

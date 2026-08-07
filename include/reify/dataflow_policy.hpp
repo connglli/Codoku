@@ -75,6 +75,11 @@ namespace refractir::reify {
   // reaching this policy always leaves with an argument.
   [[nodiscard]] std::unique_ptr<DataflowPolicy> makeBaselinePolicy();
 
+  // `k ^ %v` over a variable the profiled run pins. Total at every width, so
+  // it states targets a bias has no literal to reach; declines when nothing is
+  // pinned.
+  [[nodiscard]] std::unique_ptr<DataflowPolicy> makeBitwisePolicy();
+
   // The pins at `blockLabel`, one set per visit the profiled run made to it.
   // Points inside a block are ignored — an argument is built at a block's head,
   // so the state on entry is the state it sees.
