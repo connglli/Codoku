@@ -105,16 +105,22 @@ namespace refractir::reify {
       }
     };
 
-    // Variables of `bits` width live at every visit. Their values may differ
-    // between visits — that is what a construction reading several states has
-    // to cope with, and what makes them worth reading.
-    [[nodiscard]] std::vector<std::string> liveVars(const DataflowSite &site, std::uint32_t bits) {
+    // An integer variable live at every visit, and the width it was declared
+    // at. Its values may differ between visits — that is what a construction
+    // reading several states has to cope with, and what makes them worth
+    // reading. Width is carried rather than filtered on: a variable of another
+    // width is reached by casting, which for integers truncates rather than
+    // traps and so costs nothing but a statement.
+    struct LiveVar {
+      std::string name;
+      std::uint32_t bits = 0;
+    };
+
+    [[nodiscard]] std::vector<LiveVar> liveVars(const DataflowSite &site) {
       if (site.visits.empty())
         return {};
-      std::vector<std::string> live;
+      std::vector<LiveVar> live;
       for (const Pin &pin: site.visits.front()) {
-        if (pin.bits != bits)
-          continue;
         const bool everywhere = std::all_of(
             site.visits.begin() + 1, site.visits.end(), [&](const std::vector<Pin> &visit) {
               return std::any_of(visit.begin(), visit.end(), [&](const Pin &other) {
@@ -123,9 +129,22 @@ namespace refractir::reify {
             }
         );
         if (everywhere)
-          live.push_back(pin.name);
+          live.push_back(LiveVar{pin.name, pin.bits});
       }
       return live;
+    }
+
+    // A cell holding `v` at `bits`, which is `v` itself when it is already
+    // that wide and a cast into a fresh cell when it is not.
+    [[nodiscard]] std::string atWidth(
+        const LiveVar &v, std::uint32_t bits, const TypePtr &type, NameAllocator &names,
+        DataflowResult &out
+    ) {
+      if (v.bits == bits)
+        return v.name;
+      const std::string cell = names.fresh(type, out.lets);
+      out.stmts.push_back(buildAssign(buildLValue(cell), buildExpr(buildCastAtom(v.name, type))));
+      return cell;
     }
 
     [[nodiscard]] std::int64_t valueAt(const std::vector<Pin> &visit, const std::string &name) {
@@ -136,8 +155,8 @@ namespace refractir::reify {
     }
 
     // Draw a non-empty subset, capped so an argument stays readable.
-    [[nodiscard]] std::vector<std::string>
-    pickSubset(std::vector<std::string> vars, std::size_t cap, std::mt19937 &rng) {
+    [[nodiscard]] std::vector<LiveVar>
+    pickSubset(std::vector<LiveVar> vars, std::size_t cap, std::mt19937 &rng) {
       std::shuffle(vars.begin(), vars.end(), rng);
       std::uniform_int_distribution<std::size_t> howMany(1, std::min(cap, vars.size()));
       vars.resize(howMany(rng));
@@ -162,16 +181,16 @@ namespace refractir::reify {
           const DataflowSite &site, std::uint32_t bits, std::int64_t target, NameAllocator &names,
           std::mt19937 &rng
       ) override {
-        const std::vector<std::string> live = liveVars(site, bits);
+        const std::vector<LiveVar> live = liveVars(site);
         if (live.empty())
           return std::nullopt;
-        const std::vector<std::string> probe = pickSubset(live, rylink::hp::kMaxProbeVars, rng);
+        const std::vector<LiveVar> probe = pickSubset(live, rylink::hp::kMaxProbeVars, rng);
 
         std::vector<std::int64_t> seen;
         for (const auto &visit: site.visits) {
           std::int64_t g = 0;
-          for (const auto &name: probe)
-            g ^= valueAt(visit, name);
+          for (const auto &v: probe)
+            g ^= signExtend(valueAt(visit, v.name), bits);
           seen.push_back(signExtend(g, bits));
         }
         std::sort(seen.begin(), seen.end());
@@ -181,7 +200,7 @@ namespace refractir::reify {
 
         DataflowResult result;
         const TypePtr type = buildIntType(static_cast<int>(bits));
-        const std::string g = foldProbe(probe, type, names, result);
+        const std::string g = foldProbe(probe, bits, type, names, result);
         const std::string mask = names.fresh(type, result.lets);
         emit(result, mask, buildOpAtom(Coef{IntLit{seen.front(), {}}}, AtomOpKind::Xor, g));
         if (seen.size() > 1) {
@@ -199,15 +218,19 @@ namespace refractir::reify {
       // The name holding `g`. A single variable is already the fold, so only a
       // longer probe needs a cell of its own.
       [[nodiscard]] static std::string foldProbe(
-          const std::vector<std::string> &probe, const TypePtr &type, NameAllocator &names,
-          DataflowResult &out
+          const std::vector<LiveVar> &probe, std::uint32_t bits, const TypePtr &type,
+          NameAllocator &names, DataflowResult &out
       ) {
-        if (probe.size() == 1)
-          return probe.front();
+        std::vector<std::string> cells;
+        cells.reserve(probe.size());
+        for (const auto &v: probe)
+          cells.push_back(atWidth(v, bits, type, names, out));
+        if (cells.size() == 1)
+          return cells.front();
         const std::string g = names.fresh(type, out.lets);
-        emit(out, g, buildLocalAtom(probe.front()));
-        for (std::size_t i = 1; i < probe.size(); ++i)
-          emit(out, g, buildBinAtom(g, AtomOpKind::Xor, probe[i]));
+        emit(out, g, buildLocalAtom(cells.front()));
+        for (std::size_t i = 1; i < cells.size(); ++i)
+          emit(out, g, buildBinAtom(g, AtomOpKind::Xor, cells[i]));
         return g;
       }
 
@@ -389,12 +412,12 @@ namespace refractir::reify {
         const std::int64_t p = fieldFor(bits);
         if (p == 0)
           return std::nullopt;
-        const std::vector<std::string> live = liveVars(site, bits);
+        const std::vector<LiveVar> live = liveVars(site);
         if (live.empty())
           return std::nullopt;
-        const std::vector<std::string> probe = pickSubset(live, rylink::hp::kMaxProbeVars, rng);
+        const std::vector<LiveVar> probe = pickSubset(live, rylink::hp::kMaxProbeVars, rng);
 
-        std::vector<std::vector<std::int64_t>> points = constraintPoints(site, probe, p);
+        std::vector<std::vector<std::int64_t>> points = constraintPoints(site, probe, bits, p);
         if (points.empty() || points.size() >= rylink::hp::kMaxConstraintPoints)
           return std::nullopt;
 
@@ -435,14 +458,15 @@ namespace refractir::reify {
       // The distinct residue vectors the probe takes across the visits. Two
       // visits agreeing on the probe are one constraint, not two.
       [[nodiscard]] static std::vector<std::vector<std::int64_t>> constraintPoints(
-          const DataflowSite &site, const std::vector<std::string> &probe, std::int64_t p
+          const DataflowSite &site, const std::vector<LiveVar> &probe, std::uint32_t bits,
+          std::int64_t p
       ) {
         std::vector<std::vector<std::int64_t>> points;
         for (const auto &visit: site.visits) {
           std::vector<std::int64_t> point;
           point.reserve(probe.size());
-          for (const auto &name: probe)
-            point.push_back(residue(valueAt(visit, name), p));
+          for (const auto &v: probe)
+            point.push_back(residue(signExtend(valueAt(visit, v.name), bits), p));
           if (std::find(points.begin(), points.end(), point) == points.end())
             points.push_back(std::move(point));
         }
@@ -476,7 +500,7 @@ namespace refractir::reify {
 
       // Evaluate the polynomial, then carry its residue back onto the target.
       [[nodiscard]] static DataflowResult emitPolynomial(
-          const std::vector<std::string> &probe, const std::vector<std::vector<int>> &chosen,
+          const std::vector<LiveVar> &probe, const std::vector<std::vector<int>> &chosen,
           const std::vector<std::int64_t> &coefficients, std::int64_t p, std::int64_t cm,
           std::int64_t target, std::uint32_t bits, NameAllocator &names
       ) {
@@ -487,9 +511,10 @@ namespace refractir::reify {
         // Each variable enters the field first: a truncated `%` on a negative
         // value lands outside `[0, p)`, which every product below assumes.
         std::vector<std::string> residues;
-        for (const auto &name: probe) {
+        for (const auto &v: probe) {
+          const std::string source = atWidth(v, bits, type, names, result);
           const std::string cell = names.fresh(type, result.lets);
-          emit(result, cell, buildBinAtom(name, AtomOpKind::Mod, mod));
+          emit(result, cell, buildBinAtom(source, AtomOpKind::Mod, mod));
           emitTail(result, cell, AddOp::Plus, p);
           emit(result, cell, buildBinAtom(cell, AtomOpKind::Mod, mod));
           residues.push_back(cell);

@@ -93,6 +93,12 @@ namespace refractir {
     return buildOpAtom(Coef{LocalOrSymId{LocalId{left, {}}}}, op, right);
   }
 
+  // `%x as T`. Integer casts truncate rather than trap, so widening or
+  // narrowing one is total whatever the value.
+  [[nodiscard]] inline Atom buildCastAtom(const std::string &x, TypePtr dst) {
+    return Atom{CastAtom{CastAtom::Variant{buildLValue(x)}, std::move(dst), {}}, {}};
+  }
+
   // `~%x`, the only unary operator RefractIR has.
   [[nodiscard]] inline Atom buildNotAtom(const std::string &x) {
     return Atom{UnaryAtom{UnaryOpKind::Not, buildLValue(x), {}}, {}};
