@@ -487,12 +487,13 @@ namespace refractir::reify::rylink::hp {
   }
 
   // Per call-argument choice between the two argument modes
-  // The literal-or-bias policy spells an argument either as the solved value
-  // itself or as `%var + bias` over a variable the profiled run pins at the
-  // splice point. kPVarBiasArg is the chance it reaches for the second; a plain
+  // Whether one call argument is stated in terms of what the caller holds
+  // where the call lands, rather than as the value the solver picked. A plain
   // literal is the control case every richer construction is measured against,
-  // so the coin is what keeps some in the output.
-  inline constexpr double kPVarBiasArg = 0.50;
+  // so this is what keeps some of them in the output — and it is the only
+  // place that decision is made, so the policies below are peers that either
+  // state the target or pass.
+  inline constexpr double kPReplaceParam = 0.85;
 
   // ===========================================================================
   // Dataflow policies

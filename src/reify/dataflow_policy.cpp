@@ -81,25 +81,9 @@ namespace refractir::reify {
           const DataflowSite &site, std::uint32_t bits, std::int64_t target, NameAllocator &,
           std::mt19937 &rng
       ) override {
-        DataflowResult result;
-        result.value = biasedOrLiteral(site, bits, target, rng);
-        return result;
-      }
-
-    private:
-      // A pinned variable carried to the target by a bias, falling back to the
-      // target spelled out. The fallback is why this policy never declines.
-      //
-      // The coin keeps plain literals in the mix. An argument the compiler can
-      // read straight off is the case every other construction is measured
-      // against, so a generator that never emits one has lost its control.
-      [[nodiscard]] static Expr biasedOrLiteral(
-          const DataflowSite &site, std::uint32_t bits, std::int64_t target, std::mt19937 &rng
-      ) {
-        std::uniform_real_distribution<double> coin(0.0, 1.0);
-        if (coin(rng) >= rylink::hp::kPVarBiasArg)
-          return buildIntExpr(target);
         std::vector<Pin> pins = stablePins(site, bits);
+        if (pins.empty())
+          return std::nullopt;
         const SignedRange range = signedRange(bits);
         std::shuffle(pins.begin(), pins.end(), rng);
         for (const Pin &pin: pins) {
@@ -113,9 +97,11 @@ namespace refractir::reify {
           // which emits a subtraction that overflows at run time.
           if (bias < -range.hi || bias > range.hi)
             continue;
-          return biasExpr(pin, bias);
+          DataflowResult result;
+          result.value = biasExpr(pin, bias);
+          return result;
         }
-        return buildIntExpr(target);
+        return std::nullopt;
       }
     };
 

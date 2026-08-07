@@ -345,13 +345,18 @@ namespace refractir::reify {
         ca.callee = gid;
         std::vector<LetDecl> argLets;
         std::vector<Instr> argStmts;
+        std::uniform_real_distribution<double> coin(0.0, 1.0);
         NameAllocator names(std::string(kDataflowLocalPrefix) + std::to_string(spliceSeq_++) + "_");
         for (size_t i = 0; i < callee.params.size(); ++i) {
           const auto &paramType = callee.params[i].type;
           const auto &paramValStr = rz.paramValues[i].second;
           std::optional<Expr> argExpr;
           const int paramBits = intTypeBits(paramType);
-          if (auto target = paramBits > 0 ? parseI64(paramValStr) : std::nullopt) {
+          // Whether this argument is stated in terms of the caller's state at
+          // all. The solved literal is the alternative, and keeping some of
+          // them is what leaves a compiler something to compare against.
+          const bool replace = coin(rng) < rylink::hp::kPReplaceParam;
+          if (auto target = replace && paramBits > 0 ? parseI64(paramValStr) : std::nullopt) {
             if (auto built = buildArgument(
                     policies_, pins, static_cast<std::uint32_t>(paramBits), *target, names, rng
                 )) {
