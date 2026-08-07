@@ -12,6 +12,7 @@
 
 #include "analysis/type_utils.hpp"
 #include "ast/sir_printer.hpp"
+#include "reify/dataflow_policy.hpp"
 #include "reify/hyperparameters.hpp"
 
 namespace refractir::reify {
@@ -46,6 +47,15 @@ namespace refractir::reify {
     } catch (...) {
       return std::nullopt;
     }
+  }
+
+  // Width of an `iN` SIR type string, or 0 for anything else. Descriptors
+  // carry parameter types as surface syntax, and the width is all a dataflow
+  // policy needs to know about an integer one.
+  static int intTypeBits(const std::string &sirType) {
+    if (sirType.size() < 2 || sirType[0] != 'i')
+      return 0;
+    return std::max(0, std::atoi(sirType.c_str() + 1));
   }
 
   // ---------------------------------------------------------------------------
@@ -84,24 +94,9 @@ namespace refractir::reify {
     return e;
   }
 
-  // ---------------------------------------------------------------------------
-  // Var+bias call arg
-  //
-  // Build `%var + bias` for an integer call argument. `paramType` is the
-  // callee's i<N> param type as a SIR string; `expectedValStr` is the
-  // solved value the call should evaluate to. We scan the caller for
-  // int-typed mutable lets whose declared type matches and whose init
-  // is a literal we can read back, then pick uniformly. The chosen var's
-  // value is `var.let_init` at the splice site because the rewrite
-  // prepends to the head of the entry block — no user code has run yet.
-  //
-  // Returns nullopt when:
-  //   - parseI64(expectedValStr) fails (descriptor value malformed);
-  //   - no caller let matches the param type / has a literal init;
-  //   - the computed bias overflows the var's signed range (we use the
-  //     same conservative range check the call-site offset uses, so a
-  //     UBSan-clean C lowering is guaranteed).
-  // ---------------------------------------------------------------------------
+  // Does anything take `%var`'s address? A variable reached through a pointer
+  // can change without an assignment naming it, so a rewrite that relies on
+  // its value has to see that first.
   struct AddrChecker {
     const std::string &varName;
     bool addressTaken = false;
@@ -185,154 +180,6 @@ namespace refractir::reify {
     }
   };
 
-  static bool isVarConstantBeforeBlock(
-      const FunDecl &caller, const FuncDescriptor &callerDesc, const std::string &varName,
-      const std::string &targetBlockLabel
-  ) {
-    AddrChecker checker(varName);
-    for (const auto &block: caller.blocks) {
-      for (const auto &instr: block.instrs) {
-        checker.check(instr);
-      }
-      checker.check(block.term);
-    }
-    if (checker.addressTaken) {
-      return false;
-    }
-
-    auto it = std::find(callerDesc.path.begin(), callerDesc.path.end(), targetBlockLabel);
-    if (it == callerDesc.path.end()) {
-      return true;
-    }
-
-    std::unordered_set<std::string> checkedBlocks;
-    for (auto pathIt = callerDesc.path.begin(); pathIt != it; ++pathIt) {
-      const std::string &blockLabel = *pathIt;
-      if (checkedBlocks.count(blockLabel)) {
-        continue;
-      }
-      checkedBlocks.insert(blockLabel);
-
-      const Block *blockPtr = nullptr;
-      for (const auto &b: caller.blocks) {
-        if (b.label.name == blockLabel) {
-          blockPtr = &b;
-          break;
-        }
-      }
-      if (!blockPtr) {
-        continue;
-      }
-
-      for (const auto &instr: blockPtr->instrs) {
-        if (auto assign = std::get_if<AssignInstr>(&instr)) {
-          if (assign->lhs.base.name == varName) {
-            return false;
-          }
-        }
-      }
-    }
-
-    return true;
-  }
-
-  // ---------------------------------------------------------------------------
-  // Var+bias call arg
-  //
-  // Build `%var + bias` for an integer call argument. `paramType` is the
-  // callee's i<N> param type as a SIR string; `expectedValStr` is the
-  // solved value the call should evaluate to. We scan the caller for
-  // int-typed mutable lets whose declared type matches and whose init
-  // is a literal we can read back, then pick uniformly. The chosen var's
-  // value must be unchanged along the execution path prior to targetBlockLabel.
-  //
-  // Returns nullopt when:
-  //   - parseI64(expectedValStr) fails (descriptor value malformed);
-  //   - no caller let matches the param type / has a literal init;
-  //   - the computed bias overflows the var's signed range (we use the
-  //     same conservative range check the call-site offset uses, so a
-  //     UBSan-clean C lowering is guaranteed).
-  // ---------------------------------------------------------------------------
-  static std::optional<Expr> tryMakeVarBiasArg(
-      const FunDecl &caller, const FuncDescriptor &callerDesc, const std::string &targetBlockLabel,
-      const std::string &paramType, const std::string &expectedValStr, std::mt19937 &rng
-  ) {
-    auto expectedOpt = parseI64(expectedValStr);
-    if (!expectedOpt)
-      return std::nullopt;
-    int paramBits = std::atoi(paramType.c_str() + 1);
-    if (paramBits <= 0)
-      return std::nullopt;
-
-    struct Cand {
-      const LetDecl *ld;
-      std::int64_t initVal;
-    };
-
-    std::vector<Cand> cands;
-    cands.reserve(caller.lets.size());
-    for (const auto &ld: caller.lets) {
-      if (!ld.isMutable)
-        continue;
-      if (!ld.init || ld.init->kind != InitVal::Kind::Int)
-        continue;
-      if (SIRPrinter::typeToString(ld.type) != paramType)
-        continue;
-      if (!isVarConstantBeforeBlock(caller, callerDesc, ld.name.name, targetBlockLabel))
-        continue;
-      cands.push_back({&ld, std::get<IntLit>(ld.init->value).value});
-    }
-    if (cands.empty())
-      return std::nullopt;
-
-    std::uniform_int_distribution<size_t> pick(0, cands.size() - 1);
-    const Cand &c = cands[pick(rng)];
-
-    // bias = expected - var.let_init. Same overflow + range check the
-    // call-site offset uses — keeps the C lowering UBSan-clean and
-    // makes the wrap math observably identical to the literal path.
-    std::int64_t bias = 0;
-    if (__builtin_sub_overflow((std::int64_t) *expectedOpt, c.initVal, &bias))
-      return std::nullopt;
-    if (paramBits < 64) {
-      std::int64_t maxv = (std::int64_t{1} << (paramBits - 1)) - 1;
-      std::int64_t minv = -(std::int64_t{1} << (paramBits - 1));
-      if (bias < minv || bias > maxv)
-        return std::nullopt;
-    }
-
-    LValue lv;
-    lv.base = c.ld->name;
-    Atom varAtom;
-    varAtom.v = RValueAtom{lv, {}};
-    Expr e;
-    e.first = std::move(varAtom);
-    if (bias != 0) {
-      IntLit lit;
-      lit.value = bias;
-      Coef coef = lit;
-      CoefAtom ca;
-      ca.coef = coef;
-      Atom biasAtom;
-      biasAtom.v = std::move(ca);
-      Expr::Tail tail;
-      tail.op = (bias >= 0) ? AddOp::Plus : AddOp::Minus;
-      // For Minus we negate the literal so the tail reads `... - |bias|`.
-      // Negating INT64_MIN would overflow, so guard against it; the
-      // bias range check above already rejects values where -bias
-      // can't be represented in the param's signed range, but bias
-      // can still equal INT64_MIN for paramBits=64.
-      if (tail.op == AddOp::Minus) {
-        if (bias == std::numeric_limits<std::int64_t>::min())
-          return std::nullopt;
-        std::get<IntLit>(std::get<CoefAtom>(biasAtom.v).coef).value = -bias;
-      }
-      tail.atom = std::move(biasAtom);
-      e.rest.push_back(std::move(tail));
-    }
-    return e;
-  }
-
   // ---------------------------------------------------------------------------
   // LiteralToCallRule
   // ---------------------------------------------------------------------------
@@ -341,6 +188,8 @@ namespace refractir::reify {
 
     class LiteralToCallRule : public CallRewriteRule {
     public:
+      LiteralToCallRule() { policies_.push_back(makeBaselinePolicy()); }
+
       const char *name() const override { return "LiteralToCall"; }
 
       std::vector<CallRewriteSite> findSites(const FunDecl &caller) override {
@@ -405,8 +254,9 @@ namespace refractir::reify {
       }
 
       bool apply(
-          FunDecl &caller, const FuncDescriptor &callerDesc, const CallRewriteSite &site,
-          const FuncDescriptor &callee, std::size_t realizationIdx, std::mt19937 &rng
+          FunDecl &caller, const FuncDescriptor &callerDesc, const StateProfile *callerProfile,
+          const CallRewriteSite &site, const FuncDescriptor &callee, std::size_t realizationIdx,
+          std::mt19937 &rng
       ) override {
         if (site.letIdx < 0 || (size_t) site.letIdx >= caller.lets.size())
           return false;
@@ -525,24 +375,37 @@ namespace refractir::reify {
           return false;
         }
 
-        // Build the call atom. Each arg is either a bare literal
-        // (matching the solver's paramValue) or `%var + bias` where
-        // %var is a caller scalar of the same type that is constant
-        // along the execution path prior to targetBlockIdx.
+        // Build the call atom. An integer argument goes to the dataflow
+        // policies, which state the callee's solved value in terms of what the
+        // caller holds where the call lands; anything else is spelled out.
+        const DataflowSite pins =
+            callerProfile ? pinsAtBlock(*callerProfile, caller.blocks[*targetBlockIdx].label.name)
+                          : DataflowSite{};
         CallAtom ca;
         GlobalId gid;
         gid.name = callee.name;
         ca.callee = gid;
-        std::uniform_real_distribution<double> uni(0.0, 1.0);
+        std::vector<LetDecl> argLets;
+        std::vector<Instr> argStmts;
         for (size_t i = 0; i < callee.params.size(); ++i) {
           const auto &paramType = callee.params[i].type;
           const auto &paramValStr = rz.paramValues[i].second;
           std::optional<Expr> argExpr;
-          if (paramType.size() >= 2 && paramType[0] == 'i' && uni(rng) < rylink::hp::kPVarBiasArg) {
-            argExpr = tryMakeVarBiasArg(
-                caller, callerDesc, caller.blocks[*targetBlockIdx].label.name, paramType,
-                paramValStr, rng
-            );
+          const int paramBits = intTypeBits(paramType);
+          if (auto target = paramBits > 0 ? parseI64(paramValStr) : std::nullopt) {
+            if (auto built = buildArgument(
+                    policies_, pins, static_cast<std::uint32_t>(paramBits), *target, rng
+                )) {
+              argLets.insert(
+                  argLets.end(), std::make_move_iterator(built->lets.begin()),
+                  std::make_move_iterator(built->lets.end())
+              );
+              argStmts.insert(
+                  argStmts.end(), std::make_move_iterator(built->stmts.begin()),
+                  std::make_move_iterator(built->stmts.end())
+              );
+              argExpr = std::move(built->value);
+            }
           }
           if (!argExpr)
             argExpr = makeScalarLitExpr(paramType, paramValStr);
@@ -612,11 +475,26 @@ namespace refractir::reify {
         ai.lhs.base = caller.lets[site.letIdx].name;
         ai.rhs = std::move(rhs);
 
-        caller.blocks[*targetBlockIdx].instrs.insert(
-            caller.blocks[*targetBlockIdx].instrs.begin(), Instr{std::move(ai)}
+        // The argument statements run ahead of the call, and both go to the
+        // head of the block: an argument is stated in terms of the state on
+        // entry, so nothing the block itself does may run first.
+        argStmts.push_back(Instr{std::move(ai)});
+        auto &instrs = caller.blocks[*targetBlockIdx].instrs;
+        instrs.insert(
+            instrs.begin(), std::make_move_iterator(argStmts.begin()),
+            std::make_move_iterator(argStmts.end())
+        );
+        caller.lets.insert(
+            caller.lets.end(), std::make_move_iterator(argLets.begin()),
+            std::make_move_iterator(argLets.end())
         );
         return true;
       }
+
+    private:
+      // Drawn from per argument. The order they are asked in is the draw; each
+      // one either states the target or passes.
+      std::vector<std::unique_ptr<DataflowPolicy>> policies_;
     };
 
   } // namespace
@@ -831,11 +709,10 @@ namespace refractir::reify {
   //
   // - If `randomize` is true (for unexecuted blocks), we synthesize random
   //   arguments or pick matching variables since they are never executed and cannot trigger UB.
-  // - If `randomize` is false (for the executed path fallback call), we MUST
-  //   use only exact literal constants representing the callee's solved param
-  //   values. We avoid tryMakeVarBiasArg here because if the caller's entry block
-  //   is re-entered via a back-edge loop, local variables used in bias math
-  //   will have been mutated, leading to incorrect arguments and runtime UB.
+  // - If `randomize` is false, we use only exact literal constants
+  //   representing the callee's solved param values. Arguments stated in terms
+  //   of caller variables are the dataflow policies' business, and they answer
+  //   to a splice point whose state is known — which an arbitrary block is not.
   // ---------------------------------------------------------------------------
   static std::optional<std::vector<std::shared_ptr<Expr>>> makeCallArgs(
       const FunDecl &caller, const FunDecl &calleeFn, const FuncDescriptor &callee,
@@ -1010,8 +887,9 @@ namespace refractir::reify {
   }
 
   RewriteReport CallRealizeTransform::rewriteEdge(
-      FunDecl &caller, const FuncDescriptor &callerDesc, const FunDecl &calleeFn,
-      const FuncDescriptor &callee, std::size_t fixedRealizationIdx, std::mt19937 &rng
+      FunDecl &caller, const FuncDescriptor &callerDesc, const StateProfile *callerProfile,
+      const FunDecl &calleeFn, const FuncDescriptor &callee, std::size_t fixedRealizationIdx,
+      std::mt19937 &rng
   ) {
     RewriteReport res;
 
@@ -1075,7 +953,9 @@ namespace refractir::reify {
           continue;
         if (uni(rng) >= pAccept)
           continue;
-        if (c.rule->apply(caller, callerDesc, c.site, callee, fixedRealizationIdx, rng)) {
+        if (c.rule->apply(
+                caller, callerDesc, callerProfile, c.site, callee, fixedRealizationIdx, rng
+            )) {
           consumed_.insert({&caller, c.site.letIdx});
           ++res.applied;
         }
@@ -1127,9 +1007,11 @@ namespace refractir::reify {
       if (callerDesc == ctx.descriptors.end() || calleeDesc == ctx.descriptors.end())
         continue;
 
+      auto callerProfile = ctx.profiles.find(e.caller);
       RewriteReport r = rewriteEdge(
-          *callerIt->second, callerDesc->second, *calleeIt->second, calleeDesc->second,
-          e.calleeRealizationIdx, ctx.rng
+          *callerIt->second, callerDesc->second,
+          callerProfile == ctx.profiles.end() ? nullptr : &callerProfile->second, *calleeIt->second,
+          calleeDesc->second, e.calleeRealizationIdx, ctx.rng
       );
       rep.sites += static_cast<std::size_t>(r.applied);
     }

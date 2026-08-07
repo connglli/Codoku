@@ -26,6 +26,7 @@
 #include "ast/ast.hpp"
 #include "reify/func_desc.hpp"
 #include "reify/rewrite.hpp"
+#include "reify/state_profile.hpp"
 #include "reify/transform.hpp"
 
 namespace refractir::reify {
@@ -67,12 +68,16 @@ namespace refractir::reify {
     ) = 0;
     // Splice the call in. Returns true on success; false if some
     // late-stage check fails (e.g. a param type the rule can't handle).
-    // `rng` is passed through so the rule can make randomised
-    // sub-decisions (e.g. per-arg choice of literal vs. var+bias) and
-    // still play nicely with the engine's shuffled-candidates order.
+    // `callerProfile` is the state the caller's own run passes through, which
+    // is what an argument built from the caller's variables is stated against;
+    // null when the tool captured none, leaving the rule its literal path.
+    // `rng` is passed through so the rule can make randomised sub-decisions
+    // (e.g. which dataflow policy states an argument) and still play nicely
+    // with the engine's shuffled-candidates order.
     virtual bool apply(
-        FunDecl &caller, const FuncDescriptor &callerDesc, const CallRewriteSite &site,
-        const FuncDescriptor &callee, std::size_t realizationIdx, std::mt19937 &rng
+        FunDecl &caller, const FuncDescriptor &callerDesc, const StateProfile *callerProfile,
+        const CallRewriteSite &site, const FuncDescriptor &callee, std::size_t realizationIdx,
+        std::mt19937 &rng
     ) = 0;
   };
 
@@ -142,8 +147,9 @@ namespace refractir::reify {
     // `callerDesc` supplies the metadata of the caller function (including
     // the concretized execution path to target unexecuted blocks safely).
     RewriteReport rewriteEdge(
-        FunDecl &caller, const FuncDescriptor &callerDesc, const FunDecl &calleeFn,
-        const FuncDescriptor &callee, std::size_t fixedRealizationIdx, std::mt19937 &rng
+        FunDecl &caller, const FuncDescriptor &callerDesc, const StateProfile *callerProfile,
+        const FunDecl &calleeFn, const FuncDescriptor &callee, std::size_t fixedRealizationIdx,
+        std::mt19937 &rng
     );
 
     CallRealizePlan plan_;
