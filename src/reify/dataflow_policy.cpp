@@ -105,7 +105,12 @@ namespace refractir::reify {
           std::int64_t bias = 0;
           if (__builtin_sub_overflow(target, pin.value, &bias))
             continue;
-          if (bias < range.lo || bias > range.hi)
+          // What reaches the program is the literal, and a negative bias is
+          // spelled `%v - |bias|`, so it is the negation that has to fit. The
+          // most negative value of a width has no positive counterpart there:
+          // at 64 bits negating it is undefined and hands back the same value,
+          // which emits a subtraction that overflows at run time.
+          if (bias < -range.hi || bias > range.hi)
             continue;
           return biasExpr(pin, bias);
         }
