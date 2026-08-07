@@ -44,6 +44,7 @@
 #include <vector>
 
 #include "ast/ast.hpp"
+#include "reify/name_alloc.hpp"
 #include "reify/twin_mini.hpp"
 #include "reify/twin_trace.hpp"
 
@@ -71,29 +72,6 @@ namespace refractir::reify {
   // its own scratch from the program's state — the two arms of a twin, for
   // instance, differ on exactly these and on nothing that outlives the block.
   inline constexpr const char *kAntiOptLocalPrefix = "%__ao";
-
-  // Fresh names for a body being rewritten. Temporaries are needed constantly:
-  // RefractIR admits at most one binary operator per atom, and the right
-  // operand of `* / % & | ^ << >> >>>` must be an lvalue — so `%a << 3` has to
-  // become `%k = 3; %a << %k`. Literal cells are pooled by value so a body does
-  // not accumulate a dozen names for the same constant.
-  class NameAllocator {
-  public:
-    explicit NameAllocator(std::string prefix) : prefix_(std::move(prefix)) {}
-
-    // A fresh mutable local of `type`, declared into `lets`.
-    std::string fresh(const TypePtr &type, std::vector<LetDecl> &lets);
-
-    // A local holding `value` at `type`, reused when one already exists.
-    std::string literal(std::int64_t value, const TypePtr &type, std::vector<LetDecl> &lets);
-
-    const std::string &prefix() const { return prefix_; }
-
-  private:
-    std::string prefix_;
-    std::size_t next_ = 0;
-    std::vector<std::tuple<std::int64_t, std::string, std::string>> pool_; // value, type key, name
-  };
 
   // What is known about the values a body carries. Most rules are identities
   // and need none of this; the ones that are identities *only under a
