@@ -4,6 +4,7 @@
 #include <cmath>
 #include <limits>
 
+#include "analysis/type_utils.hpp"
 #include "ast/build.hpp"
 #include "reify/hyperparameters.hpp"
 
@@ -269,15 +270,38 @@ namespace refractir::reify {
 
   std::unique_ptr<DataflowPolicy> makeBitwisePolicy() { return std::make_unique<BitwisePolicy>(); }
 
-  DataflowSite pinsAtBlock(const StateProfile &profile, const std::string &blockLabel) {
+  std::unordered_map<std::string, std::uint32_t> declaredIntWidths(const FunDecl &fn) {
+    std::unordered_map<std::string, std::uint32_t> widths;
+    const auto record = [&widths](const std::string &name, const TypePtr &type) {
+      if (auto bits = TypeUtils::getIntBitWidth(type))
+        widths.emplace(name, static_cast<std::uint32_t>(*bits));
+    };
+    for (const auto &param: fn.params)
+      record(param.name.name, param.type);
+    for (const auto &let: fn.lets)
+      record(let.name.name, let.type);
+    return widths;
+  }
+
+  DataflowSite pinsAtBlock(
+      const StateProfile &profile, const std::string &blockLabel,
+      const std::unordered_map<std::string, std::uint32_t> &widths
+  ) {
     DataflowSite site;
     for (const StatePoint &point: profile.trace) {
       if (point.block != blockLabel || point.instr != -1)
         continue;
       std::vector<Pin> pins;
       for (const auto &[name, value]: point.vars) {
-        if (value.kind == StateValue::Kind::Int)
-          pins.push_back(Pin{name, value.intVal, value.bits});
+        if (value.kind != StateValue::Kind::Int)
+          continue;
+        const auto width = widths.find(name);
+        if (width == widths.end())
+          continue;
+        const SignedRange range = signedRange(width->second);
+        if (value.intVal < range.lo || value.intVal > range.hi)
+          continue;
+        pins.push_back(Pin{name, value.intVal, width->second});
       }
       site.visits.push_back(std::move(pins));
     }

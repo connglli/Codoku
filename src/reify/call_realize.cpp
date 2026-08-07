@@ -387,7 +387,10 @@ namespace refractir::reify {
         // policies, which state the callee's solved value in terms of what the
         // caller holds where the call lands; anything else is spelled out.
         const DataflowSite pins =
-            callerProfile ? pinsAtBlock(*callerProfile, caller.blocks[*targetBlockIdx].label.name)
+            callerProfile ? pinsAtBlock(
+                                *callerProfile, caller.blocks[*targetBlockIdx].label.name,
+                                declaredIntWidths(caller)
+                            )
                           : DataflowSite{};
         CallAtom ca;
         GlobalId gid;

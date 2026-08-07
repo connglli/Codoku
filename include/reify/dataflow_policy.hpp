@@ -26,6 +26,7 @@
 #include <optional>
 #include <random>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "ast/ast.hpp"
@@ -95,11 +96,22 @@ namespace refractir::reify {
   // so this declines where no usable prime fits.
   [[nodiscard]] std::unique_ptr<DataflowPolicy> makeArithmeticPolicy();
 
+  // The integer locals and parameters `fn` declares, by name and width.
+  [[nodiscard]] std::unordered_map<std::string, std::uint32_t> declaredIntWidths(const FunDecl &fn);
+
   // The pins at `blockLabel`, one set per visit the profiled run made to it.
   // Points inside a block are ignored — an argument is built at a block's head,
   // so the state on entry is the state it sees.
-  [[nodiscard]] DataflowSite
-  pinsAtBlock(const StateProfile &profile, const std::string &blockLabel);
+  //
+  // `widths` decides which variables become pins and how wide each one is. A
+  // profile records the width of the value a run produced, which is not the
+  // width the variable was declared with, and an argument spliced into a call
+  // answers to the declaration. A recorded value outside its declared range is
+  // dropped for the same reason.
+  [[nodiscard]] DataflowSite pinsAtBlock(
+      const StateProfile &profile, const std::string &blockLabel,
+      const std::unordered_map<std::string, std::uint32_t> &widths
+  );
 
   // Ask the policies in a uniformly random order and take the first argument
   // built. Declining is ordinary, so the order decides which construction a
