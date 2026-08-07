@@ -180,6 +180,61 @@ namespace refractir::reify {
     }
   };
 
+  // Does anything put a value in `%var` that its declaration no longer
+  // describes — an assignment naming it, or a write through its address?
+  static bool isMutatedOrAddressTaken(const FunDecl &caller, const std::string &varName) {
+    AddrChecker checker(varName);
+    for (const auto &block: caller.blocks) {
+      for (const auto &instr: block.instrs) {
+        if (auto assign = std::get_if<AssignInstr>(&instr))
+          if (assign->lhs.base.name == varName)
+            return true;
+        checker.check(instr);
+      }
+      checker.check(block.term);
+    }
+    return checker.addressTaken;
+  }
+
+  // Can control reach this block again? Everything in a block on a cycle runs
+  // once per iteration.
+  static bool isPartOfLoop(const FunDecl &caller, std::size_t startIdx) {
+    const auto successors = [&caller](std::size_t bi) {
+      std::vector<std::size_t> succs;
+      const auto addLabel = [&](const std::string &label) {
+        for (std::size_t i = 0; i < caller.blocks.size(); ++i)
+          if (caller.blocks[i].label.name == label) {
+            succs.push_back(i);
+            break;
+          }
+      };
+      if (auto br = std::get_if<BrTerm>(&caller.blocks[bi].term)) {
+        if (br->isConditional) {
+          addLabel(br->thenLabel.name);
+          addLabel(br->elseLabel.name);
+        } else {
+          addLabel(br->dest.name);
+        }
+      }
+      return succs;
+    };
+
+    std::vector<bool> seen(caller.blocks.size(), false);
+    std::vector<std::size_t> stack = successors(startIdx);
+    while (!stack.empty()) {
+      const std::size_t curr = stack.back();
+      stack.pop_back();
+      if (curr == startIdx)
+        return true;
+      if (seen[curr])
+        continue;
+      seen[curr] = true;
+      for (std::size_t s: successors(curr))
+        stack.push_back(s);
+    }
+    return false;
+  }
+
   // ---------------------------------------------------------------------------
   // LiteralToCallRule
   // ---------------------------------------------------------------------------
@@ -275,123 +330,15 @@ namespace refractir::reify {
         if (!retVal)
           return false;
 
-        // Check if the variable is mutated (written to) or has its address taken.
-        bool isMutatedOrAddressTaken = false;
-        const std::string &varName = caller.lets[site.letIdx].name.name;
-        for (const auto &block: caller.blocks) {
-          for (const auto &instr: block.instrs) {
-            if (auto assign = std::get_if<AssignInstr>(&instr)) {
-              if (assign->lhs.base.name == varName) {
-                isMutatedOrAddressTaken = true;
-                break;
-              }
-            }
-          }
-          if (isMutatedOrAddressTaken)
-            break;
-        }
-
-
-        if (!isMutatedOrAddressTaken) {
-          AddrChecker checker(varName);
-          for (const auto &block: caller.blocks) {
-            for (const auto &instr: block.instrs) {
-              checker.check(instr);
-            }
-            checker.check(block.term);
-          }
-          if (checker.addressTaken) {
-            isMutatedOrAddressTaken = true;
-          }
-        }
-
-        // Select a random executed block of the caller that is not part of a loop.
-        // Selecting a random executed block allows us to distribute call realizations
-        // across different blocks of the caller execution path.
-        std::vector<std::size_t> executedIndices;
-        std::unordered_set<std::string> pathSet(callerDesc.path.begin(), callerDesc.path.end());
-        for (std::size_t i = 0; i < caller.blocks.size(); ++i) {
-          if (pathSet.find(caller.blocks[i].label.name) != pathSet.end()) {
-            executedIndices.push_back(i);
-          }
-        }
-
-        if (isMutatedOrAddressTaken) {
-          // If mutated or address-taken, we MUST insert at the entry block (index 0)
-          // to ensure it runs before any reads/mutations.
-          executedIndices = {0};
-        } else {
-          std::shuffle(executedIndices.begin(), executedIndices.end(), rng);
-        }
-
-        auto getSuccessors = [&](std::size_t bi) -> std::vector<std::size_t> {
-          std::vector<std::size_t> succs;
-          const auto &term = caller.blocks[bi].term;
-          auto addLabel = [&](const std::string &labelName) {
-            for (std::size_t idx = 0; idx < caller.blocks.size(); ++idx) {
-              if (caller.blocks[idx].label.name == labelName) {
-                succs.push_back(idx);
-                break;
-              }
-            }
-          };
-          if (auto br = std::get_if<BrTerm>(&term)) {
-            if (br->isConditional) {
-              addLabel(br->thenLabel.name);
-              addLabel(br->elseLabel.name);
-            } else {
-              addLabel(br->dest.name);
-            }
-          }
-          return succs;
-        };
-
-        auto isPartOfLoop = [&](std::size_t startIdx) -> bool {
-          std::vector<bool> visited(caller.blocks.size(), false);
-          std::vector<std::size_t> stack;
-          for (std::size_t s: getSuccessors(startIdx)) {
-            stack.push_back(s);
-          }
-          while (!stack.empty()) {
-            std::size_t curr = stack.back();
-            stack.pop_back();
-            if (curr == startIdx)
-              return true;
-            if (!visited[curr]) {
-              visited[curr] = true;
-              for (std::size_t s: getSuccessors(curr)) {
-                stack.push_back(s);
-              }
-            }
-          }
+        const auto target = chooseTarget(caller, callerDesc, callerProfile, site, rng);
+        if (!target)
           return false;
-        };
-
-        std::optional<std::size_t> targetBlockIdx;
-        for (std::size_t blockIdx: executedIndices) {
-          // Loop guard: if the block is part of a loop, prepending into it
-          // re-fires the call on every back-edge traversal — resetting the let
-          // to its original literal value every iteration.
-          if (isPartOfLoop(blockIdx)) {
-            continue;
-          }
-          targetBlockIdx = blockIdx;
-          break;
-        }
-
-        if (!targetBlockIdx) {
-          return false;
-        }
+        const std::size_t targetBlock = target->blockIdx;
+        const DataflowSite &pins = target->pins;
 
         // Build the call atom. An integer argument goes to the dataflow
         // policies, which state the callee's solved value in terms of what the
         // caller holds where the call lands; anything else is spelled out.
-        const DataflowSite pins =
-            callerProfile ? pinsAtBlock(
-                                *callerProfile, caller.blocks[*targetBlockIdx].label.name,
-                                declaredIntWidths(caller)
-                            )
-                          : DataflowSite{};
         CallAtom ca;
         GlobalId gid;
         gid.name = callee.name;
@@ -450,7 +397,7 @@ namespace refractir::reify {
             (parsedBits = std::atoi(site.sirType.c_str() + 1)) <= 0)
           return false;
         std::int64_t offsetVal = 0;
-        if (__builtin_sub_overflow((std::int64_t) site.intVal, (std::int64_t) *retVal, &offsetVal))
+        if (__builtin_sub_overflow(target->restore, (std::int64_t) *retVal, &offsetVal))
           return false;
         if (parsedBits < 64) {
           std::int64_t maxv = (std::int64_t{1} << (parsedBits - 1)) - 1;
@@ -491,7 +438,7 @@ namespace refractir::reify {
         // head of the block: an argument is stated in terms of the state on
         // entry, so nothing the block itself does may run first.
         argStmts.push_back(Instr{std::move(ai)});
-        auto &instrs = caller.blocks[*targetBlockIdx].instrs;
+        auto &instrs = caller.blocks[targetBlock].instrs;
         instrs.insert(
             instrs.begin(), std::make_move_iterator(argStmts.begin()),
             std::make_move_iterator(argStmts.end())
@@ -504,6 +451,60 @@ namespace refractir::reify {
       }
 
     private:
+      // Where a call can be spliced, what the assignment has to restore there,
+      // and the state a policy builds its arguments against.
+      struct Target {
+        std::size_t blockIdx = 0;
+        std::int64_t restore = 0;
+        DataflowSite pins;
+      };
+
+      // Pick an executed block to splice into.
+      //
+      // The assignment overwrites the site's variable, so it may only land
+      // where it puts back what the variable already holds. The profiled run
+      // answers that directly: a block qualifies when the variable holds one
+      // value across every visit made to it, and that value is what the offset
+      // restores. Mutation and loops need no rule of their own — a variable
+      // reassigned earlier simply holds a different value at the block, and one
+      // that moves between iterations holds no single value there at all.
+      //
+      // Without a profile the declaration's initializer is the only value
+      // known, and it holds at a block that no mutation precedes and no cycle
+      // repeats.
+      [[nodiscard]] std::optional<Target> chooseTarget(
+          const FunDecl &caller, const FuncDescriptor &callerDesc,
+          const StateProfile *callerProfile, const CallRewriteSite &site, std::mt19937 &rng
+      ) const {
+        const std::string &varName = caller.lets[site.letIdx].name.name;
+        const std::unordered_set<std::string> onPath(
+            callerDesc.path.begin(), callerDesc.path.end()
+        );
+        std::vector<std::size_t> executed;
+        for (std::size_t i = 0; i < caller.blocks.size(); ++i)
+          if (onPath.count(caller.blocks[i].label.name))
+            executed.push_back(i);
+        std::shuffle(executed.begin(), executed.end(), rng);
+
+        if (!callerProfile) {
+          if (isMutatedOrAddressTaken(caller, varName))
+            return std::nullopt;
+          for (std::size_t blockIdx: executed)
+            if (!isPartOfLoop(caller, blockIdx))
+              return Target{blockIdx, site.intVal, DataflowSite{}};
+          return std::nullopt;
+        }
+
+        const auto widths = declaredIntWidths(caller);
+        for (std::size_t blockIdx: executed) {
+          DataflowSite pins =
+              pinsAtBlock(*callerProfile, caller.blocks[blockIdx].label.name, widths);
+          if (auto held = stableValue(pins, varName))
+            return Target{blockIdx, *held, std::move(pins)};
+        }
+        return std::nullopt;
+      }
+
       // Drawn from per argument. The order they are asked in is the draw; each
       // one either states the target or passes.
       std::vector<std::unique_ptr<DataflowPolicy>> policies_;

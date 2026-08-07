@@ -96,6 +96,12 @@ namespace refractir::reify {
   // so this declines where no usable prime fits.
   [[nodiscard]] std::unique_ptr<DataflowPolicy> makeArithmeticPolicy();
 
+  // The value `name` holds at every visit in `site`, when that is one value.
+  // A single assignment restores one value, so a variable that moves between
+  // visits is not one an assignment can put back.
+  [[nodiscard]] std::optional<std::int64_t>
+  stableValue(const DataflowSite &site, const std::string &name);
+
   // The integer locals and parameters `fn` declares, by name and width.
   [[nodiscard]] std::unordered_map<std::string, std::uint32_t> declaredIntWidths(const FunDecl &fn);
 

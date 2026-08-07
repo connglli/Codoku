@@ -275,6 +275,21 @@ namespace refractir::reify {
 
   std::unique_ptr<DataflowPolicy> makeBitwisePolicy() { return std::make_unique<BitwisePolicy>(); }
 
+  std::optional<std::int64_t> stableValue(const DataflowSite &site, const std::string &name) {
+    std::optional<std::int64_t> held;
+    for (const auto &visit: site.visits) {
+      const auto it = std::find_if(visit.begin(), visit.end(), [&](const Pin &pin) {
+        return pin.name == name;
+      });
+      if (it == visit.end())
+        return std::nullopt;
+      if (held && *held != it->value)
+        return std::nullopt;
+      held = it->value;
+    }
+    return held;
+  }
+
   std::unordered_map<std::string, std::uint32_t> declaredIntWidths(const FunDecl &fn) {
     std::unordered_map<std::string, std::uint32_t> widths;
     const auto record = [&widths](const std::string &name, const TypePtr &type) {
