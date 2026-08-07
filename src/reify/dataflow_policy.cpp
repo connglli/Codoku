@@ -178,7 +178,7 @@ namespace refractir::reify {
         const std::vector<std::string> live = liveVars(site, bits);
         if (live.empty())
           return std::nullopt;
-        const std::vector<std::string> probe = pickSubset(live, kMaxProbeVars, rng);
+        const std::vector<std::string> probe = pickSubset(live, rylink::hp::kMaxProbeVars, rng);
 
         std::vector<std::int64_t> seen;
         for (const auto &visit: site.visits) {
@@ -209,10 +209,6 @@ namespace refractir::reify {
       }
 
     private:
-      // More than a few variables buries what the argument does without making
-      // it harder to see through.
-      static constexpr std::size_t kMaxProbeVars = 3;
-
       // The name holding `g`. A single variable is already the fold, so only a
       // longer probe needs a cell of its own.
       [[nodiscard]] static std::string foldProbe(
@@ -234,7 +230,7 @@ namespace refractir::reify {
       [[nodiscard]] static bool
       maskVaries(const std::vector<std::int64_t> &seen, std::uint32_t bits, std::mt19937 &rng) {
         std::uniform_int_distribution<std::uint64_t> anyValue;
-        for (int attempt = 0; attempt < 8; ++attempt) {
+        for (int attempt = 0; attempt < rylink::hp::kMaskSamples; ++attempt) {
           const std::int64_t g = signExtend(static_cast<std::int64_t>(anyValue(rng)), bits);
           std::int64_t mask = ~std::int64_t{0};
           for (std::int64_t value: seen)
@@ -259,7 +255,6 @@ namespace refractir::reify {
     // `i16`, 11 at `i8` — and below `kMinModulus` there are too few residues
     // for a line through them to be worth emitting.
     [[nodiscard]] std::int64_t fieldFor(std::uint32_t bits) {
-      constexpr std::int64_t kMinModulus = 11;
       const auto isPrime = [](std::int64_t n) {
         if (n < 2)
           return false;
@@ -276,7 +271,7 @@ namespace refractir::reify {
         --ceiling;
       while ((ceiling + 1) <= hi / (ceiling + 1))
         ++ceiling;
-      for (std::int64_t p = ceiling; p >= kMinModulus; --p)
+      for (std::int64_t p = ceiling; p >= rylink::hp::kMinModulus; --p)
         if (isPrime(p))
           return p;
       return 0;

@@ -487,18 +487,34 @@ namespace refractir::reify::rylink::hp {
   }
 
   // Per call-argument choice between the two argument modes
-  // LiteralToCallRule supports:
-  //   - "literal":  emit the solver's paramValue as a CoefAtom
-  //   - "var+bias": pick an unchanged scalar caller-var of matching
-  //                 type, compute bias = expected - var.let_init, emit
-  //                 `%var + bias` (which evaluates to the same value
-  //                 at runtime because the splice runs before any
-  //                 user code that could mutate %var).
-  // kPVarBiasArg is the probability we attempt the var+bias path for a
-  // given call argument. The rule falls back to the literal path when
-  // no suitable var exists for that param's type or the bias would
-  // overflow the var's signed range.
+  // The literal-or-bias policy spells an argument either as the solved value
+  // itself or as `%var + bias` over a variable the profiled run pins at the
+  // splice point. kPVarBiasArg is the chance it reaches for the second; a plain
+  // literal is the control case every richer construction is measured against,
+  // so the coin is what keeps some in the output.
   inline constexpr double kPVarBiasArg = 0.50;
+
+  // ===========================================================================
+  // Dataflow policies
+  //
+  // How an argument is stated in terms of what the caller holds where the call
+  // lands (reify/dataflow_policy.hpp). These bound the size of a construction,
+  // never its correctness: at any setting the argument still evaluates to the
+  // callee's solved input.
+  // ===========================================================================
+
+  // How many of the caller's variables one argument may read.
+  inline constexpr std::size_t kMaxProbeVars = 3;
+
+  // Samples drawn to convince the xor policy its mask is non-zero somewhere. A
+  // mask that vanishes everywhere leaves the target spelled out, and only a
+  // sample can tell, since the domain is the whole width.
+  inline constexpr int kMaskSamples = 8;
+
+  // The smallest field worth working over. It shrinks with the argument's
+  // width — 46337 at i32, 181 at i16, 11 at i8 — and below this there are too
+  // few residues to say anything with.
+  inline constexpr std::int64_t kMinModulus = 11;
 
   // ===========================================================================
   // Per-program retry budget
