@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <numeric>
 #include <random>
 #include <sstream>
@@ -330,7 +331,59 @@ emitBundle(Program &bundle, std::mt19937 &rng, const PerProgConfig &cfg, const E
   return true;
 }
 
-static bool generateOne(const FuncPool &pool, std::mt19937 &rng, const PerProgConfig &cfg) {
+// ---------------------------------------------------------------------------
+// Leaf profiles
+//
+// A call spliced into a caller reproduces a value the caller already computes,
+// and building the argument from the caller's own variables needs their values
+// at the splice point. Those come from running the leaf on the input it was
+// solved for, which is only possible while it is still a standalone program —
+// hence before the merge. Call realization is value-preserving on that input,
+// so one capture stays accurate however many calls are spliced afterwards.
+// ---------------------------------------------------------------------------
+
+// A leaf's solved path is a few dozen block entries, so this cap is reached
+// only by a descriptor misreporting its outcome. Bounding the run costs that
+// leaf its state instead of hanging the generator.
+static constexpr std::uint64_t kLeafProfileStepCap = 3200;
+
+// Keyed by the (leaf, realization) pair the profile was captured from. Pool
+// entries outlive every program and a leaf's own execution does not depend on
+// the bundle it lands in, so one capture serves every program picking it.
+using ProfileCache =
+    std::map<std::pair<const PoolEntry *, std::size_t>, std::optional<StateProfile>>;
+
+// Run `prog`'s entry on the input realization `rzIdx` was solved for, keeping
+// the state at each executed block. Returns nullopt when the run does not
+// reach a clean exit, which costs the leaf its state rather than the program
+// its generation.
+[[nodiscard]] static std::optional<StateProfile>
+captureLeafProfile(const Program &prog, const FuncDescriptor &desc, std::size_t rzIdx) {
+  std::vector<std::string> args;
+  args.reserve(desc.realizations[rzIdx].paramValues.size());
+  for (const auto &pv: desc.realizations[rzIdx].paramValues)
+    args.push_back(pv.second);
+  try {
+    return profileProgram(prog, desc.name, args, StateGranularity::Pbb, kLeafProfileStepCap);
+  } catch (const std::exception &) {
+    return std::nullopt;
+  }
+}
+
+// The profile of `entry`'s realization `rzIdx`, captured on first use.
+// Returns nullptr for a leaf that cannot be profiled.
+[[nodiscard]] static const StateProfile *
+leafProfile(ProfileCache &cache, const PoolEntry &entry, std::size_t rzIdx, const Program &prog) {
+  auto key = std::make_pair(&entry, rzIdx);
+  auto it = cache.find(key);
+  if (it == cache.end())
+    it = cache.emplace(key, captureLeafProfile(prog, entry.desc, rzIdx)).first;
+  return it->second ? &*it->second : nullptr;
+}
+
+static bool generateOne(
+    const FuncPool &pool, std::mt19937 &rng, const PerProgConfig &cfg, ProfileCache &cache
+) {
   if (pool.entries.empty())
     return false;
   int k = std::min(static_cast<int>(pool.entries.size()), std::max(1, cfg.nNodes));
@@ -349,6 +402,15 @@ static bool generateOne(const FuncPool &pool, std::mt19937 &rng, const PerProgCo
   std::unordered_map<std::string, std::size_t> haveStructs;
   std::unordered_set<std::string> haveIntrinsics;
   std::vector<Node> nodes(k);
+  // Filled as the bundle is built, since a leaf can only be profiled before it
+  // is merged. `rng` is borrowed by reference so every draw a transform makes
+  // stays on this program's deterministic stream.
+  TransformContext ctx(rng);
+  // Pins are captured for UB-free terminating pools only: a mapping built from
+  // a trapping leaf could trap ahead of the UB the pool was solved for, and a
+  // diverging leaf has no on-path call site to build one for. The pool's
+  // homogeneous outcome settles this for every leaf at once.
+  const bool wantPins = cfg.poolKind == FuncDescriptor::Outcome::Return;
   for (int i = 0; i < k; ++i) {
     nodes[i].idx = i;
     nodes[i].poolIdx = pickIdxs[i];
@@ -361,6 +423,12 @@ static bool generateOne(const FuncPool &pool, std::mt19937 &rng, const PerProgCo
     auto prog = parseSir(sirPath);
     if (!prog)
       return false;
+    // Only a caller's state is ever read, so a leaf with no outgoing edge is
+    // not worth an interpreter run.
+    if (wantPins && !cg.outEdges[i].empty()) {
+      if (const StateProfile *p = leafProfile(cache, entry, nodes[i].realizationIdx, *prog))
+        ctx.profiles[nodes[i].funcName] = *p;
+    }
     nodes[i].fn = mergeInto(bundle, std::move(*prog), nodes[i].stem, haveStructs, haveIntrinsics);
     if (!nodes[i].fn)
       return false;
@@ -369,9 +437,7 @@ static bool generateOne(const FuncPool &pool, std::mt19937 &rng, const PerProgCo
   // Realize the call graph. The per-node descriptors (input/oracle + the
   // concretized execution path) ride in the shared context, keyed by func
   // name; the plan carries the composition decision (which edges, which
-  // realization). The context borrows `rng` by reference so the transform's
-  // draws stay on this program's deterministic stream.
-  TransformContext ctx(rng);
+  // realization).
   for (int i = 0; i < cg.nNodes; ++i)
     ctx.descriptors[nodes[i].funcName] = pool.entries[nodes[i].poolIdx].desc;
 
@@ -770,6 +836,8 @@ int main(int argc, char **argv) {
   // tolerates the occasional rng-induced downstream miss.
   constexpr int kMaxAttempts = rylink::hp::kMaxAttemptsPerProg;
   auto wallStart = std::chrono::steady_clock::now();
+  // Shared across programs: the same leaf is picked into many of them.
+  ProfileCache profileCache;
   for (int i = 0; i < nProgs; ++i) {
     pc.progIdx = i;
     std::string progName = "prog_" + genId + "_" + std::to_string(i);
@@ -779,7 +847,7 @@ int main(int argc, char **argv) {
     for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
       ++usedAttempts;
       std::mt19937 progRng(rng());
-      if (generateOne(pool, progRng, pc)) {
+      if (generateOne(pool, progRng, pc, profileCache)) {
         succeeded = true;
         break;
       }
