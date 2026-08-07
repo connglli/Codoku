@@ -965,9 +965,12 @@ namespace refractir::reify {
   // ---------------------------------------------------------------------------
   // AtomToCallRule
   //
-  // An integer literal standing inside a statement the run executes is a value
-  // the caller computes, so a call can carry it. It cannot stand where the
-  // literal stands: a flat expression evaluates left to right with no
+  // A value the caller computes inside a statement the run executes can be
+  // carried by a call. Two kinds qualify: an integer literal, whose value is
+  // written down, and a read of a variable the profiled run holds steady —
+  // steady across the visits to the block, and untouched within it, so the
+  // value at the read is the value on entry. It cannot stand where either
+  // stands: a flat expression evaluates left to right with no
   // parentheses, so `a + k * b` with `call + (k - o)` put in place of `k` would
   // reassociate everything after it. The call is hoisted into a cell above the
   // statement instead, and the literal becomes a read of that cell.
@@ -1003,7 +1006,7 @@ namespace refractir::reify {
           if (!onPath.count(block.label.name))
             continue;
           std::unordered_set<std::string> widths;
-          for (const auto &type: literalTypes(caller, block))
+          for (const auto &type: knownTypes(caller, block))
             widths.insert(type);
           for (const auto &type: widths) {
             CallRewriteSite s;
@@ -1044,10 +1047,6 @@ namespace refractir::reify {
         if (!block)
           return false;
 
-        auto found = pickLiteral(caller, *block, site.sirType, rng);
-        if (!found)
-          return false;
-
         const int bits = intTypeBits(site.sirType);
         NameAllocator names(
             std::string(kDataflowLocalPrefix) + "a" + std::to_string(spliceSeq_++) + "_",
@@ -1055,6 +1054,9 @@ namespace refractir::reify {
         );
         const DataflowSite pins =
             pinsAtBlock(*callerProfile, site.blockLabel, declaredIntWidths(caller));
+        auto found = pickKnown(caller, *block, site.sirType, steadyIn(caller, *block, pins), rng);
+        if (!found)
+          return false;
         auto spliced = buildSplicedCall(
             callee, realizationIdx, pins, policies_, found->value, bits, names, rng
         );
@@ -1093,13 +1095,17 @@ namespace refractir::reify {
       // The SIR types of the integer literals this block holds, by the type
       // each one is read at rather than its own — a literal takes the type of
       // where it stands.
+      // The widths at which this block offers a value worth carrying. Only
+      // literals count here: whether a variable holds still needs the profile,
+      // which arrives with the rewrite rather than with the search.
       [[nodiscard]] static std::vector<std::string>
-      literalTypes(const FunDecl &caller, const Block &block) {
+      knownTypes(const FunDecl &caller, const Block &block) {
         std::vector<std::string> types;
         Block &mutableBlock = const_cast<Block &>(block);
-        for (std::size_t i = 0; i < mutableBlock.instrs.size(); ++i)
+        const std::unordered_map<std::string, std::int64_t> none;
+        for (auto &instr: mutableBlock.instrs)
           for (const auto &type: kIntTypes(caller))
-            if (!collect(caller, mutableBlock.instrs[i], type).empty())
+            if (!collect(caller, instr, type, none).empty())
               types.push_back(type);
         return types;
       }
@@ -1123,29 +1129,73 @@ namespace refractir::reify {
         return types;
       }
 
-      // Integer-literal atoms in one instruction that are read at `sirType`.
-      [[nodiscard]] static std::vector<Atom *>
-      collect(const FunDecl &caller, Instr &instr, const std::string &sirType) {
+      // Atoms in one instruction read at `sirType` whose value is known: a
+      // literal, or a read of a variable in `steady`.
+      [[nodiscard]] static std::vector<std::pair<Atom *, std::int64_t>> collect(
+          const FunDecl &caller, Instr &instr, const std::string &sirType,
+          const std::unordered_map<std::string, std::int64_t> &steady
+      ) {
         const int bits = intTypeBits(sirType);
         if (bits <= 0)
           return {};
         CallReplacer replacer(buildIntType(bits), caller);
         replacer.collect(instr);
-        std::vector<Atom *> lits;
-        for (Atom *a: replacer.candidates)
-          if (auto coef = std::get_if<CoefAtom>(&a->v))
-            if (std::holds_alternative<IntLit>(coef->coef))
-              lits.push_back(a);
-        return lits;
+        std::vector<std::pair<Atom *, std::int64_t>> known;
+        for (Atom *a: replacer.candidates) {
+          if (auto coef = std::get_if<CoefAtom>(&a->v)) {
+            if (auto lit = std::get_if<IntLit>(&coef->coef)) {
+              known.emplace_back(a, lit->value);
+              continue;
+            }
+            if (auto id = std::get_if<LocalOrSymId>(&coef->coef))
+              if (auto local = std::get_if<LocalId>(id)) {
+                const auto it = steady.find(local->name);
+                if (it != steady.end())
+                  known.emplace_back(a, it->second);
+              }
+            continue;
+          }
+          if (auto rval = std::get_if<RValueAtom>(&a->v))
+            if (rval->rval.accesses.empty()) {
+              const auto it = steady.find(rval->rval.base.name);
+              if (it != steady.end())
+                known.emplace_back(a, it->second);
+            }
+        }
+        return known;
       }
 
-      [[nodiscard]] static std::optional<Found> pickLiteral(
-          const FunDecl &caller, Block &block, const std::string &sirType, std::mt19937 &rng
+      // Variables whose value at any point in `block` is the value on entry:
+      // the same at every visit the run made, and changed by nothing the block
+      // itself does. A variable the block assigns holds something else by the
+      // time a later statement reads it, and a profile taken per block cannot
+      // say what.
+      [[nodiscard]] static std::unordered_map<std::string, std::int64_t>
+      steadyIn(const FunDecl &caller, const Block &block, const DataflowSite &pins) {
+        std::unordered_set<std::string> written;
+        for (const auto &instr: block.instrs)
+          if (auto assign = std::get_if<AssignInstr>(&instr))
+            written.insert(assign->lhs.base.name);
+        std::unordered_map<std::string, std::int64_t> steady;
+        if (pins.visits.empty())
+          return steady;
+        for (const Pin &pin: pins.visits.front()) {
+          if (written.count(pin.name) || isMutatedOrAddressTaken(caller, pin.name))
+            continue;
+          if (auto held = stableValue(pins, pin.name))
+            steady.emplace(pin.name, *held);
+        }
+        return steady;
+      }
+
+      [[nodiscard]] static std::optional<Found> pickKnown(
+          const FunDecl &caller, Block &block, const std::string &sirType,
+          const std::unordered_map<std::string, std::int64_t> &steady, std::mt19937 &rng
       ) {
         std::vector<Found> all;
         for (auto &instr: block.instrs)
-          for (Atom *a: collect(caller, instr, sirType))
-            all.push_back(Found{a, std::get<IntLit>(std::get<CoefAtom>(a->v).coef).value});
+          for (const auto &[atom, value]: collect(caller, instr, sirType, steady))
+            all.push_back(Found{atom, value});
         if (all.empty())
           return std::nullopt;
         std::uniform_int_distribution<std::size_t> pick(0, all.size() - 1);
