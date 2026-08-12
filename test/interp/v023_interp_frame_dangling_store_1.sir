@@ -1,5 +1,5 @@
 // EXPECT: FAIL:UndefinedBehavior
-// SKIP: WASM, PYTHON
+// SKIP: WASM
 // SPEC v0.2.3 §7.5 rule 27
 // Intention: as the load case, but writing through the escaped pointer.
 // A store into a dead activation's local has nowhere to land.

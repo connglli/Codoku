@@ -1,5 +1,5 @@
 // EXPECT: FAIL:UndefinedBehavior
-// SKIP: WASM, PYTHON
+// SKIP: WASM
 // SPEC v0.2.3 §7.5 rule 27
 // Intention: the escaping frame is two deep, so the pointer outlives an
 // inner activation that a middle one returned through. Nothing on the way

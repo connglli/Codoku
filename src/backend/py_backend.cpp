@@ -162,20 +162,32 @@ class _Ptr:
     # A provenance-tracked pointer into a flat leaf-slot list: `off` is
     # the current leaf offset, `stride` the pointee's leaf count, and
     # [lo, hi) the extent of the innermost enclosing object (hi itself
-    # is the legal one-past-end position).
-    __slots__ = ("buf", "off", "stride", "lo", "hi")
+    # is the legal one-past-end position). `frame` is the liveness cell of
+    # the activation owning the storage, or None for a pointer that owns
+    # none (null).
+    __slots__ = ("buf", "off", "stride", "lo", "hi", "frame")
 
-    def __init__(self, buf, off, stride, lo, hi):
+    def __init__(self, buf, off, stride, lo, hi, frame=None):
         self.buf = buf
         self.off = off
         self.stride = stride
         self.lo = lo
         self.hi = hi
+        self.frame = frame
 
 
 _NULL = _Ptr(None, 0, 0, 0, 0)
 _UNDEF = ["undef"]  # unique identity sentinel
 _PAD = ["pad"]  # interior byte of a wider leaf; never a valid access
+
+
+def _live(p):
+    # SPEC 7.5 rule 27. A returned activation's locals are dead, but the
+    # list holding them outlives the call as long as a pointer references
+    # it, so liveness is asked of the frame rather than observed of the
+    # storage.
+    if p.frame is not None and not p.frame[0]:
+        _trap("access through a pointer to a returned activation")
 
 
 def _rd(buf, off):
@@ -203,7 +215,7 @@ def _padd(p, n):
     off = p.off + n * p.stride
     if off < p.lo or off > p.hi:
         _trap("pointer arithmetic out of object bounds")
-    return _Ptr(p.buf, off, p.stride, p.lo, p.hi)
+    return _Ptr(p.buf, off, p.stride, p.lo, p.hi, p.frame)
 
 
 def _pdiff(p, q):
@@ -225,6 +237,7 @@ def _prel(p, q):
 def _load(p):
     if p.buf is None:
         _trap("null pointer dereference")
+    _live(p)
     if p.off < p.lo or p.off + p.stride > p.hi:
         _trap("pointer dereference out of bounds")
     return _rd(p.buf, p.off)
@@ -233,6 +246,7 @@ def _load(p):
 def _store(p, v):
     if p.buf is None:
         _trap("null pointer store")
+    _live(p)
     if p.off < p.lo or p.off + p.stride > p.hi:
         _trap("pointer store out of bounds")
     p.buf[p.off] = v
@@ -241,11 +255,12 @@ def _store(p, v):
 def _pidx(p, i, n, estride):
     if p.buf is None:
         _trap("ptrindex on null pointer")
+    _live(p)
     if p.off >= p.hi:
         _trap("ptrindex on one-past-end pointer")
     if i < 0 or i > n:
         _trap("ptrindex index out of range")
-    return _Ptr(p.buf, p.off + i * estride, estride, p.off, p.off + n * estride)
+    return _Ptr(p.buf, p.off + i * estride, estride, p.off, p.off + n * estride, p.frame)
 
 
 def _pfield(p, foff, flen, slen):
@@ -253,9 +268,10 @@ def _pfield(p, foff, flen, slen):
     # (SPEC 7.5 rule 15): arithmetic may roam across sibling fields.
     if p.buf is None:
         _trap("ptrfield on null pointer")
+    _live(p)
     if p.off >= p.hi:
         _trap("ptrfield on one-past-end pointer")
-    return _Ptr(p.buf, p.off + foff, flen, p.off, p.off + slen)
+    return _Ptr(p.buf, p.off + foff, flen, p.off, p.off + slen, p.frame)
 )PY";
 
     // --no-ub-guards preamble: the same value semantics as
@@ -284,14 +300,17 @@ def _f32(x):
 
 
 class _Ptr:
-    __slots__ = ("buf", "off", "stride", "lo", "hi")
+    # Same shape as the guarded build's, `frame` included, so a pointer
+    # means the same thing either way; nothing here consults it.
+    __slots__ = ("buf", "off", "stride", "lo", "hi", "frame")
 
-    def __init__(self, buf, off, stride, lo, hi):
+    def __init__(self, buf, off, stride, lo, hi, frame=None):
         self.buf = buf
         self.off = off
         self.stride = stride
         self.lo = lo
         self.hi = hi
+        self.frame = frame
 
 
 _NULL = _Ptr(None, 0, 0, 0, 0)
@@ -312,7 +331,7 @@ def _vrd(buf, off, n, stride):
 
 
 def _padd(p, n):
-    return _Ptr(p.buf, p.off + n * p.stride, p.stride, p.lo, p.hi)
+    return _Ptr(p.buf, p.off + n * p.stride, p.stride, p.lo, p.hi, p.frame)
 
 
 def _pdiff(p, q):
@@ -336,11 +355,11 @@ def _store(p, v):
 
 
 def _pidx(p, i, n, estride):
-    return _Ptr(p.buf, p.off + i * estride, estride, p.off, p.off + n * estride)
+    return _Ptr(p.buf, p.off + i * estride, estride, p.off, p.off + n * estride, p.frame)
 
 
 def _pfield(p, foff, flen, slen):
-    return _Ptr(p.buf, p.off + foff, flen, p.off, p.off + slen)
+    return _Ptr(p.buf, p.off + foff, flen, p.off, p.off + slen, p.frame)
 )PY";
 
     const std::unordered_set<std::string> &pyKeywords() {
@@ -541,12 +560,29 @@ def _pfield(p, foff, flen, slen):
             line(unpack);
         }
       }
-      for (const auto &flag: tree.flagNames)
-        line(flag + " = False");
-      for (const auto &l: f.lets)
-        emitLet(l);
-      if (tree.root)
-        emitNode(tree, *tree.root, f, cfg);
+      const auto emitBody = [&] {
+        for (const auto &flag: tree.flagNames)
+          line(flag + " = False");
+        for (const auto &l: f.lets)
+          emitLet(l);
+        if (tree.root)
+          emitNode(tree, *tree.root, f, cfg);
+      };
+      if (!takesAddress_) {
+        emitBody();
+        return;
+      }
+      // The storage behind a pointer this function hands out is a Python
+      // list, which an escaped pointer keeps alive well past the return.
+      // The frame says what the object graph cannot: that the activation
+      // owning it is gone (SPEC §7.5 rule 27). `finally` so a trap unwinding
+      // through here closes the frame too, and so the return expression is
+      // evaluated while the frame is still open.
+      line(std::string(kFrameCell) + " = [True]");
+      line("try:");
+      suite(emitBody);
+      line("finally:");
+      suite([&] { line(std::string(kFrameCell) + "[0] = False"); });
     });
     stmtCount_ = 0;
     indent_ = 0;

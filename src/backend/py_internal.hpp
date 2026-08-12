@@ -4,6 +4,12 @@
 
 namespace refractir {
 
+  // The per-activation liveness cell in emitted Python. A one-element list
+  // because the pointers that read it are handed out before the function
+  // returns and must see the flag change; the leading underscore keeps it
+  // clear of pyLocal's mangling, as with the `_brk_` / `_go_` control flags.
+  inline constexpr const char *kFrameCell = "_frame";
+
   // Python float-literal formatter. Unlike the C/WASM backends (whose
   // grammars need suffixes / infinity syntax and carry their own
   // formatters), Python's decimal float grammar is exactly the

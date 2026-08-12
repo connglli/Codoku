@@ -187,8 +187,10 @@ namespace refractir {
     PathInfo p = resolvePath(arg.lv);
     if (!p.boxed)
       throw std::runtime_error("python target: addr of a non-boxed local (backend bug)");
+    // `addr` names a `let mut` of the executing function (spec §3.5.2), so the
+    // storage is always this activation's and the frame cell always in scope.
     return "_Ptr(" + p.buf + ", " + p.off + ", " + std::to_string(byteSize(p.type)) + ", " + p.lo +
-           ", " + p.hi + ")";
+           ", " + p.hi + ", " + kFrameCell + ")";
   }
 
   std::string PyBackend::loadAtomStr(const LoadAtom &arg) {
@@ -428,6 +430,7 @@ namespace refractir {
 
   void PyBackend::collectBoxedRoots(const FunDecl &f) {
     boxedRoots_.clear();
+    takesAddress_ = false;
     // Top-level vector locals/params are managed by the
     // vec-lowering strategy, not flattened into a boxed leaf-slot
     // list — only array/struct aggregates are boxed roots. (Vectors
@@ -461,6 +464,7 @@ namespace refractir {
             using T = std::decay_t<decltype(arg)>;
             if constexpr (std::is_same_v<T, AddrAtom>) {
               boxedRoots_.insert(arg.lv.base.name);
+              takesAddress_ = true;
             } else if constexpr (std::is_same_v<T, SelectAtom>) {
               if (arg.cond)
                 walkCond(*arg.cond);

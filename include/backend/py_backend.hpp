@@ -78,6 +78,10 @@ namespace refractir {
     // params, plus scalars whose address is taken. Everything else
     // stays a plain python variable for readability.
     std::unordered_set<std::string> boxedRoots_;
+    // Whether the function takes the address of one of its own locals,
+    // and so can hand a pointer to storage that dies when it returns.
+    // Set by collectBoxedRoots alongside the roots themselves.
+    bool takesAddress_ = false;
     // Struct fields in declaration order, keyed by sigiled name (@S).
     std::unordered_map<std::string, std::vector<std::pair<std::string, TypePtr>>> structFields_;
 
