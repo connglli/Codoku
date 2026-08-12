@@ -26,6 +26,7 @@
 #include "analysis/type_utils.hpp"
 #include "ast/ast.hpp"
 #include "reify/func_desc.hpp"
+#include "reify/hyperparameters.hpp"
 #include "reify/rewrite.hpp"
 #include "reify/state_profile.hpp"
 #include "reify/transform.hpp"
@@ -127,6 +128,10 @@ namespace refractir::reify {
   // concretized path) rides in the shared TransformContext.
   struct CallRealizePlan {
     std::vector<CallRealizeEdge> edges;
+    // Probability that an edge also gets a call site on the caller's executed
+    // path, on top of the unexecuted one it always gets. See
+    // rylink::hp::kPOnPathCall, whose value this defaults to.
+    double pOnPathCall = rylink::hp::kPOnPathCall;
   };
 
   // Whole-program call-realization transform. Owns the peephole rules and
@@ -149,11 +154,11 @@ namespace refractir::reify {
     TransformReport apply(Program &prog, TransformContext &ctx) override;
 
   private:
-    // Realize sites in `caller` that call into `callee`. Filters sites to
-    // those whose callee matches, then rolls a count-keyed acceptance coin
-    // (pRewriteForMatches) per match under `rng`, splicing every
-    // accepted+appliable site — possibly several distinct sites per edge —
-    // up to the per-edge attempts cap. Each site is consumed once (see the
+    // Realize a site in `caller` that calls into `callee`. Filters sites to
+    // those whose callee matches, shuffles them under `rng`, and splices the
+    // first that applies — one executed site per edge, drawn uniformly, with
+    // the per-edge attempts cap bounding the retries a candidate that fails
+    // to apply is allowed. Each site is consumed once (see the
     // composition-safety note below), so a given let-init is never spliced
     // twice. Returns counters for telemetry.
     //

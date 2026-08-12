@@ -225,6 +225,10 @@ struct PerProgConfig {
   // ignores them.
   double pNoinlineCallees = 0.0;
   double pNocloneCallees = 0.0;
+  // Probability that a call-graph edge is also spliced where the run reaches
+  // it. Every edge is realized off-path regardless, so this decides what the
+  // composed program costs to run rather than which calls it contains.
+  double pOnPathCall = rylink::hp::kPOnPathCall;
 };
 
 // Where one bundle's compiled output goes, and how to describe it in the log.
@@ -442,6 +446,7 @@ static bool generateOne(
     ctx.descriptors[nodes[i].funcName] = pool.entries[nodes[i].poolIdx].desc;
 
   CallRealizePlan plan;
+  plan.pOnPathCall = cfg.pOnPathCall;
   for (int i = 0; i < cg.nNodes; ++i)
     for (int j: cg.outEdges[i])
       plan.edges.push_back({nodes[i].funcName, nodes[j].funcName, nodes[j].realizationIdx});
@@ -668,6 +673,11 @@ int main(int argc, char **argv) {
         cxxopts::value<bool>()->default_value("false"))
     ("emit-main", "Generate a main wrapper in the output program",
         cxxopts::value<bool>()->default_value("false"))
+    ("p-onpath-call", "Probability a call-graph edge is also spliced on the caller's "
+                      "executed path; every edge is realized off-path regardless, so this "
+                      "sets what the program costs to run, not which calls it contains",
+        cxxopts::value<double>()->default_value(
+            std::to_string(rylink::hp::kPOnPathCall)))
     ("p-noinline-callees", "Probability each bundled callee is marked noinline",
         cxxopts::value<double>()->default_value("0.0"))
     ("p-noclone-callees", "Probability each bundled callee is marked noclone",
@@ -729,9 +739,11 @@ int main(int argc, char **argv) {
   pc.verbose = res["v"].as<bool>();
   pc.pNoinlineCallees = res["p-noinline-callees"].as<double>();
   pc.pNocloneCallees = res["p-noclone-callees"].as<double>();
+  pc.pOnPathCall = res["p-onpath-call"].as<double>();
   for (auto [name, val]:
        {std::pair{"--p-noinline-callees", pc.pNoinlineCallees},
-        std::pair{"--p-noclone-callees", pc.pNocloneCallees}}) {
+        std::pair{"--p-noclone-callees", pc.pNocloneCallees},
+        std::pair{"--p-onpath-call", pc.pOnPathCall}}) {
     if (val < 0.0 || val > 1.0) {
       std::cerr << "rylink: " << name << " must be in [0, 1] (got " << val << ")\n";
       return 2;

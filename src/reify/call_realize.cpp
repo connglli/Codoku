@@ -1313,28 +1313,28 @@ namespace refractir::reify {
 
     res.found = static_cast<int>(matched.size());
 
-    if (!matched.empty()) {
-      // Accept probability is keyed on the match count (pRewriteForMatches) so
-      // the expected number of rewrites per edge stays bounded no matter how
-      // many sites match, while a lone match is always taken. With the per-
-      // edge break removed, several *distinct* sites may be spliced on one
-      // edge — each on a different let-init, never stacking on the same one.
-      // Keyed on the pre-cap count, so the budget below cannot inflate it.
-      const double pAccept = rylink::hp::pRewriteForMatches(matched.size());
+    // Whether this edge is also spliced where the run reaches it. It gets an
+    // unexecuted site below either way, so the call graph comes out exactly as
+    // planned whichever way the coin falls; what the coin decides is whether
+    // the program pays for the edge at run time, and that is the one property
+    // that multiplies along every path through the call graph rather than
+    // adding to it.
+    std::uniform_real_distribution<double> placement(0.0, 1.0);
+    const bool wantOnPath = placement(rng) < plan_.pOnPathCall;
 
+    if (wantOnPath && !matched.empty()) {
+      // One executed site per edge. The candidates are shuffled first, so the
+      // one that takes is a uniform draw among them, and the loop stops at the
+      // first that applies — the rest are the retries an unappliable draw is
+      // allowed, bounded by kMaxAttemptsPerEdge.
       shuffleAndCap(matched, rng, static_cast<std::size_t>(rylink::hp::kMaxAttemptsPerEdge));
-      std::uniform_real_distribution<double> uni(0.0, 1.0);
 
       for (auto &c: matched) {
-        // A site consumed earlier — on a prior edge or earlier in this very
-        // loop — must not be rewritten again: stacking calls on one let-init
-        // builds an `f1()+f2()+…` left-prefix sum that can wrap. See the
-        // CallRealizeTransform header note. Without break we now re-check here.
-        // A workaround is to introduce new variables and statements first.
-        // A complete solution would land when RefractIR support parentheses.
+        // A site consumed on a prior edge must not be rewritten again:
+        // stacking calls on one let-init builds an `f1()+f2()+…` left-prefix
+        // sum that can wrap. See the CallRealizeTransform header note. A
+        // complete solution would land when RefractIR supports parentheses.
         if (c.site.consumesSite && consumed_.count({&caller, c.site.letIdx}))
-          continue;
-        if (uni(rng) >= pAccept)
           continue;
         if (c.rule->apply(
                 caller, callerDesc, callerProfile, structs, layout, c.site, callee,
@@ -1343,17 +1343,19 @@ namespace refractir::reify {
           if (c.site.consumesSite)
             consumed_.insert({&caller, c.site.letIdx});
           ++res.applied;
+          break;
         }
       }
     }
 
     const auto &rz = callee.realizations[fixedRealizationIdx];
 
-    // Target unexecuted blocks safely. The execution path (block labels)
-    // is recorded in callerDesc.path. Any block in the caller not found in this
-    // path is unexecuted under the solved model, making it safe to populate with
-    // additional calls using randomized arguments. We collect all unexecuted blocks,
-    // shuffle them, and attempt to realize the call edge in one at random.
+    // Every edge gets a site off the executed path, whatever the coin said and
+    // whether or not the splice above took: the bundle's call graph is the
+    // sampled DAG, not a subgraph of it, and a block the run never enters
+    // carries a call at no run-time cost. Arguments are randomized, since
+    // nothing observes them and the callee's solved input is not owed to a
+    // call that never runs.
     std::vector<std::size_t> unexecutedIndices;
     std::unordered_set<std::string> pathSet(callerDesc.path.begin(), callerDesc.path.end());
     for (std::size_t i = 0; i < caller.blocks.size(); ++i) {
@@ -1367,6 +1369,26 @@ namespace refractir::reify {
       if (insertCallInUnexecBlock(caller, calleeFn, callee, rz, rng, i, true)) {
         ++res.applied;
         break;
+      }
+    }
+
+    // Nothing took the edge anywhere — no unexecuted block would host it, and
+    // the coin had declined the executed path. Splicing it on-path after all
+    // keeps the call graph exact, at the cost of the coin's answer.
+    if (res.applied == 0 && !wantOnPath) {
+      shuffleAndCap(matched, rng, static_cast<std::size_t>(rylink::hp::kMaxAttemptsPerEdge));
+      for (auto &c: matched) {
+        if (c.site.consumesSite && consumed_.count({&caller, c.site.letIdx}))
+          continue;
+        if (c.rule->apply(
+                caller, callerDesc, callerProfile, structs, layout, c.site, callee,
+                fixedRealizationIdx, rng
+            )) {
+          if (c.site.consumesSite)
+            consumed_.insert({&caller, c.site.letIdx});
+          ++res.applied;
+          return res;
+        }
       }
     }
 

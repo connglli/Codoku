@@ -1,6 +1,5 @@
 #pragma once
 
-#include <bit>
 #include <climits>
 #include <cstddef>
 #include <cstdint>
@@ -452,39 +451,39 @@ namespace refractir::reify::rylink::hp {
   // Rewrite engine
   //
   // Per caller→callee edge, the engine enumerates rewrite *sites* in the
-  // caller AST (literal initializers),
-  // filters them to the candidates whose callee matches, and then rolls an
-  // acceptance coin per matched candidate. kMaxAttemptsPerEdge bounds the
-  // fallible apply() retries; pRewriteForMatches() supplies the per-match
-  // accept probability, throttled by match count so a caller saturated with
-  // matching literals does not degenerate into a long chain of calls and
-  // lose all resemblance to the original synthesised program.
+  // caller AST, filters them to the candidates whose callee matches, shuffles
+  // them, and splices the first one that applies. An edge therefore lands at
+  // exactly one site on the caller's executed path, drawn uniformly among
+  // those that fit, and kMaxAttemptsPerEdge bounds the retries a candidate
+  // that fails to apply is allowed.
+  //
+  // The one-site rule is a bound on the whole bundle, not a per-caller taste
+  // setting. Calls made per activation multiply along every path through the
+  // call graph, so admitting a second site on one edge does not add a call, it
+  // adds a factor — and the composed program's cost grows exponentially in the
+  // graph's depth instead of with its size.
   // ===========================================================================
   inline constexpr int kMaxAttemptsPerEdge = 32; // hard work budget per edge
 
-  // Acceptance probability for a single *matched* candidate, keyed on the
-  // number of matched candidates `n` on the edge.
+  // Probability that an edge also gets a call site on the caller's executed
+  // path. Every edge gets one in an unexecuted block regardless, so the
+  // emitted call graph is the sampled DAG exactly either way; what this coin
+  // decides is what the program pays for the edge at run time.
   //
-  // rewriteEdge filters sites to the matching ones and then rolls this coin
-  // per match (with the per-edge `break` removed, so several distinct sites
-  // can be spliced on one edge). A flat probability would make the expected
-  // number of rewrites grow linearly with the match count and saturate a
-  // caller with calls — the very degeneration the throttle exists to
-  // prevent. Halving the probability per power-of-two bucket keeps the
-  // expectation n·p in [1, 2) for every n, while a lone match (n == 1) is
-  // always taken so an edge never "fails" when a perfect site exists:
+  // That is the whole cost model. A caller's activations multiply by its
+  // executed out-degree at every level of the graph, so the calls a run makes
+  // go as (out-degree · p) raised to the graph's depth. With kMaxOutDegree 3
+  // the process turns from dying out to compounding at p = 1/3, and the
+  // measured cost at 64 nodes moves over four orders of magnitude as p goes
+  // from 0.4 to 0.7. It is a steep knob, and it is the only one: nothing
+  // downstream bounds a program whose branching already exceeds one.
   //
-  //   n = 1      -> 100%      n = 8..15 -> 12.5%
-  //   n = 2..3   -> 50%       n >= 16   -> 1 / 2^floor(log2 n)
-  //   n = 4..7   -> 25%
-  //
-  // std::bit_floor(n) is the largest power of two not exceeding n (and 0 at
-  // n == 0), so 1/bit_floor(n) realizes the curve directly.
-  [[nodiscard]] inline constexpr double pRewriteForMatches(std::size_t n) noexcept {
-    if (n == 0)
-      return 0.0;
-    return 1.0 / static_cast<double>(std::bit_floor(n));
-  }
+  // At 0.55 a 64-node bundle runs a few thousand calls and executes about
+  // three quarters of its functions. The rest are compiled but never reached,
+  // so a code-generation bug in them still has to be handled correctly while a
+  // wrong *answer* there stays out of the checksum oracle's view. Lowering it
+  // trades that reach for cost, steeply.
+  inline constexpr double kPOnPathCall = 0.55;
 
   // Per call-argument choice between the two argument modes
   // Whether one call argument is stated in terms of what the caller holds

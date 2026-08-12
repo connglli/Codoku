@@ -394,6 +394,171 @@ def test_rewrite_introduces_call(rylink, rysmith):
       )
 
 
+def _executed_sites_per_edge(program_sir, pool):
+  """Executed call sites per (caller, callee) edge in a bundled program.
+
+  A site counts when it stands in a block the caller's descriptor path names,
+  since only those run. Returns {(caller, callee): count}.
+  """
+  paths = {}
+  for fn in os.listdir(pool):
+    if not fn.endswith(".json"):
+      continue
+    with open(os.path.join(pool, fn)) as fh:
+      d = json.load(fh)
+    paths[d["name"]] = set(d.get("path", []))
+
+  counts = {}
+  caller = None
+  block = None
+  for line in open(program_sir):
+    m = re.match(r"^fun (@\w+)\(", line)
+    if m:
+      caller, block = m.group(1), None
+      continue
+    if caller is None:
+      continue
+    if line.startswith("}"):
+      caller = None
+      continue
+    m = re.match(r"^(\^\w+):", line)
+    if m:
+      block = m.group(1)
+      continue
+    if block is None or block not in paths.get(caller, set()):
+      continue
+    for callee in re.findall(r"call (@func_\w+)\(", line):
+      counts[(caller, callee)] = counts.get((caller, callee), 0) + 1
+  return counts
+
+
+def test_one_executed_site_per_edge(rylink, rysmith):
+  """An edge is realized at no more than one site on the caller's executed
+  path. Several would multiply the calls each activation makes, and that
+  multiplies again at every level of the call graph, so a program's cost
+  grows exponentially in its depth rather than with its size."""
+  with tempfile.TemporaryDirectory() as pool:
+    seed_pool(rysmith, pool, n_funcs=12, seed=31)
+    with tempfile.TemporaryDirectory() as out:
+      r = run(
+        [
+          rylink,
+          "--input-dir",
+          pool,
+          "--n-progs",
+          "4",
+          "--n-nodes",
+          "10",
+          "--seed",
+          "5",
+          "--no-antiopt",
+          "-o",
+          out,
+        ]
+      )
+      check("rylink one-site-test exits 0", r.returncode == 0, r.stderr[:200])
+      gid = extract_id(r.stdout)
+      if gid is None:
+        check("rylink id discovery for one-site-test", False, "no id in stdout")
+        return
+      worst, seen_any = 0, False
+      for i in range(4):
+        p = os.path.join(out, f"prog_{gid}_{i}", "program.sir")
+        if not os.path.isfile(p):
+          continue
+        counts = _executed_sites_per_edge(p, pool)
+        if counts:
+          seen_any = True
+          worst = max(worst, max(counts.values()))
+      check(
+        "one-site-test saw at least one realized edge",
+        seen_any,
+        "no executed call site in any program",
+      )
+      check(
+        "no edge is spliced at more than one executed site",
+        worst <= 1,
+        f"worst edge carries {worst} executed sites",
+      )
+
+
+def _planned_vs_realized(program_sir):
+  """(planned CG edges, edges with no call site anywhere) for a bundle.
+
+  The `// CG:` banner names every edge the composition planned; the emitted
+  program must contain a call for each, executed or not.
+  """
+  txt = open(program_sir).read().splitlines()
+  names, planned = {}, set()
+  for line in txt:
+    m = re.match(r"^//\s+n(\d+) (@\w+)(.*)$", line)
+    if not m:
+      continue
+    names[int(m.group(1))] = m.group(2)
+    for tok in m.group(3).split():
+      if tok.startswith("n"):
+        planned.add((int(m.group(1)), int(tok[1:])))
+
+  realized, caller = set(), None
+  for line in txt:
+    m = re.match(r"^fun (@\w+)\(", line)
+    if m:
+      caller = m.group(1)
+      continue
+    if caller is None:
+      continue
+    if line.startswith("}"):
+      caller = None
+      continue
+    for callee in re.findall(r"call (@func_\w+)\(", line):
+      realized.add((caller, callee))
+
+  named = {(names[i], names[j]) for i, j in planned}
+  return named, named - realized
+
+
+def test_call_graph_realized_exactly(rylink, rysmith):
+  """Every edge of the sampled DAG appears as a real call site. Whether the
+  site sits in an executed block is a coin, but the emitted call graph is the
+  planned one either way — an edge that reached no block at all would make the
+  bundle's call graph a strict subgraph of the one it reports."""
+  with tempfile.TemporaryDirectory() as pool:
+    seed_pool(rysmith, pool, n_funcs=12, seed=41)
+    with tempfile.TemporaryDirectory() as out:
+      r = run(
+        [
+          rylink,
+          "--input-dir",
+          pool,
+          "--n-progs",
+          "4",
+          "--n-nodes",
+          "10",
+          "--seed",
+          "13",
+          "--no-antiopt",
+          "-o",
+          out,
+        ]
+      )
+      check("rylink cg-fidelity-test exits 0", r.returncode == 0, r.stderr[:200])
+      gid = extract_id(r.stdout)
+      if gid is None:
+        check("rylink id discovery for cg-fidelity-test", False, "no id in stdout")
+        return
+      total, worst, detail = 0, 0, ""
+      for i in range(4):
+        p = os.path.join(out, f"prog_{gid}_{i}", "program.sir")
+        if not os.path.isfile(p):
+          continue
+        planned, missing = _planned_vs_realized(p)
+        total += len(planned)
+        if len(missing) > worst:
+          worst, detail = len(missing), f"prog {i} drops {sorted(missing)[:3]}"
+      check("cg-fidelity-test planned some edges", total > 0, "no CG edges found")
+      check("every planned CG edge is realized somewhere", worst == 0, detail)
+
+
 def test_rewrite_offset_in_range(rylink, rysmith, symirc):
   """The rewrite engine declines splices whose `offset = c - ret`
   doesn't fit the let's signed range — otherwise the C lowering of
@@ -1008,6 +1173,10 @@ def main():
   test_validate(rylink, rysmith, symiri)
   print("=== rylink peephole rewrite fires ===")
   test_rewrite_introduces_call(rylink, rysmith)
+  print("=== rylink one executed call site per edge ===")
+  test_one_executed_site_per_edge(rylink, rysmith)
+  print("=== rylink realizes the call graph exactly ===")
+  test_call_graph_realized_exactly(rylink, rysmith)
   print("=== rylink antiopt rewrites the bundle ===")
   test_antiopt_rewrites_the_bundle(rylink, rysmith, symiri)
   print("=== rylink --no-antiopt leaves the bundle alone ===")
