@@ -149,7 +149,7 @@ This is what makes rule 15 type-safe. Arithmetic is permissive, and the derefere
 
 `load %p`, `store %p, v`, `ptrindex %p, i` or `ptrfield %p, f` where `%p`'s provenance object belonged to a `fun` activation that has already returned. Rules 10 and 11 are stated against a provenance object; this one covers the case where there is none left. Provenance identity decides rather than the address, so a released activation's storage may be reused and the stale pointer still must not reach it.
 
-A pointer only gets into this state by being published out of the activation that owns it — written through an out-parameter, or returned from a `ptr`-typed `fun`. A pointer passed *into* a callee is unaffected, since the caller is live for the whole call.
+A pointer only gets into this state by being published out of the activation that owns it, written through an out-parameter, or returned from a `ptr`-typed `fun`. A pointer passed *into* a callee is unaffected, since the caller is live for the whole call.
 
 `symiri` releases an activation's objects when it returns and never reuses a provenance id, so the dereference finds no object for its id and reports an unknown address, whatever later activation has come to occupy the storage. `symirsolve` tags a pointer by the activation as well as the local it names, so a returned frame's tags match none of the cells the load/store dispatch enumerates and its `anyMatch` guard (the same one that carries rules 11 and 15b) makes the path infeasible. `symirc` does **not** enforce this rule: the emitted C reads through a pointer to a returned function's local, which is UB that neither the C compiler nor UBSan reliably traps, so a test for it carries `SKIP: COMPILER`.
 

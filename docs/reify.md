@@ -24,7 +24,7 @@ Let `T` be that program with the values that matter left as symbols, and `T[x]` 
 ∃x. follows(T[x], pi) ∧ safe(T[x], pi) ∧ interesting(x)
 ```
 
-`follows` is the conjunction of the branch conditions `pi` decides, and `safe` the UB guard of every operation `pi` executes; between them they carry what construction could not. `interesting` answers to no clause at all — it excludes degenerate values, and its job is to make the program worth compiling. Every conjunct is a bit-vector formula over `x`, so this is a first-order existential over values: decidable, and settled by a single query. A model is `P`, the values it gives the parameters are `i`, and running it produces `o`.
+`follows` is the conjunction of the branch conditions `pi` decides, and `safe` the UB guard of every operation `pi` executes; between them they carry what construction could not. `interesting` answers to no clause at all; it excludes degenerate values, and its job is to make the program worth compiling. Every conjunct is a bit-vector formula over `x`, so this is a first-order existential over values: decidable, and settled by a single query. A model is `P`, the values it gives the parameters are `i`, and running it produces `o`.
 
 Which conjuncts are asserted decides what kind of program comes out. `safe` as stated gives a clean run, `¬safe` one that triggers UB, and a `pi` that returns to a loop header in the state it left one that diverges.
 
@@ -138,11 +138,11 @@ The leaves arrive already satisfying the three clauses, and composition adds a f
 
 `e1` builds the callee's parameters out of variables the caller has in scope, and `e2` turns the callee's return value back into the variable or constant the caller wanted. Neither may trap, and neither may the call between them, since the program has to stay UB-free on `i`. Both are unknown functions, so this is a second-order synthesis problem.
 
-What collapses it is that `f` is known at the inputs it was concretized on and nowhere else. A non-constant `e1` would demand `f`'s behaviour at every state in `S` — behaviour nobody has computed, on inputs the callee was never proven UB-free for.
+What collapses it is that `f` is known at the inputs it was concretized on and nowhere else. A non-constant `e1` would demand `f`'s behaviour at every state in `S`; behaviour nobody has computed, on inputs the callee was never proven UB-free for.
 
 In `rylink`, `e1` is therefore *value*-constant, pinned to an input `f` was concretized on. Then `f(e1(s))` is the known `o` whatever `s` is, the callee runs on an input it was proven safe for, and `e2` is left alone and first-order: for a constant `v = c`, it is `+ (c - o)`.
 
-Being pinned in value does not make `e1` a literal. It is drawn from a catalog of constructions, each of which reaches the same `i` from whatever the caller holds where the call lands — writing `σ₁…σₘ` for the distinct states the profiled run passes that point in:
+Being pinned in value does not make `e1` a literal. It is drawn from a catalog of constructions, each of which reaches the same `i` from whatever the caller holds where the call lands, writing `σ₁…σₘ` for the distinct states the profiled run passes that point in:
 
 ```
 literal-or-bias   e1 = %x + (i - x)                  %x steady at x across every σⱼ
