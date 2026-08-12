@@ -13,7 +13,7 @@ namespace refractir {
   // deliberately lossy: floats print at default precision and aggregates
   // collapse to an ellipsis. formatRuntimeValue is the bit-exact one; the two
   // are not interchangeable, and cross-validation depends on that.
-  std::string Interpreter::rvToString(const RuntimeValue &rv) const {
+  std::string rvToString(const RuntimeValue &rv) {
     switch (rv.kind) {
       case RuntimeValue::Kind::Int:
         return std::to_string(rv.intVal);

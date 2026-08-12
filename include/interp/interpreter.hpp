@@ -41,6 +41,7 @@ namespace refractir {
      * @param entryFuncName The name of the function to start execution from.
      * @param symBindings Mapping of symbolic identifiers to concrete values.
      * @param dumpExec Whether to print execution trace to stderr.
+     * @param dumpCall Whether to print one line per function activation.
      */
     // One binding is an ordered list of scalar values: a
     // single entry for scalar syms (or a vector splat), one entry per
@@ -59,7 +60,8 @@ namespace refractir {
     // nor re-parses it.
     std::optional<RuntimeValue>
     run(const std::string &entryFuncName, const SymBindings &symBindings,
-        const std::vector<std::string> &paramArgs = {}, bool dumpExec = false);
+        const std::vector<std::string> &paramArgs = {}, bool dumpExec = false,
+        bool dumpCall = false);
 
     // RuntimeValue and Store are defined in interp/value.hpp at namespace
     // scope so the memory / type-layout collaborators can share them.
@@ -97,6 +99,7 @@ namespace refractir {
     const Program &prog_;
     std::ostream &out_; // sink for Result: / dump-exec (default std::cout)
     bool dumpExec_ = false;
+    bool dumpCall_ = false;
     // Owns the struct registry + pure type-layout queries (sizeofType,
     // getCellTypeAtOffset, fieldOffset). Frame-independent; see TypeLayout.
     TypeLayout typeLayout_;
@@ -120,7 +123,6 @@ namespace refractir {
     // per-lane list). Shared by the entry and nested-call paths.
     RuntimeValue bindSymValue(const SymDecl &s, const std::vector<SymScalar> &vals);
     RuntimeValue evalInit(const InitVal &iv, const TypePtr &t, const Store &store);
-    std::string rvToString(const RuntimeValue &rv) const;
 
     std::optional<RuntimeValue> execFunction(
         const FunDecl &f, const std::vector<RuntimeValue> &args, const SymBindings &symBindings

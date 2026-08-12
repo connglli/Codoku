@@ -37,7 +37,7 @@ Expressions evaluate left to right, `select` evaluates only the arm it takes, an
 
 Undefined behaviour aborts the run with a diagnostic naming the rule and the source span, and the process exits non-zero. [undefined.md](./undefined.md) states each rule and how the interpreter enforces it.
 
-`--check` stops after the frontend, reporting type and semantic errors without executing. `--dump-trace` prints each executed block and every variable update. `--max-bbl-steps <n>` aborts after entering `n` blocks, which bounds a program that may not terminate.
+`--check` stops after the frontend, reporting type and semantic errors without executing. `--dump-trace` prints each executed block and every variable update. `--max-bbl-steps <n>` aborts after entering `n` blocks, which bounds a program that may not terminate. `--dump-call` prints each function calls.
 
 ## Result reporting
 

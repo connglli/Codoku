@@ -49,4 +49,14 @@ namespace refractir {
    */
   [[nodiscard]] std::string formatRuntimeValue(const RuntimeValue &v);
 
+  /**
+   * The text version of a runtime value, for a person reading along.
+   *
+   * Deliberately lossy where formatRuntimeValue is exact: floats print at
+   * default decimal precision and aggregates collapse to an ellipsis. Every
+   * value has some rendering here, which is what a trace wants and what a
+   * recorded value must not have.
+   */
+  [[nodiscard]] std::string rvToString(const RuntimeValue &v);
+
 } // namespace refractir

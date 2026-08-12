@@ -24,7 +24,7 @@ namespace refractir {
 
   std::optional<RuntimeValue> Interpreter::run(
       const std::string &entryFuncName, const SymBindings &symBindings,
-      const std::vector<std::string> &paramArgs, bool dumpExec
+      const std::vector<std::string> &paramArgs, bool dumpExec, bool dumpCall
   ) {
     // Ensure IEEE 754 RNE rounding mode regardless of process FP environment.
     std::fesetround(FE_TONEAREST);
@@ -38,6 +38,7 @@ namespace refractir {
     _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_OFF);
 #endif
     dumpExec_ = dumpExec;
+    dumpCall_ = dumpCall;
     nextFrameId_ = 0;
     blockSteps_ = 0;
     const FunDecl *entry = nullptr;
@@ -323,6 +324,17 @@ namespace refractir {
     }
   }
 
+  namespace {
+    // A `--dump-call` operand. formatRuntimeValue is the bit-exact rendering,
+    // which is what lets an argument or a result be compared against the value a
+    // generator solved for. It has none for aggregates and vectors, and those
+    // fall back to the elided form `--dump-trace` prints.
+    std::string formatCallValue(const RuntimeValue &rv) {
+      const std::string text = formatRuntimeValue(rv);
+      return text.empty() ? rvToString(rv) : text;
+    }
+  } // namespace
+
   void Interpreter::runBlocks(const FunDecl &f, Store &store, std::optional<RuntimeValue> *outRet) {
     DiagBag diags;
     CFG cfg = CFG::build(f, diags);
@@ -331,6 +343,17 @@ namespace refractir {
 
     const std::uint64_t frameId = nextFrameId_++;
     std::size_t pc = cfg.entry;
+
+    if (dumpCall_) {
+      out_ << "> " << f.name.name << "(";
+      for (std::size_t i = 0; i < f.params.size(); ++i) {
+        const std::string &name = f.params[i].name.name;
+        const auto bound = store.find(name);
+        out_ << (i ? ", " : "") << name << " = "
+             << (bound == store.end() ? "?" : formatCallValue(bound->second));
+      }
+      out_ << ")\n";
+    }
 
     while (true) {
       // Block-step budget (see setMaxBlockSteps): bound a possibly non-
@@ -341,7 +364,7 @@ namespace refractir {
 
       const Block &block = f.blocks[pc];
       if (dumpExec_) {
-        out_ << block.label.name << ":\n";
+        out_ << f.name.name << " " << block.label.name << ":\n";
       }
 
       // State-capture hook (see setStateHook): record the store the block
@@ -357,7 +380,7 @@ namespace refractir {
               if constexpr (std::is_same_v<T, AssignInstr>) {
                 RuntimeValue rhs = evalExpr(i.rhs, store);
                 if (dumpExec_) {
-                  out_ << "  " << i.lhs.base.name;
+                  out_ << f.name.name << "   " << i.lhs.base.name;
                   for (const auto &acc: i.lhs.accesses) {
                     if (auto ai = std::get_if<AccessIndex>(&acc)) {
                       out_ << "[";
@@ -560,6 +583,13 @@ namespace refractir {
 
       if (!jumped)
         break;
+    }
+
+    if (dumpCall_) {
+      out_ << "< " << f.name.name;
+      if (outRet && *outRet)
+        out_ << " = " << formatCallValue(**outRet);
+      out_ << "\n";
     }
   }
 
