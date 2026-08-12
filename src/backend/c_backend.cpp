@@ -16,6 +16,12 @@
 
 namespace refractir {
 
+  // What the emitted C needs to be compiled with so that sanitizer-delegated
+  // rules trap rather than silently running on.  Stamped into the emitted
+  // header as a `// sanitizers:` comment.
+  constexpr const char *kRequiredSanitizers = "-fsanitize=address,undefined,float-cast-overflow,"
+                                              "pointer-compare,pointer-subtract";
+
   void CBackend::indent() {
     for (int i = 0; i < indent_level_; ++i)
       out_ << "  ";
@@ -381,6 +387,17 @@ namespace refractir {
       out_ << "#endif\n";
       out_ << "#pragma STDC FP_CONTRACT OFF\n";
       out_ << "\n";
+
+      // How this file is meant to be built. The C backend guards what C
+      // cannot express and delegates the rest to sanitizers, so the set is
+      // part of the emitted program's semantics rather than a build
+      // preference: `address` carries §7.5 rule 27, `undefined` rules 1, 2,
+      // 4, 5 and 9 through 12, `float-cast-overflow` rule 8, and
+      // `pointer-compare` / `pointer-subtract` rule 14. Built without them
+      // the program runs on, accepting inputs the spec calls undefined.
+      // `--no-ub-guards` drops the explicit guards and not these.
+      out_ << "\n// Use these sanitizers to guard undefined behavior:";
+      out_ << "\n// " << kRequiredSanitizers << "\n";
 
       // Vector-lowering strategy. Default to vecext.
       if (!vecLowering_) {

@@ -27,6 +27,11 @@ from concurrent.futures import ThreadPoolExecutor
 
 from test.lib.style import bold, green, red, yellow
 
+# ASan pulls in LeakSanitizer, whose end-of-process scan needs ptrace and
+# dies where that is unavailable — taking every otherwise-passing binary
+# with it. Leaks are not what these suites test.
+os.environ.setdefault("LSAN_OPTIONS", "detect_leaks=0")
+
 # Match either an integer Result (i*) or a hex-float Result (`%a` form
 # used by both symiri and the C-side printf when the return is f32/f64).
 # Examples: `Result: -42`, `Result: 0x1.5p+10`, `Result: -0x0p+0`,
@@ -321,7 +326,7 @@ def _classify(label, sir_path, c_paths, parsed, symiri, clang, main_c, exe, verb
       main_c,
       "-o",
       exe,
-      "-fsanitize=undefined",
+      "-fsanitize=address,undefined",
       "-fno-sanitize-recover=all",
       "-w",
       "-lm",

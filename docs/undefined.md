@@ -2,7 +2,7 @@
 
 This document is a per-rule companion to spec §7. Each rule states what makes an operation undefined and how `symiri`, `symirc` and `symirsolve` each enforce it. The rule numbers are the spec's.
 
-RefractIR uses strict UB: if any operation on the executed path triggers UB, the whole path is infeasible. `symiri` aborts on UB and exits non-zero. C emitted by `symirc` runs under UBSan with `-fno-sanitize-recover=all`, so UB traps the executable. `symirsolve` adds the UB-precluding constraint to the path condition, so a satisfiable model is one that avoids the UB.
+RefractIR uses strict UB: if any operation on the executed path triggers UB, the whole path is infeasible. `symiri` aborts on UB and exits non-zero. C emitted by `symirc` runs under ASan and UBSan with `-fno-sanitize-recover=all`, so UB traps the executable. `symirsolve` adds the UB-precluding constraint to the path condition, so a satisfiable model is one that avoids the UB.
 
 `symirc --no-ub-guards` removes the dynamic guards described in the `symirc` notes below, meaning the explicit `__builtin_trap` / `unreachable` / runtime-helper checks, but not the UBSan-level ones, which belong to the C compiler invocation. It is sound only for a program known to be UB-free, where those guards never fire ([symirc.md](./symirc.md#omitting-ub-guards)). The reify tools set it automatically for their UB-free output.
 
@@ -147,11 +147,9 @@ This is what makes rule 15 type-safe. Arithmetic is permissive, and the derefere
 
 ### Rule 27, dereferencing a pointer to a dead activation
 
-`load %p`, `store %p, v`, `ptrindex %p, i` or `ptrfield %p, f` where `%p`'s provenance object belonged to a `fun` activation that has already returned. Rules 10 and 11 are stated against a provenance object; this one covers the case where there is none left. Provenance identity decides rather than the address, so a released activation's storage may be reused and the stale pointer still must not reach it.
+`load %p`, `store %p, v`, `ptrindex %p, i` or `ptrfield %p, f` where `%p`'s provenance object belonged to a `fun` activation that has already returned. Rules 10 and 11 are stated against a provenance object; this one covers the case where there is none left. A pointer reaches it only by being published out of the activation that owns it, through an out-parameter or a `ptr`-typed return; one passed *into* a callee is unaffected, since the caller is live for the whole call.
 
-A pointer only gets into this state by being published out of the activation that owns it, written through an out-parameter, or returned from a `ptr`-typed `fun`. A pointer passed *into* a callee is unaffected, since the caller is live for the whole call.
-
-`symiri` releases an activation's objects when it returns and never reuses a provenance id, so the dereference finds no object for its id and reports an unknown address, whatever later activation has come to occupy the storage. `symirsolve` tags a pointer by the activation as well as the local it names, so a returned frame's tags match none of the cells the load/store dispatch enumerates and its `anyMatch` guard (the same one that carries rules 11 and 15b) makes the path infeasible. `symirc` does **not** enforce this rule: the emitted C reads through a pointer to a returned function's local, which is UB that neither the C compiler nor UBSan reliably traps, so a test for it carries `SKIP: COMPILER`.
+`symiri` releases an activation's objects on return and never reuses a provenance id, so the dereference finds no object for its id. `symirc` delegates to AddressSanitizer's `stack-use-after-return`, which needs `-fsanitize=address`, UBSan alone letting the read succeed; the WASM backend does not enforce the rule, since it restores `$__stack_pointer` on return and separating a stale address from a live one there needs shadow memory. `symirsolve` tags a pointer by its activation as well as its local, so a returned frame's tags match none of the cells the load/store dispatch enumerates.
 
 ## Vector UB (§7.6)
 

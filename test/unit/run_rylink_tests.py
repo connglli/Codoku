@@ -27,6 +27,11 @@ import subprocess
 import sys
 import tempfile
 
+# ASan pulls in LeakSanitizer, whose end-of-process scan needs ptrace and
+# dies where that is unavailable — taking every otherwise-passing binary
+# with it. Leaks are not what these suites test.
+os.environ.setdefault("LSAN_OPTIONS", "detect_leaks=0")
+
 GREEN = "\033[32m"
 RED = "\033[31m"
 GRAY = "\033[90m"
@@ -622,7 +627,7 @@ def test_rewrite_offset_in_range(rylink, rysmith, symirc):
             main_c,
             "-o",
             exe,
-            "-fsanitize=undefined",
+            "-fsanitize=address,undefined",
             "-fno-sanitize-recover=all",
             "-w",
             "-lm",

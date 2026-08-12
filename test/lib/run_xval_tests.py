@@ -20,6 +20,11 @@ import tempfile
 
 from test.lib.framework import TestResult, run_command, run_test_suite
 
+# ASan pulls in LeakSanitizer, whose end-of-process scan needs ptrace and
+# dies where that is unavailable — taking every otherwise-passing binary
+# with it. Leaks are not what these suites test.
+os.environ.setdefault("LSAN_OPTIONS", "detect_leaks=0")
+
 _FUN_RE = re.compile(r"fun\s+@([a-zA-Z0-9_]+)\(\)\s*:\s*(i[0-9]+|f32|f64)")
 _RESULT_RE = re.compile(r"Result:\s*(\S+)")
 _EXPECT_RC_RE = re.compile(r"//\s*EXPECT_RC:\s*(\S+)")
@@ -128,7 +133,7 @@ def run_xval_test(refractiri_path, refractirc_path, gcc_path, refractirc_extra=N
         main_c,
         "-o",
         exe,
-        "-fsanitize=undefined",
+        "-fsanitize=address,undefined",
         "-fno-sanitize-recover=all",
         "-w",
         "-lm",
