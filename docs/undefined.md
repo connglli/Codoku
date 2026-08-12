@@ -145,6 +145,14 @@ This is what makes rule 15 type-safe. Arithmetic is permissive, and the derefere
 
 `symiri` checks `offset != size` before each navigation, `symirc` emits the guard alongside the rule-17 null check, and `symirsolve` adds `(distinct offset size)` at every navigation.
 
+### Rule 27, dereferencing a pointer to a dead activation
+
+`load %p`, `store %p, v`, `ptrindex %p, i` or `ptrfield %p, f` where `%p`'s provenance object belonged to a `fun` activation that has already returned. Rules 10 and 11 are stated against a provenance object; this one covers the case where there is none left. Provenance identity decides rather than the address, so a released activation's storage may be reused and the stale pointer still must not reach it.
+
+A pointer only gets into this state by being published out of the activation that owns it — written through an out-parameter, or returned from a `ptr`-typed `fun`. A pointer passed *into* a callee is unaffected, since the caller is live for the whole call.
+
+`symiri` releases an activation's objects when it returns and never reuses a provenance id, so the dereference finds no object for its id and reports an unknown address, whatever later activation has come to occupy the storage. `symirc` does **not** enforce this rule: the emitted C reads through a pointer to a returned function's local, which is UB that neither the C compiler nor UBSan reliably traps, so a test for it carries `SKIP: COMPILER`. `symirsolve` does not model activation lifetime and carries `SKIP: SOLVER` for the same reason.
+
 ## Vector UB (§7.6)
 
 ### Rule 20, out-of-bounds vector lane access
@@ -231,6 +239,7 @@ Literal range checks. Every integer literal, decimal, hex, octal or binary, is c
 | 17 | Navigation through `null` | §7.5 |
 | 18 | Navigation through `undef` | §7.5 |
 | 19 | Navigation from one-past-the-end | §7.5 |
+| 27 | Pointer to a dead activation | §7.5 |
 | 20 | Out-of-bounds vector lane access | §7.6 |
 | 21 | Lane-wise scalar UB | §7.6 |
 | 22 | Reading an `undef` vector lane | §7.6 |

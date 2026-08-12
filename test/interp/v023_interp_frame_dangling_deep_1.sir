@@ -1,0 +1,30 @@
+// EXPECT: FAIL:UndefinedBehavior
+// SKIP: COMPILER, SOLVER
+// SPEC v0.2.3 §7.5 rule 27
+// Intention: the escaping frame is two deep, so the pointer outlives an
+// inner activation that a middle one returned through. Nothing on the way
+// out keeps the innermost local alive.
+fun @inner(%out: ptr ptr i32) : i32 {
+  let mut %local: i32 = 31;
+^entry:
+  store %out, addr %local;
+  ret 0;
+}
+
+fun @middle(%out: ptr ptr i32) : i32 {
+  let mut %r: i32 = 0;
+^entry:
+  %r = call @inner(%out);
+  ret %r;
+}
+
+fun @main() : i32 {
+  let mut %p: ptr i32 = null;
+  let mut %pp: ptr ptr i32 = undef;
+  let mut %r: i32 = 0;
+^entry:
+  %pp = addr %p;
+  %r = call @middle(%pp);
+  %r = load %p;
+  ret %r;
+}

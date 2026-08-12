@@ -12,6 +12,14 @@ namespace refractir {
     nextProvId_ = 1;
   }
 
+  void Memory::releaseFrame(const FrameMark &mark) {
+    // Objects are appended in allocation order and an activation only ever
+    // appends, so what it allocated is exactly the tail past the mark.
+    while (objects_.size() > mark.objects)
+      objects_.pop_back();
+    nextAddr_ = mark.nextAddr;
+  }
+
   std::uint64_t Memory::bumpAlloc(std::uint64_t bytes) {
     std::uint64_t base = nextAddr_;
     nextAddr_ += (bytes + 7) & ~7ULL; // 8-byte alignment

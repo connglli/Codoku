@@ -216,6 +216,12 @@ namespace refractir {
     auto savedAddrMap = memory_.addrMap();
     memory_.addrMap().clear();
 
+    // What this activation allocates dies with it. Taken beside the address
+    // map because the two answer the same question at the two ends of a call:
+    // the map keeps the callee's `addr %x` from naming the caller's storage,
+    // and the mark keeps that storage from outliving the callee.
+    const Memory::FrameMark frameMark = memory_.markFrame();
+
     // Bind parameters.
     if (args.size() != f.params.size())
       throw std::runtime_error(
@@ -263,10 +269,12 @@ namespace refractir {
     } catch (...) {
       restoreTypes();
       memory_.addrMap() = std::move(savedAddrMap);
+      memory_.releaseFrame(frameMark);
       throw;
     }
     restoreTypes();
     memory_.addrMap() = std::move(savedAddrMap);
+    memory_.releaseFrame(frameMark);
     return ret.value_or(RuntimeValue{});
   }
 

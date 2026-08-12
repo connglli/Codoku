@@ -106,6 +106,36 @@ namespace refractir {
     /// 8-byte-aligned bump allocation of `bytes`; returns the new base address.
     std::uint64_t bumpAlloc(std::uint64_t bytes);
 
+    /// Where the object table and the allocator stood at a point in time.
+    struct FrameMark {
+      std::size_t objects;
+      std::uint64_t nextAddr;
+    };
+
+    /// The current mark, taken by a caller about to enter an activation.
+    [[nodiscard]] FrameMark markFrame() const { return {objects_.size(), nextAddr_}; }
+
+    /**
+     * Drop every object allocated since `mark` and rewind the allocator to it
+     * — the storage an activation owes back when it returns. Without this the
+     * object table grows with the total number of calls a run makes, and every
+     * provenance lookup scans it, so a program's cost becomes quadratic in its
+     * own call count.
+     *
+     * Provenance ids are *not* rewound, and that is what makes recycling the
+     * addresses safe: a pointer into a released object still carries the id of
+     * that object, which no live one can ever hold again, so every dereference
+     * of it fails its provenance lookup and faults — whatever later activation
+     * comes to occupy the same address. The storage is reused, the identity is
+     * not.
+     *
+     * Heap cells above the rewound watermark are left alone. They are bounded
+     * by the deepest the stack ever goes rather than by how many calls it
+     * makes, and an activation writes every cell it will later read when it
+     * takes a local's address.
+     */
+    void releaseFrame(const FrameMark &mark);
+
     using AddrMap = std::unordered_map<std::string, std::uint64_t>;
 
     std::unordered_map<std::uint64_t, RuntimeValue> &heap() { return heap_; }

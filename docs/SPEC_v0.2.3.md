@@ -534,7 +534,7 @@ Result type: `<K> T`. Index violations are static type errors, not UB.
 
 UB is checked during symbolic execution along the chosen path. Any UB makes the path infeasible.
 
-**Static vs runtime.** Rules 1–22 are inherited from v0.2.1. Rules 23–25 are from v0.2.2. Rule 26 is new in v0.2.3 (§7.8, planned with V3). Conditions caught at check time (undeclared call target, argument-parameter count/type mismatch, recursion cycles, contract-form `decl` call in the interpreter) are semantic errors, not runtime UB — they are rejected before execution begins.
+**Static vs runtime.** Rules 1–22 are inherited from v0.2.1. Rules 23–25 are from v0.2.2. Rule 26 is new in v0.2.3 (§7.8, planned with V3), as is rule 27 (§7.5). Conditions caught at check time (undeclared call target, argument-parameter count/type mismatch, recursion cycles, contract-form `decl` call in the interpreter) are semantic errors, not runtime UB — they are rejected before execution begins.
 
 ### 7.1 Scalar UB
 
@@ -606,6 +606,8 @@ See §2.9 for the full floating-point value model.
 18. **Navigation through `undef` [v0.2.1]**: `ptrindex` and `ptrfield` count as reads of their pointer operand. A `<ptr>` operand whose value is `undef` is UB at the navigation site (consequence of rule 3, made explicit).
 
 19. **Navigation from a one-past-the-end pointer [v0.2.1]**: `ptrindex <ptr>, <i>` or `ptrfield <ptr>, <f>` is UB if `<ptr>` is exactly the one-past-the-end address of its provenance object. That address is valid for arithmetic and equality (rule 10) but does not point to any element to navigate into.
+
+27. **Dereferencing a pointer to a dead activation [New in v0.2.3]**: a `fun` activation's locals are provenance objects (rule 15) that exist only as long as the activation does. `load`, `store`, `ptrindex` and `ptrfield` through a pointer whose provenance object belonged to an activation that has returned are UB. Rules 10 and 11 are already stated against the provenance object; this rule says what happens when there is no longer one to state them against.
 
 ### 7.6 Vector UB [v0.2.1]
 
@@ -1215,6 +1217,7 @@ Every feature v0.2.2 §13 slated for v0.2.3 (WASM SIMD-128, addressable vectors,
 
 **Deferred to later versions:**
 
+- **Defined lifetime model**. UB Rule 27 states locals' lifetime but we do not currently have a formal model.
 - **Per-call-site fresh symbols**. A `sym` in a `fun` body denotes one solver-chosen value shared across all call sites on the path (§9.6.1). Per-call-site instantiation, exposing independent unknowns per call, is deferred.
 - **Callee sub-path syntax** — planned. §9.6.4 promotes the user-chosen path `π` to a tree of block visits, but the surface syntax to specify each callee's sub-path (e.g., a nested `[call @inner: ^entry -> ^body -> ^exit]` form, a per-callee `--call-path @inner=^a,^b` CLI flag, or a JSON object) is deferred. The current solver picks one random path per callee per `solve()` invocation, seeded from `--seed`, with a per-block visit cap to bound loops. A future version will replace the random choice with an exact user-supplied sub-path so synthesis results are fully reproducible across branchy callees.
 - **`@is_bitexact` — a value-identity predicate** — planned. `@is_bitexact(%a: T, %b: T) : i1`, true iff `a` and `b` are the *same* value. For integers it coincides with `==`; for floats it is the stricter relation of §2.9, differing from `==` only on `±0.0`. Today an analysis wanting value identity must open-code it (`@to_bits` equality at the source level, SMT `=` rather than `fp.eq` in the solver, a bit comparison in the interpreter), which is easy to get wrong in exactly one case and only in one direction. A first-class predicate would make the choice between the two relations explicit at the point of use. Lowers to `fp.eq` plus a signbit agreement check, or equivalently to `@to_bits` equality — both cheap and solver-friendly.
