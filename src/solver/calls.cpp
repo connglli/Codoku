@@ -30,12 +30,19 @@ namespace refractir {
     auto savedProv = prov_.take();
     const FunDecl *prevOuterFun = outerFun_;
     SymbolicStore *prevOuterStore = outerStore_;
+    const std::uint64_t prevFrame = currentFrame_;
+    const std::uint64_t prevOuterFrame = outerFrame_;
 
     currentFun_ = &callee;
     // Expose the caller frame so LoadAtom / StoreInstr handlers can
     // route pointer-parameter accesses back to the caller's storage.
     outerFun_ = callerFun;
     outerStore_ = callerStore;
+    // A fresh activation id, never reused within this solve. The callee's
+    // locals are tagged under it, so once the frame is restored below its
+    // pointers name storage no live cell carries.
+    outerFrame_ = currentFrame_;
+    currentFrame_ = nextFrame_++;
 
     SymbolicStore calleeStore;
 
@@ -44,6 +51,8 @@ namespace refractir {
       prov_.restore(std::move(savedProv));
       outerFun_ = prevOuterFun;
       outerStore_ = prevOuterStore;
+      currentFrame_ = prevFrame;
+      outerFrame_ = prevOuterFrame;
     };
 
     try {
@@ -228,7 +237,7 @@ namespace refractir {
                     auto it = calleeStore.find(l.name.name);
                     if (it == calleeStore.end())
                       continue;
-                    enumStoreFrame(l.type, it->second, tagOfLocal(l.name.name), 0);
+                    enumStoreFrame(l.type, it->second, tagOfLocal(currentFrame_, l.name.name), 0);
                   }
                   // Caller frame: stores rooted in caller-visible
                   // addresses exposed via pointer parameters.  The mux
@@ -241,7 +250,7 @@ namespace refractir {
                       auto it = callerStore->find(l.name.name);
                       if (it == callerStore->end())
                         continue;
-                      enumStoreFrame(l.type, it->second, tagOfLocal(l.name.name), 0);
+                      enumStoreFrame(l.type, it->second, tagOfLocal(outerFrame_, l.name.name), 0);
                     }
                   }
                   if (!storeMatchConds.empty()) {
@@ -346,10 +355,10 @@ namespace refractir {
         if (!currentFun_)
           return {};
         for (const auto &l: currentFun_->lets)
-          if (tagOfLocal(l.name.name) == targetTag)
+          if (tagOfLocal(currentFrame_, l.name.name) == targetTag)
             return l.name.name;
         for (const auto &p: currentFun_->params)
-          if (tagOfLocal(p.name.name) == targetTag)
+          if (tagOfLocal(currentFrame_, p.name.name) == targetTag)
             return p.name.name;
         return {};
       }

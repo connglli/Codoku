@@ -498,7 +498,9 @@ namespace refractir {
 
     const std::string targetName = arg.lv.base.name;
     auto bv64 = solver.make_bv_sort(kPtrBits);
-    smt::Term tag = solver.make_bv_value_int64(bv64, static_cast<int64_t>(tagOfLocal(targetName)));
+    smt::Term tag = solver.make_bv_value_int64(
+        bv64, static_cast<int64_t>(tagOfLocal(currentFrame_, targetName))
+    );
     TypePtr cur;
     if (currentFun_) {
       for (const auto &l: currentFun_->lets)
@@ -797,7 +799,7 @@ namespace refractir {
       }
     };
     for (const auto &l: currentFun_->lets) {
-      std::uint64_t baseTag = tagOfLocal(l.name.name);
+      std::uint64_t baseTag = tagOfLocal(currentFrame_, l.name.name);
       enumLoad(l.type, store.at(l.name.name), baseTag, 0);
     }
     // SPEC §9.6.1 step 4: when this load fires inside a
@@ -809,7 +811,7 @@ namespace refractir {
         auto it = outerStore_->find(l.name.name);
         if (it == outerStore_->end())
           continue;
-        enumLoad(l.type, it->second, tagOfLocal(l.name.name), 0);
+        enumLoad(l.type, it->second, tagOfLocal(outerFrame_, l.name.name), 0);
       }
     }
     auto nullPtr = solver.make_bv_value_int64(bv64, 0);

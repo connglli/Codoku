@@ -145,7 +145,7 @@ namespace refractir {
                       // span (spec rule 15). For `addr %arr[k]` that
                       // remains the whole array; for `addr %s.f` the
                       // whole struct.
-                      uint64_t baseTag = tagOfLocal(addr->lv.base.name);
+                      uint64_t baseTag = tagOfLocal(currentFrame_, addr->lv.base.name);
                       TypePtr ty;
                       for (const auto &l: currentFun_->lets)
                         if (l.name.name == addr->lv.base.name) {
@@ -341,7 +341,7 @@ namespace refractir {
               }
             };
             for (const auto &l: currentFun_->lets) {
-              std::uint64_t baseTag = tagOfLocal(l.name.name);
+              std::uint64_t baseTag = tagOfLocal(currentFrame_, l.name.name);
               enumStore(l.type, store.at(l.name.name), baseTag, 0);
             }
             // Rule 11/15b: the store must land on a valid
@@ -418,6 +418,12 @@ namespace refractir {
     // Reset per-solve provenance tracking. Each call to solve()
     // walks a fresh CFG path, so prior provenance state must not leak.
     prov_.clear();
+    // Activation ids likewise. They are handed out along the path being
+    // walked, so a fresh walk starts at the entry frame and counts again —
+    // which is what keeps a tag reproducible for a given path.
+    currentFrame_ = kEntryFrame;
+    outerFrame_ = kEntryFrame;
+    nextFrame_ = kEntryFrame + 1;
     // Local for the captured top-level RetTerm term. The
     // path-traversal lambda captures by reference and writes into it
     // when it sees `ret <expr>;`. Lives on the stack of solve() so
@@ -817,16 +823,16 @@ namespace refractir {
       // contains the tag — cross-object arithmetic, undef pointer, etc.
       auto reverseLookupContaining = [&](uint64_t tag) -> std::pair<std::string, uint64_t> {
         auto contains = [&](const std::string &nm, const TypePtr &ty) -> bool {
-          uint64_t base = tagOfLocal(nm);
+          uint64_t base = tagOfLocal(kEntryFrame, nm);
           uint64_t size = sizeofTagUnits(ty, structs_);
           return base <= tag && tag < base + size;
         };
         for (const auto &l: entry->lets)
           if (contains(l.name.name, l.type))
-            return {l.name.name, tagOfLocal(l.name.name)};
+            return {l.name.name, tagOfLocal(kEntryFrame, l.name.name)};
         for (const auto &p: entry->params)
           if (contains(p.name.name, p.type))
-            return {p.name.name, tagOfLocal(p.name.name)};
+            return {p.name.name, tagOfLocal(kEntryFrame, p.name.name)};
         return {{}, 0};
       };
 

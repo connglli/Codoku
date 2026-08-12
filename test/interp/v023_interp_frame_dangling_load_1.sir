@@ -1,5 +1,5 @@
 // EXPECT: FAIL:UndefinedBehavior
-// SKIP: COMPILER, SOLVER
+// SKIP: COMPILER
 // SPEC v0.2.3 §7.5 rule 27
 // Intention: a callee lets a pointer to its own local escape through a
 // ptr-ptr out-parameter. The local dies with the activation, so loading

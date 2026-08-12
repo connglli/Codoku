@@ -385,6 +385,16 @@ namespace refractir {
     // re-saved-and-restored around each nested call.
     const FunDecl *outerFun_ = nullptr;
     SymbolicStore *outerStore_ = nullptr;
+
+    // Which activation the frames above are. A pointer tag identifies a cell
+    // by (frame, name), so these say whose storage a tag computed here names:
+    // `currentFrame_` for a local of the executing function, `outerFrame_` for
+    // one reached through a pointer parameter. Ids are handed out in call
+    // order and never reused within a solve, so a returned activation's tags
+    // go on matching nothing — which is rule 27 (spec §7.5).
+    std::uint64_t currentFrame_ = 0;
+    std::uint64_t outerFrame_ = 0;
+    std::uint64_t nextFrame_ = 1;
   };
 
   /**

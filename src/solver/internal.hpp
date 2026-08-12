@@ -21,14 +21,32 @@ namespace refractir {
 
   // Pointers are encoded as 64-bit BV tags identifying the addressed local.
   // Tag 0 is reserved for null. Tags are derived deterministically from the
-  // local name via FNV-1a so they remain stable across solver invocations.
+  // activation and the local name via FNV-1a so they remain stable across
+  // solver invocations.
+  //
+  // The activation, not just the name, is what a tag identifies. Locals are
+  // named per function and the same name recurs across a bundle, so a tag over
+  // the name alone would let a pointer into one frame's `%v0` resolve against
+  // another frame's — and, once a frame has returned, against a live cell that
+  // merely inherited its name. Mixing the frame in keeps a returned
+  // activation's tags matching nothing, which is what makes rule 27 fall out
+  // of the load/store dispatch rather than needing a check of its own.
   inline constexpr uint32_t kPtrBits = 64;
 
-  inline uint64_t tagOfLocal(const std::string &name) {
-    uint64_t h = 1469598103934665603ULL; // FNV-1a 64-bit offset basis
+  // The entry function's activation. Named because the model decoding runs
+  // after the walk, when no frame is current, and every cell it reports back
+  // belongs to the entry.
+  inline constexpr uint64_t kEntryFrame = 0;
+
+  inline uint64_t tagOfLocal(uint64_t frame, const std::string &name) {
+    uint64_t h = 0xcbf29ce484222325ULL; // FNV-1a 64-bit offset basis
+    for (int shift = 0; shift < 64; shift += 8) {
+      h ^= (frame >> shift) & 0xFF;
+      h *= 0x100000001b3ULL; // FNV-1a 64-bit prime
+    }
     for (unsigned char c: name) {
       h ^= c;
-      h *= 1099511628211ULL; // FNV-1a 64-bit prime
+      h *= 0x100000001b3ULL;
     }
     if (h == 0)
       h = 1; // never collide with null
