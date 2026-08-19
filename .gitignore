@@ -11,6 +11,7 @@ rypuzmk-sir
 rypuzchk-sir
 rypuzmk-tgt
 rypuzchk-tgt
+/codoku
 *.vsix
 
 # Object files

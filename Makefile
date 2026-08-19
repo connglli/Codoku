@@ -149,6 +149,7 @@ TARGET_RYPUZMK_SIR = rypuzmk-sir
 TARGET_RYPUZCHK_SIR = rypuzchk-sir
 TARGET_RYPUZMK_TGT = rypuzmk-tgt
 TARGET_RYPUZCHK_TGT = rypuzchk-tgt
+TARGET_CODOKU = codoku
 
 BUILD_DIR = build
 BIN_DIR = $(BUILD_DIR)/bin
@@ -199,7 +200,7 @@ LIBRARY_OBJS = $(COMMON_OBJS) \
 
 .PHONY: all clean test test-unit test-frontend test-analysis test-interp test-backends test-cross-validation test-solver test-reify test-puzzle-sir test-puzzle-c cross-validation build install
 
-all: $(TARGET_INTERP) $(TARGET_COMPILER) $(TARGET_SOLVER) $(TARGET_RYSMITH) $(TARGET_RYLINK) $(TARGET_RYTWIN) $(TARGET_RYPUZMK) $(TARGET_RYPUZCHK) $(TARGET_RYPUZMK_TGT) $(TARGET_RYPUZCHK_TGT) $(TARGET_RYPUZMK_SIR) $(TARGET_RYPUZCHK_SIR)
+all: $(TARGET_INTERP) $(TARGET_COMPILER) $(TARGET_SOLVER) $(TARGET_RYSMITH) $(TARGET_RYLINK) $(TARGET_RYTWIN) $(TARGET_RYPUZMK) $(TARGET_RYPUZCHK) $(TARGET_RYPUZMK_TGT) $(TARGET_RYPUZCHK_TGT) $(TARGET_RYPUZMK_SIR) $(TARGET_RYPUZCHK_SIR) $(TARGET_CODOKU)
 
 $(TARGET_INTERP): $(COMMON_OBJS) $(INTERP_OBJS)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
@@ -235,6 +236,10 @@ $(TARGET_RYPUZCHK): puzzle/bin/rypuzchk
 	ln -sf puzzle/bin/rypuzchk $(TARGET_RYPUZCHK)
 	chmod +x $(TARGET_RYPUZCHK)
 
+$(TARGET_CODOKU): puzzle/codoku/codoku.py
+	ln -sf puzzle/codoku/codoku.py $(TARGET_CODOKU)
+	chmod +x $(TARGET_CODOKU)
+
 # [v0.2.2] rylink also depends on the solver objects: it doesn't call
 # the SMT solver itself, but the reify libs (and SIRPrinter) include
 # solver headers and reference its types, so the linker needs the
@@ -256,6 +261,8 @@ build: all $(LIB_DIR)/$(LIB_NAME)
 	cp -f puzzle/target/rypuzchk.py $(BIN_DIR)/$(TARGET_RYPUZCHK_TGT)
 	chmod +x $(BIN_DIR)/$(TARGET_RYPUZCHK_TGT)
 	cp -f puzzle/target/puzzle_common.py $(BIN_DIR)/puzzle_common.py
+	cp -f puzzle/codoku/codoku.py $(BIN_DIR)/$(TARGET_CODOKU)
+	chmod +x $(BIN_DIR)/$(TARGET_CODOKU)
 	cp -r include/* $(INC_DIR)/
 
 install: build
@@ -271,7 +278,7 @@ $(LIB_DIR)/$(LIB_NAME): $(LIBRARY_OBJS)
 	$(AR) $(ARFLAGS) $@ $^
 
 clean:
-	rm -f $(COMMON_OBJS) $(TEST_OBJS) $(INTERP_OBJS) $(COMPILER_OBJS) $(SOLVER_OBJS) $(RYSMITH_OBJS) $(RYLINK_OBJS) $(RYTWIN_OBJS) puzzle/sir/rypuzmk.o puzzle/sir/rypuzchk.o $(TARGET_INTERP) $(TARGET_COMPILER) $(TARGET_SOLVER) $(TARGET_RYSMITH) $(TARGET_RYLINK) $(TARGET_RYTWIN) $(TARGET_RYPUZMK) $(TARGET_RYPUZCHK) $(TARGET_RYPUZMK_TGT) $(TARGET_RYPUZCHK_TGT) $(TARGET_RYPUZMK_SIR) $(TARGET_RYPUZCHK_SIR)
+	rm -f $(COMMON_OBJS) $(TEST_OBJS) $(INTERP_OBJS) $(COMPILER_OBJS) $(SOLVER_OBJS) $(RYSMITH_OBJS) $(RYLINK_OBJS) $(RYTWIN_OBJS) puzzle/sir/rypuzmk.o puzzle/sir/rypuzchk.o $(TARGET_INTERP) $(TARGET_COMPILER) $(TARGET_SOLVER) $(TARGET_RYSMITH) $(TARGET_RYLINK) $(TARGET_RYTWIN) $(TARGET_RYPUZMK) $(TARGET_RYPUZCHK) $(TARGET_RYPUZMK_TGT) $(TARGET_RYPUZCHK_TGT) $(TARGET_RYPUZMK_SIR) $(TARGET_RYPUZCHK_SIR) $(TARGET_CODOKU)
 	rm -rf $(BUILD_DIR)
 	find . -name "*.gcno" -delete
 	find . -name "*.gcda" -delete
@@ -282,7 +289,7 @@ clean:
 # split-by-source output, etc.). They don't go through the `.sir`
 # test runner in test/lib because they need to assert on the binary's
 # stdout / sidecar files / output directory layout.
-test-unit: $(TARGET_INTERP) $(TARGET_COMPILER) $(TARGET_SOLVER) $(TARGET_RYSMITH) $(TARGET_RYLINK) $(TARGET_RYTWIN) $(TARGET_RYPUZMK) $(TARGET_RYPUZCHK) $(TARGET_RYPUZMK_TGT) $(TARGET_RYPUZCHK_TGT)
+test-unit: $(TARGET_INTERP) $(TARGET_COMPILER) $(TARGET_SOLVER) $(TARGET_RYSMITH) $(TARGET_RYLINK) $(TARGET_RYTWIN) $(TARGET_RYPUZMK) $(TARGET_RYPUZCHK) $(TARGET_RYPUZMK_TGT) $(TARGET_RYPUZCHK_TGT) $(TARGET_CODOKU)
 	$(PY) -m test.unit.run_param_features_tests ./$(TARGET_INTERP) ./$(TARGET_COMPILER) ./$(TARGET_SOLVER)
 	$(PY) -m test.unit.run_structured_c_tests ./$(TARGET_COMPILER)
 	$(PY) -m test.unit.run_structured_wasm_tests ./$(TARGET_COMPILER)
@@ -292,6 +299,7 @@ test-unit: $(TARGET_INTERP) $(TARGET_COMPILER) $(TARGET_SOLVER) $(TARGET_RYSMITH
 	$(PY) -m test.unit.run_puzzle_sir_tests ./$(TARGET_RYPUZMK_SIR) ./$(TARGET_RYPUZCHK_SIR) ./$(TARGET_RYSMITH) ./$(TARGET_INTERP)
 	$(PY) -m test.unit.run_puzzle_c_tests ./$(TARGET_RYPUZMK_TGT) ./$(TARGET_RYPUZCHK_TGT) ./$(TARGET_RYSMITH)
 	$(PY) -m test.unit.run_puzzle_python_tests ./$(TARGET_RYPUZMK_TGT) ./$(TARGET_RYPUZCHK_TGT) ./$(TARGET_RYSMITH)
+	$(PY) -m test.unit.run_codoku_tests ./$(TARGET_CODOKU) ./$(TARGET_RYPUZMK_TGT) ./$(TARGET_RYPUZCHK_TGT) ./$(TARGET_RYSMITH)
 
 # Integration tests, grouped by the component under test. Each component
 # target is callable on its own (e.g. `make test-frontend`) so a developer
