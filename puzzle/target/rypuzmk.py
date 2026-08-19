@@ -82,7 +82,7 @@ PUZZLE_HEADER_TEMPLATE = """\
 // ------------------------------------------------
 //
 // 1. Each FILL_XXX mark must be filled out with a corresponding element.
-// 2. You have access to all common command line tools.
+// 2. You have access to all common command line tools and SMT solvers.
 // 3. Do NOT change any code except for the FILL_XXX marks.
 // 4. Do NOT introduce any new code, variables, or basic blocks.
 //
