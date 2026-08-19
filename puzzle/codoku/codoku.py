@@ -7,14 +7,14 @@ The current support is for the Python target only.
 from __future__ import annotations
 
 import argparse
-import os
 import subprocess
 import sys
+from pathlib import Path
 
-BIN_DIR = os.path.dirname(os.path.abspath(__file__))
-RYSMITH = os.path.join(BIN_DIR, "rysmith")
-RYPUZMK = os.path.join(BIN_DIR, "rypuzmk-tgt")
-RYPUZCHK = os.path.join(BIN_DIR, "rypuzchk-tgt")
+BIN_DIR = Path(__file__).absolute().parent
+RYSMITH = BIN_DIR / "rysmith"
+RYPUZMK = BIN_DIR / "rypuzmk-tgt"
+RYPUZCHK = BIN_DIR / "rypuzchk-tgt"
 
 # Template for the per-puzzle INSTRUCTION.md.
 INSTRUCTION_TEMPLATE = """\
@@ -86,26 +86,23 @@ DUMP_TRACE=1 python solution.py
 """
 
 
-def run(cmd: list[str], cwd: str | None = None) -> int:
+def run(cmd: list[str], cwd: Path | None = None) -> int:
   return subprocess.call(cmd, cwd=cwd)
 
 
-def postprocess_puzzle(path: str) -> None:
+def postprocess_puzzle(path: Path) -> None:
   """Rewrite the generated puzzle banner's validation command."""
-  with open(path) as f:
-    text = f.read()
-  puzzle_name = os.path.basename(path)
+  text = path.read_text()
+  puzzle_name = path.name
   text = text.replace("./tools/rypuzchk", "codoku check")
   text = text.replace("[this_puzzle_file].py", puzzle_name)
   text = text.replace("[your_solution].py", "solution.py")
-  with open(path, "w") as f:
-    f.write(text)
+  path.write_text(text)
 
 
-def write_instruction(path: str) -> None:
+def write_instruction(path: Path) -> None:
   """Write the per-puzzle INSTRUCTION.md."""
-  with open(path, "w") as f:
-    f.write(INSTRUCTION_TEMPLATE)
+  path.write_text(INSTRUCTION_TEMPLATE)
 
 
 def check(puzzle: str, solution: str) -> int:
@@ -113,8 +110,8 @@ def check(puzzle: str, solution: str) -> int:
 
 
 def generate(args: argparse.Namespace) -> int:
-  outdir = args.outdir
-  os.makedirs(outdir, exist_ok=True)
+  outdir = Path(args.outdir)
+  outdir.mkdir(parents=True, exist_ok=True)
   cmd = [
     RYPUZMK,
     "--target",
@@ -129,13 +126,13 @@ def generate(args: argparse.Namespace) -> int:
     cmd += ["--seed", str(args.seed)]
   rc = run(cmd, cwd=outdir)
   if rc == 0:
-    postprocess_puzzle(os.path.join(outdir, "puzzle.py"))
-    write_instruction(os.path.join(outdir, "INSTRUCTION.md"))
-    gt = os.path.join(outdir, "puzzle.gt.py")
-    if os.path.exists(gt):
-      oracle_dir = os.path.join(outdir, "oracle")
-      os.makedirs(oracle_dir, exist_ok=True)
-      os.replace(gt, os.path.join(oracle_dir, "puzzle.gt.py"))
+    postprocess_puzzle(outdir / "puzzle.py")
+    write_instruction(outdir / "INSTRUCTION.md")
+    gt = outdir / "puzzle.gt.py"
+    if gt.exists():
+      oracle_dir = outdir / "oracle"
+      oracle_dir.mkdir(parents=True, exist_ok=True)
+      gt.replace(oracle_dir / "puzzle.gt.py")
   return rc
 
 
