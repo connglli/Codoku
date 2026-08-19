@@ -128,6 +128,38 @@ def main():
       "create subcommand is deterministic (same seed)", r.returncode == 0 and identical
     )
 
+    # (2b) `codoku create -o <dir>` writes the puzzle into that directory.
+    out_cwd = os.path.join(workdir, "out_cwd")
+    os.makedirs(out_cwd)
+    setup_tools(codoku, rypuzmk, rypuzchk, rysmith, out_cwd)
+    outdir = os.path.join(workdir, "outdir")
+    r = run([codoku_bin, "create", "--seed", "42", "-o", outdir], cwd=out_cwd)
+    files = set(os.listdir(outdir)) if os.path.isdir(outdir) else set()
+    cwd_leftovers = [
+      n
+      for n in ("puzzle.py", "INSTRUCTION.md", "puzzle.gt.py")
+      if os.path.exists(os.path.join(out_cwd, n))
+    ]
+    ok_outdir = r.returncode == 0 and {"puzzle.py", "INSTRUCTION.md"}.issubset(files)
+    check(
+      "create -o writes puzzle + INSTRUCTION into outdir",
+      ok_outdir,
+      r.stdout + r.stderr,
+    )
+    check(
+      "create -o leaves nothing in the cwd",
+      not cwd_leftovers,
+      f"leftover files: {cwd_leftovers}",
+    )
+
+    # (2c) The ground truth is moved into <outdir>/oracle/.
+    oracle_gt = os.path.join(outdir, "oracle", "puzzle.gt.py")
+    check(
+      "ground truth moved into oracle/",
+      os.path.exists(oracle_gt) and "puzzle.gt.py" not in files,
+      f"outdir files: {files}",
+    )
+
     # (3) `codoku check` with explicit names passes on the ground truth.
     gt_sol = generate_ground_truth(rypuzmk, rysmith, 42, workdir)
     if gt_sol is None:
