@@ -1,7 +1,7 @@
-# rypuz:latest — Sandbox for AI-agent puzzle solving
+# rypuzbench:latest — Benchmarking sandbox for AI-agent puzzle solving
 #
 # Build:
-#   docker build -t rypuz:latest \
+#   docker build -t rypuzbench:latest \
 #     --build-arg UID=$(id -u) --build-arg GID=$(id -g) \
 #     -f puzzle/bench/Dockerfile .
 #

@@ -7,7 +7,7 @@ Usage:
 
 Workflow:
     1. Generate N puzzles locally using rypuzmk (Skip if already generated).
-    2. Detect / build the Docker image (rypuz:latest).
+    2. Detect / build the Docker image (rypuzbench:latest).
     3. Start J parallel containers, each solving one puzzle.
     4. Analyze results and emit a summary table + result.json.
 """
@@ -42,7 +42,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 BENCH_DIR = Path(__file__).resolve().parent
 
 # Image for running agents
-BENCH_IMAGE = "rypuz:latest"
+BENCH_IMAGE = "rypuzbench:latest"
 BENCH_DOCKERFILE = BENCH_DIR / "Dockerfile"
 BENCH_ENTRYPOINT = BENCH_DIR / "entrypoint.sh"
 BENCH_ENV_FILE = BENCH_DIR / "rypuzbench.env"
