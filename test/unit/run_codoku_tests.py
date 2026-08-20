@@ -55,8 +55,11 @@ def setup_tools(codoku, rypuzmk, rypuzchk, rysmith, outdir):
     os.symlink(os.path.abspath(src), os.path.join(outdir, name))
 
 
-def generate_ground_truth(rypuzmk, rysmith, seed, workdir):
-  """Generate the unmasked ground truth for `seed` via rypuzmk-tgt."""
+def generate_ground_truth(rypuzmk, rysmith, seed, workdir, cfg):
+  """Generate the unmasked ground truth for `seed` via rypuzmk-tgt.
+
+  `cfg` must be the same difficulty config codoku used for the puzzle.
+  """
   gt = os.path.join(workdir, f"gt{seed}.py")
   r = run(
     [
@@ -70,7 +73,16 @@ def generate_ground_truth(rypuzmk, rysmith, seed, workdir):
       "-o",
       gt,
       "--keep-ground-truth",
-    ],
+      "-B",
+      str(cfg["n_bbls"]),
+      "-S",
+      str(cfg["n_stmts"]),
+      "-L",
+      str(cfg["min_loop_iter"]),
+      "-P",
+      str(cfg["p_mask"]),
+    ]
+    + (["-C"] if cfg["lift_consts"] else []),
     cwd=workdir,
   )
   if r.returncode != 0:
@@ -88,11 +100,68 @@ def banner_rewritten(puzzle_text: str) -> bool:
   )
 
 
+def import_codoku(codoku_path):
+  """Import puzzle/codoku/codoku.py as a module (for direct unit tests)."""
+  import importlib.util
+
+  real = os.path.realpath(codoku_path)
+  spec = importlib.util.spec_from_file_location("_codoku_mod", real)
+  mod = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(mod)
+  return mod
+
+
+def unit_tests_pass(codoku_mod) -> bool:
+  """Direct tests on pick_config / difficulty_score invariants."""
+  ok = True
+
+  # (U1) Every sampled config respects its level's score cap.
+  for level in codoku_mod.DIFFICULTIES:
+    spec = codoku_mod.DIFFICULTIES[level]
+    for seed in range(1, 51):
+      cfg = codoku_mod.pick_config(level, seed)
+      score = codoku_mod.difficulty_score(cfg)
+      if score > spec["cap"]:
+        check(f"unit: {level} score <= cap", False, f"seed {seed} score {score}")
+        ok = False
+        break
+    else:
+      check(f"unit: {level} score stays under cap", True)
+
+  # (U2) Budget is lifted only for easy.
+  lift = {d: codoku_mod.DIFFICULTIES[d]["lift_consts"] for d in codoku_mod.DIFFICULTIES}
+  if lift != {"easy": True, "medium": False, "hard": False}:
+    check("unit: budget lifted only for easy", False, str(lift))
+    ok = False
+  else:
+    check("unit: budget lifted only for easy", True)
+
+  # (U3) Sampled dimensions stay within their ranges.
+  for level in codoku_mod.DIFFICULTIES:
+    spec = codoku_mod.DIFFICULTIES[level]
+    bad = False
+    for seed in range(1, 51):
+      cfg = codoku_mod.pick_config(level, seed)
+      lo, hi = spec["ranges"]["n_bbls"]
+      if not (lo <= cfg["n_bbls"] <= hi):
+        bad = True
+      lo, hi = spec["ranges"]["p_mask"]
+      if not (lo <= cfg["p_mask"] <= hi):
+        bad = True
+    check(f"unit: {level} dimensions within ranges", not bad)
+    ok = ok and not bad
+
+  return ok
+
+
 def main():
   if len(sys.argv) < 5:
     print("usage: run_codoku_tests.py <codoku> <rypuzmk-tgt> <rypuzchk-tgt> <rysmith>")
     return 2
   codoku, rypuzmk, rypuzchk, rysmith = sys.argv[1:5]
+
+  codoku_mod = import_codoku(codoku)
+  unit_tests_pass(codoku_mod)
 
   with tempfile.TemporaryDirectory(prefix="codoku_test_") as workdir:
     setup_tools(codoku, rypuzmk, rypuzchk, rysmith, workdir)
@@ -160,8 +229,44 @@ def main():
       f"outdir files: {files}",
     )
 
+    # (2d) `--difficulty easy` generates a puzzle and reports the score.
+    easy_dir = os.path.join(workdir, "easy_dir")
+    os.makedirs(easy_dir)
+    setup_tools(codoku, rypuzmk, rypuzchk, rysmith, easy_dir)
+    r = run([codoku_bin, "create", "--difficulty", "easy", "--seed", "9"], cwd=easy_dir)
+    check(
+      "create --difficulty easy generates a puzzle",
+      r.returncode == 0 and os.path.exists(os.path.join(easy_dir, "puzzle.py")),
+      r.stdout + r.stderr,
+    )
+    check(
+      "create reports the difficulty score",
+      "difficulty=easy" in r.stdout and "score=" in r.stdout,
+      r.stdout + r.stderr,
+    )
+
+    # (2e) Same difficulty + seed is deterministic.
+    easy2 = os.path.join(workdir, "easy_dir2")
+    os.makedirs(easy2)
+    setup_tools(codoku, rypuzmk, rypuzchk, rysmith, easy2)
+    r = run([codoku_bin, "create", "--difficulty", "easy", "--seed", "9"], cwd=easy2)
+    identical_difficulty = False
+    with (
+      open(os.path.join(easy_dir, "puzzle.py")) as f1,
+      open(os.path.join(easy2, "puzzle.py")) as f2,
+    ):
+      identical_difficulty = f1.read() == f2.read()
+    check(
+      "difficulty + seed is deterministic", r.returncode == 0 and identical_difficulty
+    )
+
+    # (2f) Invalid difficulty is rejected.
+    r = run([codoku_bin, "create", "--difficulty", "bogus", "--seed", "9"], cwd=workdir)
+    check("invalid difficulty rejected", r.returncode == 2, r.stdout + r.stderr)
+
     # (3) `codoku check` with explicit names passes on the ground truth.
-    gt_sol = generate_ground_truth(rypuzmk, rysmith, 42, workdir)
+    gt_cfg = codoku_mod.pick_config("medium", 42)
+    gt_sol = generate_ground_truth(rypuzmk, rysmith, 42, workdir, gt_cfg)
     if gt_sol is None:
       check(
         "explicit check passes on ground truth", False, "ground-truth generation failed"
