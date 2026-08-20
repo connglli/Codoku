@@ -7,6 +7,7 @@ The current support is for the Python target only.
 from __future__ import annotations
 
 import argparse
+import random
 import subprocess
 import sys
 from pathlib import Path
@@ -85,6 +86,49 @@ DUMP_TRACE=1 python solution.py
 - If the checker fails with a FILL_CONST budget error, you used the wrong constant value or count.
 """
 
+# Difficulty levels: each dimension is a range (seeded uniform draw) and the
+# level caps the maximum difficulty score.  The score is
+#   B*L + B + B*S*P        (path steps + hidden statements)
+#   x2 when the constant budget applies.
+# where, B, L, S, and P are options passed into rypuzmk-tgt.
+DIFFICULTIES = {
+  # A small function with a short path, where part of the code stays visible and constants need no maching.
+  "easy": {
+    "ranges": {
+      "n_bbls": (2, 4),
+      "n_stmts": (2, 3),
+      "min_loop_iter": (0, 1),
+      "p_mask": (0.5, 0.7),
+    },
+    "lift_consts": True,
+    "cap": 25,
+  },
+  # A loop-driven function where every statement is masked and constants must match a budget.
+  "medium": {
+    "ranges": {
+      "n_bbls": (3, 6),
+      "n_stmts": (2, 4),
+      "min_loop_iter": (2, 3),
+      "p_mask": (0.8, 1.0),
+    },
+    "lift_consts": False,
+    "cap": 100,
+  },
+  # A large branching function with deep loops, nothing visible but the skeleton, and a tight constant budget.
+  "hard": {
+    "ranges": {
+      "n_bbls": (6, 10),
+      "n_stmts": (3, 5),
+      "min_loop_iter": (4, 6),
+      "p_mask": (1.0, 1.0),
+    },
+    "lift_consts": False,
+    "cap": 250,
+  },
+}
+
+MAX_SAMPLES = 20
+
 
 def run(cmd: list[str], cwd: Path | None = None) -> int:
   return subprocess.call(cmd, cwd=cwd)
@@ -109,9 +153,41 @@ def check(puzzle: str, solution: str) -> int:
   return run([RYPUZCHK, puzzle, solution])
 
 
+def difficulty_score(cfg: dict) -> int:
+  score = (
+    cfg["n_bbls"] * cfg["min_loop_iter"]
+    + cfg["n_bbls"]
+    + cfg["n_bbls"] * cfg["n_stmts"] * cfg["p_mask"]
+  )
+  if not cfg["lift_consts"]:
+    score *= 2
+  return round(score)
+
+
+def pick_config(difficulty: str, seed: int | None) -> dict:
+  """Sample a config within the level's ranges; keep it under the score cap."""
+  spec = DIFFICULTIES[difficulty]
+  rng = random.Random(seed)
+  best = None
+  for _ in range(MAX_SAMPLES):
+    cfg = {
+      "n_bbls": rng.randint(*spec["ranges"]["n_bbls"]),
+      "n_stmts": rng.randint(*spec["ranges"]["n_stmts"]),
+      "min_loop_iter": rng.randint(*spec["ranges"]["min_loop_iter"]),
+      "p_mask": round(rng.uniform(*spec["ranges"]["p_mask"]), 2),
+      "lift_consts": spec["lift_consts"],
+    }
+    if difficulty_score(cfg) <= spec["cap"]:
+      return cfg
+    if best is None or difficulty_score(cfg) < difficulty_score(best):
+      best = cfg
+  return best
+
+
 def generate(args: argparse.Namespace) -> int:
   outdir = Path(args.outdir)
   outdir.mkdir(parents=True, exist_ok=True)
+  cfg = pick_config(args.difficulty, args.seed)
   cmd = [
     RYPUZMK,
     "--target",
@@ -121,9 +197,25 @@ def generate(args: argparse.Namespace) -> int:
     "--keep-ground-truth",
     "-o",
     "puzzle.py",
+    "-B",
+    str(cfg["n_bbls"]),
+    "-S",
+    str(cfg["n_stmts"]),
+    "-L",
+    str(cfg["min_loop_iter"]),
+    "-P",
+    str(cfg["p_mask"]),
   ]
+  if cfg["lift_consts"]:
+    cmd.append("-C")
   if args.seed is not None:
     cmd += ["--seed", str(args.seed)]
+  print(
+    f"difficulty={args.difficulty} "
+    f"bbls={cfg['n_bbls']} stmts={cfg['n_stmts']} "
+    f"loops={cfg['min_loop_iter']} p_mask={cfg['p_mask']} "
+    f"score={difficulty_score(cfg)}"
+  )
   rc = run(cmd, cwd=outdir)
   if rc == 0:
     postprocess_puzzle(outdir / "puzzle.py")
@@ -153,6 +245,13 @@ def build_parser() -> argparse.ArgumentParser:
     "--outdir",
     default=".",
     help="output directory for the puzzle (default: .)",
+  )
+  create.add_argument(
+    "-d",
+    "--difficulty",
+    choices=sorted(DIFFICULTIES),
+    default="medium",
+    help="difficulty level; caps the puzzle's difficulty score (default: medium)",
   )
   create.add_argument(
     "--seed",
