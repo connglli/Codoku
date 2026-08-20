@@ -407,6 +407,8 @@ def build_rysmith_command(
     str(RYSMITH),
     "-n",
     "1",
+    "--n-inits",
+    "1",
     "--no-crc32",
     "--emit-main",
     "--target",
@@ -454,16 +456,16 @@ def run_rysmith(
   if r.returncode != 0:
     return None
 
-  py_path = None
-  sir_path = None
-  for f in outdir.iterdir():
-    if f.suffix == ".py":
-      py_path = f
-    elif f.suffix == ".sir":
-      sir_path = f
-  if py_path is None or sir_path is None:
+  py_stems = {f.stem for f in outdir.iterdir() if f.suffix == ".py"}
+  sir_stems = {f.stem for f in outdir.iterdir() if f.suffix == ".sir"}
+  common = py_stems & sir_stems
+  if not common:
     return None
-  return py_path, sir_path
+  # rysmith writes one init per stem (func_<id>_0<letter>), so a stem names
+  # exactly one .py and one .sir.  Sort deterministically and take the
+  # highest init letter rather than relying on directory-iteration order.
+  stem = sorted(common)[-1]
+  return outdir / (stem + ".py"), outdir / (stem + ".sir")
 
 
 def extract_path_from_sir(sir_path: Path) -> str:
