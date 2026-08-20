@@ -733,11 +733,13 @@ def generate_candidate(
 ) -> GeneratedCandidate | None:
   """Run rysmith + masking in candidate_dir; return the analyzed candidate."""
   pair = None
+  used_seed = generator_seed
   for attempt in range(RYSMITH_ATTEMPTS):
     for f in candidate_dir.iterdir():
       if f.is_file():
         f.unlink()
-    pair = run_rysmith(config, generator_seed + attempt, candidate_dir)
+    used_seed = generator_seed + attempt
+    pair = run_rysmith(config, used_seed, candidate_dir)
     if pair is not None:
       break
   if pair is None:
@@ -772,7 +774,7 @@ def generate_candidate(
     local_names,
     defined_funcs,
     config.p_mask,
-    generator_seed,
+    used_seed,
   )
 
   if not self_check(gt_body, puzzle_body, mask_set, defined_funcs, cfg_edges):
@@ -789,7 +791,7 @@ def generate_candidate(
   return GeneratedCandidate(
     directory=candidate_dir,
     config=config,
-    generator_seed=generator_seed,
+    generator_seed=used_seed,
     metrics=metrics,
     complexity=complexity,
   )
