@@ -66,7 +66,7 @@ That also said, avoid generating the solution file before you solve the puzzle s
 1. Read the puzzle file. Pay attention to:
    - The **CFG** (control-flow graph, `#//@ CFG_EDGE: ...`) at the top - shows which basic blocks exist and how they connect
    - The **execution path** (`#//@ EXEC_PATH: ...`) - the exact sequence of basic blocks that must execute
-   - The **<FILL_CONST> budget** (`#//@ <FILL_CONST>: <value> <count>` lines) - constants you must use
+   {{BUDGET_READ}}
    - The **mask marks**: `<FILL_VAR>`, `<FILL_CONST>`, `<FILL_OP>`, `<FILL_TYPE>`, `<FILL_LABEL>`, `<FILL_FUNC>`, `<FILL_FIELD>`, `<FILL_CTRL>`
 
 2. The function body uses comment-marked basic blocks and control keywords. The EXEC_PATH tells you which basic blocks are executed in sequence.
@@ -74,7 +74,7 @@ That also said, avoid generating the solution file before you solve the puzzle s
 ## How to Fill in the Blanks
 
 - `<FILL_VAR>` → a local variable or parameter name (possibly with `[idx]` subscript)
-- `<FILL_CONST>` → an integer, float, boolean, or None literal (must match the budget exactly - right value, right count)
+- {{CONST_FILL}}
 - `<FILL_OP>` → a Python operator (`+`, `-`, `*`, `/`, `%`, `//`, `&`, `|`, `^`, `<<`, `>>`, `~`, `==`, `!=`, `<`, `>`, `<=`, `>=`, `if`, `else`, `not`, `and`, `or`)
 - `<FILL_TYPE>` → not used (Python is dynamically typed)
 - `<FILL_LABEL>` → not used (Python has no goto-based blocks)
@@ -101,7 +101,7 @@ DUMP_TRACE=1 python solution.py
 - Replace ONLY the `<FILL_XXX>` marks. Do NOT change any other code.
 - Do NOT add new variables, statements, or basic blocks.
 - Do NOT remove any code.
-- The `<FILL_CONST>` budget must be matched exactly: each value at its exact count, no extras.
+{{BUDGET_RULE}}
 - Save the complete solution file (the full program with blanks filled) - not just the changes.
 
 ## Strategy Tips
@@ -109,12 +109,59 @@ DUMP_TRACE=1 python solution.py
 - Read the CFG and EXEC_PATH carefully - they tell you the control flow.
 - Map out all local variables and their types from the declarations at the top of the function.
 - Trace the execution path block by block, reasoning about what each statement must compute.
-- For each `<FILL_CONST>`, use the budget (`#//@ <FILL_CONST>: <value> <count>` lines) to constrain your choices.
+{{BUDGET_TIP}}
 - Use the checker (`codoku check`) for the definitive pass/fail verdict.
 - If the checker fails with a path mismatch, the control flow transitions are wrong - revisit `<FILL_CTRL>` (for control keywords) marks.
 - If the checker fails with a structural integrity error, you changed something outside the blanks.
-- If the checker fails with a <FILL_CONST> budget error, you used the wrong constant value or count.
+{{CHECK_ERR}}
 """
+
+BUDGET_READ = (
+  "- The **<FILL_CONST> budget** "
+  "(`#//@ <FILL_CONST>: <value> <count>` lines) - constants you must use"
+)
+NO_BUDGET_READ = (
+  "- The **<FILL_CONST> marks** - fill each with any literal that keeps "
+  "the function correct"
+)
+CONST_FILL_BUDGET = (
+  "`<FILL_CONST>` → an integer, float, boolean, or None literal "
+  "(must match the budget exactly - right value, right count)"
+)
+CONST_FILL_FREE = (
+  "`<FILL_CONST>` → an integer, float, boolean, or None literal "
+  "(choose any value that keeps the function correct)"
+)
+BUDGET_RULE = (
+  "- The `<FILL_CONST>` budget must be matched exactly: each value at its "
+  "exact count, no extras."
+)
+BUDGET_TIP = (
+  "- For each `<FILL_CONST>`, use the budget "
+  "(`#//@ <FILL_CONST>: <value> <count>` lines) to constrain your choices."
+)
+CHECK_ERR = (
+  "- If the checker fails with a <FILL_CONST> budget error, you used the "
+  "wrong constant value or count."
+)
+
+
+def render_instruction(has_budget: bool) -> str:
+  """Render INSTRUCTION.md; budget lines are only shown when a budget exists."""
+  return (
+    INSTRUCTION_TEMPLATE.replace(
+      "{{BUDGET_READ}}", BUDGET_READ if has_budget else NO_BUDGET_READ
+    )
+    .replace("{{CONST_FILL}}", CONST_FILL_BUDGET if has_budget else CONST_FILL_FREE)
+    .replace("{{BUDGET_RULE}}", BUDGET_RULE if has_budget else "")
+    .replace("{{BUDGET_TIP}}", BUDGET_TIP if has_budget else "")
+    .replace("{{CHECK_ERR}}", CHECK_ERR if has_budget else "")
+  )
+
+
+def write_instruction(path: Path, has_budget: bool) -> None:
+  path.write_text(render_instruction(has_budget))
+
 
 # ---------------------------------------------------------------------------
 # Banner templates (mirror puzzle/target/rypuzmk.py, Python-adapted:
@@ -696,7 +743,7 @@ def install_candidate(
   elif oracle_destination.exists():
     oracle_destination.unlink()
 
-  write_instruction(outdir / "INSTRUCTION.md")
+  write_instruction(outdir / "INSTRUCTION.md", not candidate.config.lift_consts)
 
   metrics_data = asdict(candidate.metrics)
   metrics_data["masks_by_kind"] = dict(candidate.metrics.masks_by_kind)
@@ -722,10 +769,6 @@ def postprocess_puzzle(path: Path) -> None:
   text = text.replace("[this_puzzle_file].py", puzzle_name)
   text = text.replace("[your_solution].py", "solution.py")
   path.write_text(text)
-
-
-def write_instruction(path: Path) -> None:
-  path.write_text(INSTRUCTION_TEMPLATE)
 
 
 def generate_candidate(
