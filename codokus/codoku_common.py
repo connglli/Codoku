@@ -637,13 +637,10 @@ def build_python_cfg(leaf_node: ast.FunctionDef, src: bytes) -> set[tuple[str, s
         edges.add((loop_header, loop_exit))
         return [loop_header]
       else:
-        # Python for loops naturally terminate: control falls through to
-        # the block after the loop (unlike C's for(;;), which is why this
-        # diverges from the shared SIR behavior).
-        for p in pending:
-          edges.add((p, loop_exit))
-        edges.add((loop_header, loop_exit))
-        return [loop_exit]
+        # rysmith's Python backend never emits for loops (see
+        # get_python_maskable_statements), so this branch is kept in
+        # lockstep with puzzle_common.py's for(;;) model: no fall-through.
+        return []
 
     cb = pending
     for child in ast.iter_child_nodes(node):
