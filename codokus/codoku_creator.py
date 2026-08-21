@@ -125,8 +125,9 @@ NO_BUDGET_READ = (
   "the function correct"
 )
 CONST_FILL_BUDGET = (
-  "`<FILL_CONST>` → an integer, float, boolean, or None literal "
-  "(must match the budget exactly - right value, right count)"
+  "`<FILL_CONST>` → an integer or float literal (must match the budget "
+  "exactly - right value, right type, right count; `1` and `1.0` are "
+  "distinct)"
 )
 CONST_FILL_FREE = (
   "`<FILL_CONST>` → an integer, float, boolean, or None literal "
@@ -134,7 +135,8 @@ CONST_FILL_FREE = (
 )
 BUDGET_RULE = (
   "- The `<FILL_CONST>` budget must be matched exactly: each value at its "
-  "exact count, no extras."
+  "exact count, no extras, and with the same type (integer vs float - "
+  "`1` is not `1.0`)."
 )
 BUDGET_TIP = (
   "- For each `<FILL_CONST>`, use the budget "
@@ -142,7 +144,7 @@ BUDGET_TIP = (
 )
 CHECK_ERR = (
   "- If the checker fails with a <FILL_CONST> budget error, you used the "
-  "wrong constant value or count."
+  "wrong constant value, type, or count."
 )
 
 
@@ -211,8 +213,10 @@ BUDGET_SECTION_TEMPLATE = """\
 # The lines below list every constant the <FILL_CONST> marks must carry, as
 # "<value> <count>" pairs. Across your whole solution each <value> must appear
 # in <FILL_CONST> positions exactly <count> times -- no more, no fewer -- and no
-# other constant may appear in any <FILL_CONST> position. Constants already shown
-# in the fixed (entry/exit) code do not count toward this budget.
+# other constant may appear in any <FILL_CONST> position. The value must match
+# exactly, including its type: `1` (integer) and `1.0` (float) are distinct.
+# Constants already shown in the fixed (entry/exit) code do not count toward
+# this budget.
 #
 {{FILL_CONST}}//
 """
