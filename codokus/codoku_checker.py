@@ -432,8 +432,11 @@ def check(puzzle: str, solution: str) -> None:
   # -------------------------------------------------------------------------
   # Stage 1 - FAIL_BASICS: parse puzzle requirements.
   # -------------------------------------------------------------------------
-  with open(puzzle, "r") as f:
-    puzzle_text = f.read()
+  try:
+    with open(puzzle, "r") as f:
+      puzzle_text = f.read()
+  except (OSError, UnicodeError) as e:
+    fail(CheckResult.FAIL_BASICS, f"Puzzle file '{puzzle}' cannot be read: {e}")
 
   expected_path, const_counts, cfg_edges = parse_puzzle_requirements(puzzle_text)
   if not expected_path:
@@ -450,11 +453,17 @@ def check(puzzle: str, solution: str) -> None:
   # -------------------------------------------------------------------------
   # Stage 1 - FAIL_BASICS: Check for unfilled <FILL_XXX> marks.
   # -------------------------------------------------------------------------
-  with open(solution, "rb") as f:
-    sol_src_raw = f.read()
+  try:
+    with open(solution, "rb") as f:
+      sol_src_raw = f.read()
+  except OSError as e:
+    fail(CheckResult.FAIL_BASICS, f"Solution file '{solution}' cannot be read: {e}")
 
   sol_src = strip_refractir_prefix(sol_src_raw)
-  sol_src_str = sol_src.decode("utf-8")
+  try:
+    sol_src_str = sol_src.decode("utf-8")
+  except UnicodeDecodeError as e:
+    fail(CheckResult.FAIL_BASICS, f"Solution file '{solution}' is not valid UTF-8: {e}")
 
   stripped_sol = strip_comments_and_whitespace(sol_src_str)
   has_fill_marks = False
