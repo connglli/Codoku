@@ -632,10 +632,17 @@ def build_python_cfg(leaf_node: ast.FunctionDef, src: bytes) -> set[tuple[str, s
       loop_stack.pop()
 
       if isinstance(node, ast.While):
-        for p in pending:
-          edges.add((p, loop_exit))
-        edges.add((loop_header, loop_exit))
-        return [loop_header]
+        # A constant-truthy test (rysmith emits `while True:` for
+        # unconditional Loop nodes) never exits via its condition: the
+        # condition-false edges are spurious, and there is no fall-through
+        # (break edges already target loop_exit directly).
+        is_infinite = isinstance(node.test, ast.Constant) and bool(node.test.value)
+        if not is_infinite:
+          for p in pending:
+            edges.add((p, loop_exit))
+          edges.add((loop_header, loop_exit))
+          return [loop_header]
+        return []
       else:
         # rysmith's Python backend never emits for loops (see
         # get_python_maskable_statements), so this branch is kept in
