@@ -42,9 +42,6 @@ from codoku_complexity import (
   estimate_complexity,
 )
 
-BIN_DIR = Path(__file__).absolute().parent
-RYSMITH = BIN_DIR / "rysmith"
-
 DEFAULT_MAX_ATTEMPTS = 20
 RYSMITH_ATTEMPTS = 100
 
@@ -451,11 +448,11 @@ def profile_accepts(
 
 
 def build_rysmith_command(
-  config: GeneratorConfig, seed: int, outdir: Path
+  config: GeneratorConfig, seed: int, outdir: Path, rysmith_path: Path
 ) -> list[str]:
   max_loop_iter = config.min_loop_iter + 2
   cmd = [
-    str(RYSMITH),
+    str(rysmith_path),
     "-n",
     "1",
     "--n-inits",
@@ -492,14 +489,14 @@ def build_rysmith_command(
 
 
 def run_rysmith(
-  config: GeneratorConfig, seed: int, outdir: Path
+  config: GeneratorConfig, seed: int, outdir: Path, rysmith_path: Path
 ) -> tuple[Path, Path] | None:
   """Run rysmith once; return (py_path, sir_path) or None on failure.
 
   rysmith can fail per seed (solver/constraint rejection); the caller retries
   with fresh seeds.
   """
-  cmd = build_rysmith_command(config, seed, outdir)
+  cmd = build_rysmith_command(config, seed, outdir, rysmith_path)
   try:
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
   except subprocess.TimeoutExpired:
@@ -776,7 +773,10 @@ def postprocess_puzzle(path: Path) -> None:
 
 
 def generate_candidate(
-  candidate_dir: Path, config: GeneratorConfig, generator_seed: int
+  candidate_dir: Path,
+  config: GeneratorConfig,
+  generator_seed: int,
+  rysmith_path: Path,
 ) -> GeneratedCandidate | None:
   """Run rysmith + masking in candidate_dir; return the analyzed candidate."""
   pair = None
@@ -786,7 +786,7 @@ def generate_candidate(
       if f.is_file():
         f.unlink()
     used_seed = generator_seed + attempt
-    pair = run_rysmith(config, used_seed, candidate_dir)
+    pair = run_rysmith(config, used_seed, candidate_dir, rysmith_path=rysmith_path)
     if pair is not None:
       break
   if pair is None:
@@ -844,9 +844,10 @@ def generate_candidate(
   )
 
 
-def generate(args: argparse.Namespace) -> int:
-  if not RYSMITH.exists():
-    print(f"codoku: error: rysmith not found at {RYSMITH}", file=sys.stderr)
+def generate(args: argparse.Namespace, rysmith_path: Path) -> int:
+  rysmith = Path(rysmith_path).resolve()
+  if not rysmith.exists():
+    print(f"codoku: error: rysmith not found at {rysmith}", file=sys.stderr)
     return 2
 
   profile = PROFILES[args.profile]
@@ -866,7 +867,9 @@ def generate(args: argparse.Namespace) -> int:
     with tempfile.TemporaryDirectory(prefix=".codoku-candidate-", dir=outdir) as tmp:
       candidate_dir = Path(tmp)
       try:
-        candidate = generate_candidate(candidate_dir, config, generator_seed)
+        candidate = generate_candidate(
+          candidate_dir, config, generator_seed, rysmith_path=rysmith
+        )
       except RuntimeError as e:
         message = f"attempt {attempt}: {e}"
         rejections.append(message)

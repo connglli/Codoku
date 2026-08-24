@@ -70,7 +70,7 @@ RUN git clone --depth 1 --branch 0.9.1 \
     && rm -rf /tmp/bitwuzla-src
 
 # - ReifyPuzzle toolchain + codoku -------------------------
-RUN git clone --depth 1 --branch main \
+RUN git clone --depth 1 --branch codokus \
       https://github.com/connglli/ReifyPuzzle /tmp/reifypuzzle-src \
     && cd /tmp/reifypuzzle-src \
     # Build and install the toolchain
@@ -79,13 +79,6 @@ RUN git clone --depth 1 --branch main \
     # Python venv
     && python3 -m venv /opt/rypuz/venv \
     && /opt/rypuz/venv/bin/pip install --no-cache-dir -r requirements.txt \
-    # Codoku modules (from the same checkout)
-    && cp codokus/codoku.py            /opt/rypuz/bin/codoku \
-    && cp codokus/codoku_creator.py    /opt/rypuz/bin/codoku_creator.py \
-    && cp codokus/codoku_checker.py    /opt/rypuz/bin/codoku_checker.py \
-    && cp codokus/codoku_common.py     /opt/rypuz/bin/codoku_common.py \
-    && cp codokus/codoku_complexity.py /opt/rypuz/bin/codoku_complexity.py \
-    && chmod +x /opt/rypuz/bin/codoku \
     && rm -rf /tmp/reifypuzzle-src
 
 # - Environment ----------------------------------------------

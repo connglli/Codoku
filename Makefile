@@ -236,8 +236,8 @@ $(TARGET_RYPUZCHK): puzzle/bin/rypuzchk
 	ln -sf puzzle/bin/rypuzchk $(TARGET_RYPUZCHK)
 	chmod +x $(TARGET_RYPUZCHK)
 
-$(TARGET_CODOKU): puzzle/codoku/codoku.py
-	ln -sf puzzle/codoku/codoku.py $(TARGET_CODOKU)
+$(TARGET_CODOKU): codokus/codoku.py
+	ln -sf codokus/codoku.py $(TARGET_CODOKU)
 	chmod +x $(TARGET_CODOKU)
 
 # [v0.2.2] rylink also depends on the solver objects: it doesn't call
@@ -261,8 +261,12 @@ build: all $(LIB_DIR)/$(LIB_NAME)
 	cp -f puzzle/target/rypuzchk.py $(BIN_DIR)/$(TARGET_RYPUZCHK_TGT)
 	chmod +x $(BIN_DIR)/$(TARGET_RYPUZCHK_TGT)
 	cp -f puzzle/target/puzzle_common.py $(BIN_DIR)/puzzle_common.py
-	cp -f puzzle/codoku/codoku.py $(BIN_DIR)/$(TARGET_CODOKU)
+	cp -f codokus/codoku.py $(BIN_DIR)/$(TARGET_CODOKU)
 	chmod +x $(BIN_DIR)/$(TARGET_CODOKU)
+	cp -f codokus/codoku_creator.py $(BIN_DIR)/codoku_creator.py
+	cp -f codokus/codoku_checker.py $(BIN_DIR)/codoku_checker.py
+	cp -f codokus/codoku_common.py $(BIN_DIR)/codoku_common.py
+	cp -f codokus/codoku_complexity.py $(BIN_DIR)/codoku_complexity.py
 	cp -r include/* $(INC_DIR)/
 
 install: build
@@ -299,7 +303,7 @@ test-unit: $(TARGET_INTERP) $(TARGET_COMPILER) $(TARGET_SOLVER) $(TARGET_RYSMITH
 	$(PY) -m test.unit.run_puzzle_sir_tests ./$(TARGET_RYPUZMK_SIR) ./$(TARGET_RYPUZCHK_SIR) ./$(TARGET_RYSMITH) ./$(TARGET_INTERP)
 	$(PY) -m test.unit.run_puzzle_c_tests ./$(TARGET_RYPUZMK_TGT) ./$(TARGET_RYPUZCHK_TGT) ./$(TARGET_RYSMITH)
 	$(PY) -m test.unit.run_puzzle_python_tests ./$(TARGET_RYPUZMK_TGT) ./$(TARGET_RYPUZCHK_TGT) ./$(TARGET_RYSMITH)
-	$(PY) -m test.unit.run_codoku_tests ./$(TARGET_CODOKU) ./$(TARGET_RYPUZMK_TGT) ./$(TARGET_RYPUZCHK_TGT) ./$(TARGET_RYSMITH)
+	$(PY) -m test.unit.run_codoku_tests ./$(TARGET_CODOKU) ./$(TARGET_RYSMITH)
 
 # Integration tests, grouped by the component under test. Each component
 # target is callable on its own (e.g. `make test-frontend`) so a developer
