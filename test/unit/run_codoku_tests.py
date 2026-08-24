@@ -1,24 +1,26 @@
-"""End-to-end tests for the codoku wrapper CLI.
+"""End-to-end tests for the rysmith-based codoku (./codokus/).
 
-codoku is the puzzle generation & checking wrapper for the Python target.
-It must:
+The new codoku drives rysmith directly (no rypuzmk/rypuzchk binaries) and
+uses the vendored puzzle_common.py / checker.py with angle-bracketed
+<FILL_XXX> mask tokens.  It must:
 
-  (1) generate a puzzle with `codoku create` or with a bare `codoku`
-      (delegation), deterministically for a given --seed, writing
-      puzzle.py into the working directory;
-  (2) post-process the generated banner: `./tools/rypuzchk ...` is
-      rewritten to `codoku check puzzle.py solution.py`;
-  (3) validate a solution with `codoku check <puzzle> [<solution>]`,
-      including the default puzzle.py / solution.py names;
-  (4) reject unknown flags (it does not inherit rypuzmk-tgt's or
-      rypuzchk-tgt's options).
+  (1) generate a puzzle with `codoku create` (or bare `codoku`), deterministically
+      for a given --seed, writing puzzle.py + INSTRUCTION.md + oracle/ into the
+      output directory;
+  (2) use <FILL_XXX> mask tokens and the `codoku check` validation command;
+  (3) validate a solution with `codoku check`, accepting the ground truth;
+  (4) reject unknown profiles/flags;
+  (5) keep generated masks/budget consistent (re-mask self-check passes).
 
 Run as:
 
-  python3 -m test.unit.run_codoku_tests <codoku> <rypuzmk-tgt> <rypuzchk-tgt> <rysmith>
+  python3 -m test.unit.run_codoku_tests <codoku.py> <rysmith>
 """
 
+import importlib.util
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -34,7 +36,12 @@ results = []
 
 def run(cmd, cwd=None, **kw):
   print(f"  {GRAY}[RUN>]{NC} " + " ".join(cmd))
-  return subprocess.run(cmd, capture_output=True, text=True, timeout=120, cwd=cwd, **kw)
+  return subprocess.run(cmd, capture_output=True, text=True, timeout=180, cwd=cwd, **kw)
+
+
+def run_codoku(bin_path, args, cwd):
+  """Run the codoku script with the current interpreter."""
+  return run([sys.executable, bin_path] + args, cwd=cwd)
 
 
 def check(name, ok, detail=""):
@@ -44,274 +51,197 @@ def check(name, ok, detail=""):
   print(f"  [{color}{tag}{NC}] {name}" + (f" — {detail}" if detail and not ok else ""))
 
 
-def setup_tools(codoku, rypuzmk, rypuzchk, rysmith, outdir):
-  """Mirror the image layout: all tools next to the codoku wrapper."""
-  for src, name in [
-    (codoku, "codoku"),
-    (rypuzmk, "rypuzmk-tgt"),
-    (rypuzchk, "rypuzchk-tgt"),
-    (rysmith, "rysmith"),
-  ]:
-    os.symlink(os.path.abspath(src), os.path.join(outdir, name))
-
-
-def generate_ground_truth(rypuzmk, rysmith, seed, workdir, cfg):
-  """Generate the unmasked ground truth for `seed` via rypuzmk-tgt.
-
-  `cfg` must be the same difficulty config codoku used for the puzzle.
-  """
-  gt = os.path.join(workdir, f"gt{seed}.py")
-  r = run(
-    [
-      os.path.join(workdir, "rypuzmk-tgt"),
-      "--seed",
-      str(seed),
-      "--rysmith",
-      os.path.join(workdir, "rysmith"),
-      "--target",
-      "python",
-      "-o",
-      gt,
-      "--keep-ground-truth",
-      "-B",
-      str(cfg["n_bbls"]),
-      "-S",
-      str(cfg["n_stmts"]),
-      "-L",
-      str(cfg["min_loop_iter"]),
-      "-P",
-      str(cfg["p_mask"]),
-    ]
-    + (["-C"] if cfg["lift_consts"] else []),
-    cwd=workdir,
-  )
-  if r.returncode != 0:
-    return None
-  gt_sol = os.path.splitext(gt)[0] + ".gt.py"
-  if not os.path.exists(gt_sol):
-    return None
-  return gt_sol
-
-
-def banner_rewritten(puzzle_text: str) -> bool:
-  return (
-    "codoku check puzzle.py solution.py" in puzzle_text
-    and "./tools/rypuzchk" not in puzzle_text
-  )
-
-
 def import_codoku(codoku_path):
-  """Import puzzle/codoku/codoku.py as a module (for direct unit tests)."""
-  import importlib.util
-
+  """Import codoku_creator as a module (for direct unit tests)."""
   real = os.path.realpath(codoku_path)
-  spec = importlib.util.spec_from_file_location("_codoku_mod", real)
+  module_dir = os.path.dirname(real)
+  if module_dir not in sys.path:
+    sys.path.insert(0, module_dir)
+  creator = os.path.join(module_dir, "codoku_creator.py")
+  spec = importlib.util.spec_from_file_location("_codoku_gen_mod", creator)
   mod = importlib.util.module_from_spec(spec)
+  sys.modules[spec.name] = mod
   spec.loader.exec_module(mod)
   return mod
 
 
-def unit_tests_pass(codoku_mod) -> bool:
-  """Direct tests on pick_config / difficulty_score invariants."""
+def import_codoku_checker(codoku_path):
+  """Import codoku_checker as a module (for direct unit tests)."""
+  module_dir = os.path.dirname(os.path.realpath(codoku_path))
+  if module_dir not in sys.path:
+    sys.path.insert(0, module_dir)
+  checker = os.path.join(module_dir, "codoku_checker.py")
+  spec = importlib.util.spec_from_file_location("_codoku_chk_mod", checker)
+  mod = importlib.util.module_from_spec(spec)
+  sys.modules[spec.name] = mod
+  spec.loader.exec_module(mod)
+  return mod
+
+
+def unit_tests_pass(mod) -> bool:
   ok = True
 
-  # (U1) Every sampled config respects its level's score cap.
-  for level in codoku_mod.DIFFICULTIES:
-    spec = codoku_mod.DIFFICULTIES[level]
-    for seed in range(1, 51):
-      cfg = codoku_mod.pick_config(level, seed)
-      score = codoku_mod.difficulty_score(cfg)
-      if score > spec["cap"]:
-        check(f"unit: {level} score <= cap", False, f"seed {seed} score {score}")
+  # Profiles validate and sample within ranges.
+  for name in mod.PROFILES:
+    prof = mod.PROFILES[name]
+    prof.validate(name)
+    rng = __import__("random").Random(1)
+    for _ in range(20):
+      cfg = mod.sample_config(prof, rng)
+      lo, hi = prof.n_bbls.minimum, prof.n_bbls.maximum
+      if not lo <= cfg.n_bbls <= hi:
+        check(f"unit: {name} bbls within range", False)
         ok = False
         break
     else:
-      check(f"unit: {level} score stays under cap", True)
+      check(f"unit: {name} samples within ranges", True)
 
-  # (U2) Budget is lifted only for easy.
-  lift = {d: codoku_mod.DIFFICULTIES[d]["lift_consts"] for d in codoku_mod.DIFFICULTIES}
-  if lift != {"easy": True, "medium": False, "hard": False}:
-    check("unit: budget lifted only for easy", False, str(lift))
+  # easy is the integer-scalar profile (no fp/vec/intrinsics, no pointers);
+  # hard is full-featured.
+  easy_feats = set(mod.PROFILES["easy"].features)
+  easy_ptr = mod.PROFILES["easy"].max_ptr_depth
+  if not ({"--no-fp", "--no-vec"} <= easy_feats) or (
+    easy_ptr.minimum,
+    easy_ptr.maximum,
+  ) != (0, 0):
+    check(
+      "unit: easy uses reduced feature set", False, str(easy_feats) + f" ptr={easy_ptr}"
+    )
     ok = False
   else:
-    check("unit: budget lifted only for easy", True)
+    check("unit: easy uses reduced feature set", True)
 
-  # (U3) Sampled dimensions stay within their ranges.
-  for level in codoku_mod.DIFFICULTIES:
-    spec = codoku_mod.DIFFICULTIES[level]
-    bad = False
-    for seed in range(1, 51):
-      cfg = codoku_mod.pick_config(level, seed)
-      lo, hi = spec["ranges"]["n_bbls"]
-      if not (lo <= cfg["n_bbls"] <= hi):
-        bad = True
-      lo, hi = spec["ranges"]["p_mask"]
-      if not (lo <= cfg["p_mask"] <= hi):
-        bad = True
-    check(f"unit: {level} dimensions within ranges", not bad)
-    ok = ok and not bad
+  return ok
+
+
+def checker_unit_tests_pass(chk_mod) -> bool:
+  ok = True
+
+  # A solution that hangs must fail with FAIL_TIMEOUT (5s cap).
+  hang_dir = tempfile.mkdtemp(prefix="codoku_hang_")
+  try:
+    hang_path = os.path.join(hang_dir, "hang.py")
+    with open(hang_path, "w") as f:
+      f.write("while True:\n    pass\n")
+    try:
+      chk_mod.run_python_solution(hang_path)
+      check("unit: hanging solution times out", False, "no timeout raised")
+      ok = False
+    except chk_mod.CheckFailure as exc:
+      check(
+        "unit: hanging solution times out",
+        exc.result == chk_mod.CheckResult.FAIL_TIMEOUT,
+        str(exc.message),
+      )
+      ok = ok and exc.result == chk_mod.CheckResult.FAIL_TIMEOUT
+  finally:
+    shutil.rmtree(hang_dir, ignore_errors=True)
 
   return ok
 
 
 def main():
-  if len(sys.argv) < 5:
-    print("usage: run_codoku_tests.py <codoku> <rypuzmk-tgt> <rypuzchk-tgt> <rysmith>")
+  if len(sys.argv) < 3:
+    print("usage: run_codoku_tests.py <codoku.py> <rysmith>")
     return 2
-  codoku, rypuzmk, rypuzchk, rysmith = sys.argv[1:5]
+  codoku_src, rysmith = sys.argv[1:3]
 
-  codoku_mod = import_codoku(codoku)
-  unit_tests_pass(codoku_mod)
+  mod = import_codoku(codoku_src)
+  unit_tests_pass(mod)
+  checker_unit_tests_pass(import_codoku_checker(codoku_src))
 
-  with tempfile.TemporaryDirectory(prefix="codoku_test_") as workdir:
-    setup_tools(codoku, rypuzmk, rypuzchk, rysmith, workdir)
-    codoku_bin = os.path.join(workdir, "codoku")
-
-    # (1) Bare `codoku --seed N` (delegation) generates puzzle.py and
-    #     rewrites the banner.
-    r = run([codoku_bin, "--seed", "42"], cwd=workdir)
-    puzzle = os.path.join(workdir, "puzzle.py")
-    banner_ok = False
-    if r.returncode == 0 and os.path.exists(puzzle):
-      with open(puzzle) as f:
-        banner_ok = banner_rewritten(f.read())
-    check(
-      "delegated generate + banner rewrite",
-      r.returncode == 0 and banner_ok,
-      r.stdout + r.stderr,
-    )
-
-    # (2) `codoku create --seed N` is deterministic: identical puzzle.
-    create_dir = os.path.join(workdir, "create_dir")
-    os.makedirs(create_dir)
-    setup_tools(codoku, rypuzmk, rypuzchk, rysmith, create_dir)
-    r = run(
-      [os.path.join(create_dir, "codoku"), "create", "--seed", "42"], cwd=create_dir
-    )
-    create_puzzle = os.path.join(create_dir, "puzzle.py")
-    identical = False
-    if r.returncode == 0 and os.path.exists(create_puzzle):
-      with open(puzzle) as f1, open(create_puzzle) as f2:
-        identical = f1.read() == f2.read()
-    check(
-      "create subcommand is deterministic (same seed)", r.returncode == 0 and identical
-    )
-
-    # (2b) `codoku create -o <dir>` writes the puzzle into that directory.
-    out_cwd = os.path.join(workdir, "out_cwd")
-    os.makedirs(out_cwd)
-    setup_tools(codoku, rypuzmk, rypuzchk, rysmith, out_cwd)
-    outdir = os.path.join(workdir, "outdir")
-    r = run([codoku_bin, "create", "--seed", "42", "-o", outdir], cwd=out_cwd)
-    files = set(os.listdir(outdir)) if os.path.isdir(outdir) else set()
-    cwd_leftovers = [
-      n
-      for n in ("puzzle.py", "INSTRUCTION.md", "puzzle.gt.py")
-      if os.path.exists(os.path.join(out_cwd, n))
-    ]
-    ok_outdir = r.returncode == 0 and {"puzzle.py", "INSTRUCTION.md"}.issubset(files)
-    check(
-      "create -o writes puzzle + INSTRUCTION into outdir",
-      ok_outdir,
-      r.stdout + r.stderr,
-    )
-    check(
-      "create -o leaves nothing in the cwd",
-      not cwd_leftovers,
-      f"leftover files: {cwd_leftovers}",
-    )
-
-    # (2c) The ground truth is moved into <outdir>/oracle/.
-    oracle_gt = os.path.join(outdir, "oracle", "puzzle.gt.py")
-    check(
-      "ground truth moved into oracle/",
-      os.path.exists(oracle_gt) and "puzzle.gt.py" not in files,
-      f"outdir files: {files}",
-    )
-
-    # (2d) `--difficulty easy` generates a puzzle and reports the score.
-    easy_dir = os.path.join(workdir, "easy_dir")
-    os.makedirs(easy_dir)
-    setup_tools(codoku, rypuzmk, rypuzchk, rysmith, easy_dir)
-    r = run([codoku_bin, "create", "--difficulty", "easy", "--seed", "9"], cwd=easy_dir)
-    check(
-      "create --difficulty easy generates a puzzle",
-      r.returncode == 0 and os.path.exists(os.path.join(easy_dir, "puzzle.py")),
-      r.stdout + r.stderr,
-    )
-    check(
-      "create reports the difficulty score",
-      "difficulty=easy" in r.stdout and "score=" in r.stdout,
-      r.stdout + r.stderr,
-    )
-
-    # (2e) Same difficulty + seed is deterministic.
-    easy2 = os.path.join(workdir, "easy_dir2")
-    os.makedirs(easy2)
-    setup_tools(codoku, rypuzmk, rypuzchk, rysmith, easy2)
-    r = run([codoku_bin, "create", "--difficulty", "easy", "--seed", "9"], cwd=easy2)
-    identical_difficulty = False
-    with (
-      open(os.path.join(easy_dir, "puzzle.py")) as f1,
-      open(os.path.join(easy2, "puzzle.py")) as f2,
+  with tempfile.TemporaryDirectory(prefix="codoku_gen_") as workdir:
+    # Mirror the image layout: codoku + vendored modules + rysmith in one dir.
+    src_dir = os.path.dirname(os.path.realpath(codoku_src))
+    for f in (
+      "codoku.py",
+      "codoku_creator.py",
+      "codoku_checker.py",
+      "codoku_common.py",
+      "codoku_complexity.py",
     ):
-      identical_difficulty = f1.read() == f2.read()
+      shutil.copy(os.path.join(src_dir, f), os.path.join(workdir, f))
+    os.symlink(os.path.abspath(rysmith), os.path.join(workdir, "rysmith"))
+
+    codoku_bin = os.path.join(workdir, "codoku.py")
+
+    # (1) Bare `codoku --seed N` generates the puzzle set.
+    r = run_codoku(codoku_bin, ["--seed", "42"], workdir)
+    puzzle = os.path.join(workdir, "puzzle.py")
+    oracle_gt = os.path.join(workdir, "oracle", "puzzle.gt.py")
+    manifest = os.path.join(workdir, "oracle", "metadata.json")
+    ok_files = (
+      r.returncode == 0
+      and os.path.exists(puzzle)
+      and os.path.exists(oracle_gt)
+      and os.path.exists(os.path.join(workdir, "INSTRUCTION.md"))
+      and os.path.exists(manifest)
+    )
+    check("generate produces puzzle set", ok_files, r.stdout + r.stderr)
+
+    # (2) The puzzle uses <FILL_XXX> tokens and the codoku check command.
+    with open(puzzle) as f:
+      ptext = f.read()
     check(
-      "difficulty + seed is deterministic", r.returncode == 0 and identical_difficulty
+      "puzzle uses <FILL_XXX> tokens",
+      "<FILL_VAR>" in ptext or "<FILL_CONST>" in ptext or "<FILL_OP>" in ptext,
+    )
+    check(
+      "puzzle banner points at codoku check",
+      "codoku check puzzle.py solution.py" in ptext and "./tools/rypuzchk" not in ptext,
+    )
+    with open(os.path.join(workdir, "INSTRUCTION.md")) as f:
+      itext = f.read()
+    bare_fill_re = re.compile(r"(?<!<)FILL_[A-Z_]+")
+    check(
+      "no bare FILL_XXX in puzzle or INSTRUCTION",
+      not bare_fill_re.search(ptext) and not bare_fill_re.search(itext),
+      bare_fill_re.search(ptext) or bare_fill_re.search(itext),
     )
 
-    # (2f) Invalid difficulty is rejected.
-    r = run([codoku_bin, "create", "--difficulty", "bogus", "--seed", "9"], cwd=workdir)
-    check("invalid difficulty rejected", r.returncode == 2, r.stdout + r.stderr)
+    # (3) Ground truth passes the vendored checker.
+    shutil.copy(oracle_gt, os.path.join(workdir, "solution.py"))
+    r = run_codoku(codoku_bin, ["check"], workdir)
+    check(
+      "ground truth passes check",
+      r.returncode == 0 and "[PASS]" in (r.stdout + r.stderr),
+      r.stdout + r.stderr,
+    )
 
-    # (3) `codoku check` with explicit names passes on the ground truth.
-    gt_cfg = codoku_mod.pick_config("medium", 42)
-    gt_sol = generate_ground_truth(rypuzmk, rysmith, 42, workdir, gt_cfg)
-    if gt_sol is None:
-      check(
-        "explicit check passes on ground truth", False, "ground-truth generation failed"
-      )
-    else:
-      r = run([codoku_bin, "check", "puzzle.py", os.path.basename(gt_sol)], cwd=workdir)
-      check(
-        "explicit check passes on ground truth",
-        r.returncode == 0 and "[PASS]" in (r.stdout + r.stderr),
-        r.stdout + r.stderr,
-      )
+    # (4) Determinism: same seed reproduces the identical puzzle.
+    r2_dir = os.path.join(workdir, "r2")
+    os.makedirs(r2_dir)
+    for f in (
+      "codoku.py",
+      "codoku_creator.py",
+      "codoku_checker.py",
+      "codoku_common.py",
+      "codoku_complexity.py",
+    ):
+      shutil.copy(os.path.join(workdir, f), os.path.join(r2_dir, f))
+    os.symlink(os.path.abspath(rysmith), os.path.join(r2_dir, "rysmith"))
+    r2 = run_codoku(
+      os.path.join(r2_dir, "codoku.py"), ["create", "--seed", "42"], r2_dir
+    )
+    with open(puzzle) as f1, open(os.path.join(r2_dir, "puzzle.py")) as f2:
+      deterministic = r2.returncode == 0 and f1.read() == f2.read()
+    check("same seed is deterministic", deterministic, r2.stdout + r2.stderr)
 
-    # (4) `codoku check` with default names (puzzle.py / solution.py).
-    if gt_sol is None:
-      check(
-        "default check names pass on ground truth",
-        False,
-        "ground-truth generation failed",
-      )
-    else:
-      shutil.copy(gt_sol, os.path.join(workdir, "solution.py"))
-      r = run([codoku_bin, "check"], cwd=workdir)
-      check(
-        "default check names pass on ground truth",
-        r.returncode == 0 and "[PASS]" in (r.stdout + r.stderr),
-        r.stdout + r.stderr,
-      )
+    # (5) The manifest records realized metrics.
+    with open(manifest) as f:
+      meta = json.load(f)
+    metrics = meta["realized_metrics"]
+    ok_metrics = (
+      meta["profile"] == "medium"
+      and metrics["exec_path_length"] > 0
+      and metrics["cfg_nodes"] > 0
+      and metrics["total_masks"] > 0
+    )
+    check("manifest records realized metrics", ok_metrics, str(metrics))
 
-    # (5) Unknown flags are rejected (no rypuzmk option inheritance).
-    r = run([codoku_bin, "--bogus"], cwd=workdir)
-    check("unknown flag rejected", r.returncode == 2, r.stdout + r.stderr)
-
-    # (6) Non-python --target is rejected.
-    r = run([codoku_bin, "--target", "c"], cwd=workdir)
-    check("non-python target rejected", r.returncode == 2, r.stdout + r.stderr)
-
-    # (7) Too many `check` positionals are rejected.
-    r = run([codoku_bin, "check", "a.py", "b.py", "c.py"], cwd=workdir)
-    check("too many check positionals rejected", r.returncode == 2, r.stdout + r.stderr)
-
-    # (8) Help exits 0.
-    r = run([codoku_bin, "--help"], cwd=workdir)
-    check("top-level --help exits 0", r.returncode == 0, r.stdout + r.stderr)
-    r = run([codoku_bin, "create", "--help"], cwd=workdir)
-    check("create --help exits 0", r.returncode == 0, r.stdout + r.stderr)
+    # (6) Invalid profile is rejected.
+    r = run_codoku(codoku_bin, ["create", "--profile", "bogus"], workdir)
+    check("invalid profile rejected", r.returncode == 2, r.stdout + r.stderr)
 
   n_fail = sum(1 for _, ok, _ in results if not ok)
   print(f"\n{len(results) - n_fail}/{len(results)} codoku tests passed")

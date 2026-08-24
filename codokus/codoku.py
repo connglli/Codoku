@@ -13,7 +13,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
+import shutil
 import sys
+from pathlib import Path
 
 from codoku_checker import CheckFailure
 from codoku_checker import check as run_check
@@ -25,6 +28,32 @@ def positive_int(value: str) -> int:
   if result < 1:
     raise argparse.ArgumentTypeError(f"value must be at least 1, got {value!r}")
   return result
+
+
+def find_rysmith() -> Path | None:
+  # 1. Next to the invoked binary/symlink (e.g. ./codoku -> ./rysmith)
+  if sys.argv and sys.argv[0]:
+    argv0 = Path(sys.argv[0])
+    candidate = argv0.parent.resolve() / "rysmith"
+    if candidate.is_file() and os.access(candidate, os.X_OK):
+      return candidate
+    candidate = argv0.resolve().parent / "rysmith"
+    if candidate.is_file() and os.access(candidate, os.X_OK):
+      return candidate
+  # 2. Next to codoku.py itself
+  script_dir = Path(__file__).resolve().parent
+  candidate = script_dir / "rysmith"
+  if candidate.is_file() and os.access(candidate, os.X_OK):
+    return candidate
+  # 3. Current working directory
+  cwd_candidate = Path.cwd() / "rysmith"
+  if cwd_candidate.is_file() and os.access(cwd_candidate, os.X_OK):
+    return cwd_candidate.resolve()
+  # 4. PATH lookup
+  which = shutil.which("rysmith")
+  if which:
+    return Path(which).resolve()
+  return None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -94,8 +123,12 @@ def main() -> int:
   if argv and argv[0] == "create":
     argv = argv[1:]
   args = parser.parse_args(["create"] + argv)
+  rysmith = find_rysmith()
+  if rysmith is None:
+    print("codoku: error: could not find rysmith binary", file=sys.stderr)
+    return 2
   try:
-    return generate(args)
+    return generate(args, rysmith_path=rysmith)
   except (FileNotFoundError, RuntimeError, ValueError) as error:
     print(f"codoku: error: {error}", file=sys.stderr)
     return 2
