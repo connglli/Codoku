@@ -227,17 +227,21 @@ def main():
       deterministic = r2.returncode == 0 and f1.read() == f2.read()
     check("same seed is deterministic", deterministic, r2.stdout + r2.stderr)
 
-    # (5) The manifest records realized metrics.
+    # (5) The manifest records realized metrics and complexity estimate.
     with open(manifest) as f:
       meta = json.load(f)
     metrics = meta["realized_metrics"]
+    complexity = meta.get("complexity_estimate", {})
     ok_metrics = (
       meta["profile"] == "medium"
       and metrics["exec_path_length"] > 0
       and metrics["cfg_nodes"] > 0
       and metrics["total_masks"] > 0
+      and "static_struct" in complexity
+      and "size" not in complexity
+      and "static_structure" not in complexity
     )
-    check("manifest records realized metrics", ok_metrics, str(metrics))
+    check("manifest records realized metrics", ok_metrics, str(meta))
 
     # (6) Invalid profile is rejected.
     r = run_codoku(codoku_bin, ["create", "--profile", "bogus"], workdir)

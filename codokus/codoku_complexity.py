@@ -67,12 +67,11 @@ class PuzzleMetrics:
 class ComplexityEstimate:
   """Heuristic, uncalibrated complexity estimate from the realized metrics."""
 
-  size: float  # CFG size and source volume (cfg_nodes + non-comment lines)
-  static_structure: float  # CFG edges and cyclomatic complexity
+  static_struct: float  # CFG size/edges, cyclomatic complexity, and source volume
   dynamic_trace: float  # execution-path length and repeated block visits
   masking: float  # weighted sum of <FILL_*> mask counts
   constraints: float  # constant-budget size and slot interactions
-  total: float  # sum of the five axes above
+  total: float  # sum of the four axes above
 
 
 MASK_WEIGHTS: Mapping[str, float] = {
@@ -186,21 +185,19 @@ def analyze_puzzle(path: Path) -> PuzzleMetrics:
 def estimate_complexity(metrics: PuzzleMetrics) -> ComplexityEstimate:
   """Estimate complexity from realized puzzle properties.
 
-  The model is a transparent, hand-written heuristic over five independent
+  The model is a transparent, hand-written heuristic over four independent
   axes; it is NOT a calibrated measure of solving difficulty.  Weights should
   eventually be fitted against solver outcomes (pass rate, time, attempts).
 
   Axes (all computed from the realized puzzle, not the generator knobs):
 
-  - size: structural volume.
-      size = 1.0 * cfg_nodes + 0.05 * non_comment_source_lines
-    Nodes dominate; raw source lines add only a small linear term so that
-    long-but-simple bodies do not inflate the score.
-
-  - static_structure: how much branching/looping must be understood.
-      static_structure = 1.0 * cfg_edges + 2.0 * cyclomatic_complexity
-    Cyclomatic complexity counts decision points, so it is weighted twice as
-    heavily as a single edge.
+  - static_struct: structural volume and control-flow complexity.
+      static_struct = 1.0 * cfg_nodes
+                    + 1.0 * cfg_edges
+                    + 2.0 * cyclomatic_complexity
+                    + 0.05 * non_comment_source_lines
+    Nodes and edges describe the graph skeleton; cyclomatic complexity
+    weights decision points; non-comment lines add a minor term for code volume.
 
   - dynamic_trace: how long the prescribed execution must be followed.
       dynamic_trace = 0.6 * exec_path_length + 0.5 * max_block_visits
@@ -225,11 +222,15 @@ def estimate_complexity(metrics: PuzzleMetrics) -> ComplexityEstimate:
     make the value-count matching harder), and repeated duplicates of a value
     add a small 0.25 term for the global-interaction aspect.
 
-  - total: sum of the five axes, so two puzzles can share a total while
+  - total: sum of the four axes, so two puzzles can share a total while
     differing in style (e.g. many masks vs. a long path).
   """
-  size = 1.0 * metrics.cfg_nodes + 0.05 * metrics.non_comment_source_lines
-  static_structure = 1.0 * metrics.cfg_edges + 2.0 * metrics.cyclomatic_complexity
+  static_struct = (
+    1.0 * metrics.cfg_nodes
+    + 1.0 * metrics.cfg_edges
+    + 2.0 * metrics.cyclomatic_complexity
+    + 0.05 * metrics.non_comment_source_lines
+  )
   dynamic_trace = 0.6 * metrics.exec_path_length + 0.5 * metrics.max_block_visits
   masking = sum(
     MASK_WEIGHTS.get(kind, 1.0) * count for kind, count in metrics.masks_by_kind.items()
@@ -242,10 +243,9 @@ def estimate_complexity(metrics: PuzzleMetrics) -> ComplexityEstimate:
     constraints += 0.25 * max(
       0, metrics.const_budget_total - metrics.const_budget_entries
     )
-  total = size + static_structure + dynamic_trace + masking + constraints
+  total = static_struct + dynamic_trace + masking + constraints
   return ComplexityEstimate(
-    size=round(size, 2),
-    static_structure=round(static_structure, 2),
+    static_struct=round(static_struct, 2),
     dynamic_trace=round(dynamic_trace, 2),
     masking=round(masking, 2),
     constraints=round(constraints, 2),
