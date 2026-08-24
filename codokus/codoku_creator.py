@@ -345,12 +345,12 @@ class GenerationProfile:
 
 
 PROFILES: dict[str, GenerationProfile] = {
+  # A small function with a short path, where part of the code stays visible and constants need no maching.
   "easy": GenerationProfile(
     n_bbls=IntRange(2, 4),
     n_stmts=IntRange(2, 3),
     min_loop_iter=IntRange(0, 1),
     p_mask=FloatRange(0.5, 0.7),
-    # Integer scalar arithmetic only - no floats, vectors, or pointers.
     max_ptr_depth=IntRange(0, 0),
     p_backedge=FloatRange(0.1, 0.3),
     p_branch=FloatRange(0.3, 0.5),
@@ -370,6 +370,7 @@ PROFILES: dict[str, GenerationProfile] = {
       "cyclomatic_complexity": (2, 6),
     },
   ),
+  # A loop-driven function where most statement is masked and constants must match a budget.
   "medium": GenerationProfile(
     n_bbls=IntRange(3, 6),
     n_stmts=IntRange(2, 4),
@@ -392,6 +393,7 @@ PROFILES: dict[str, GenerationProfile] = {
       "cyclomatic_complexity": (2, 10),
     },
   ),
+  # A large branching function with deep loops, nothing visible but the skeleton, and a tight constant budget.
   "hard": GenerationProfile(
     n_bbls=IntRange(6, 10),
     n_stmts=IntRange(3, 5),

@@ -79,7 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
     dest="profile",
     choices=sorted(PROFILES),
     default="medium",
-    help="generation profile; -d/--difficulty are compatibility aliases (default: medium)",
+    help="generation profile, which implies difficulty (default: medium)",
   )
   create.add_argument(
     "--seed",
