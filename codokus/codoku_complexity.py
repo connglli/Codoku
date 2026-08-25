@@ -35,6 +35,7 @@ class PuzzleMetrics:
   cfg_nodes: int  # distinct CFG nodes named in the //@ CFG_EDGE markers and EXEC_PATH
   cfg_edges: int  # distinct edges declared in the //@ CFG_EDGE markers
   cyclomatic_complexity: int  # E - N + 2 over the declared CFG (min 1)
+  n_loops: int  # distinct loops (back-edge targets) exercised on the path
 
   # Dynamic execution (from the EXEC_PATH)
   exec_path_length: (
@@ -43,6 +44,8 @@ class PuzzleMetrics:
   unique_path_blocks: int  # distinct blocks visited on the path
   repeated_block_visits: int  # extra visits beyond the first for each path block
   max_block_visits: int  # visit count of the most-visited block on the path
+  loop_iterations_total: int  # summed trip counts over those loops
+  loop_iterations_avg: float  # loop_iterations_total / n_loops (0 if no loops)
 
   # Information hiding
   total_masks: int  # total <FILL_*> tokens in the puzzle body
@@ -64,10 +67,13 @@ class PuzzleMetrics:
       "cfg_nodes": self.cfg_nodes,
       "cfg_edges": self.cfg_edges,
       "cyclomatic_complexity": self.cyclomatic_complexity,
+      "n_loops": self.n_loops,
       "exec_path_length": self.exec_path_length,
       "unique_path_blocks": self.unique_path_blocks,
       "repeated_block_visits": self.repeated_block_visits,
       "max_block_visits": self.max_block_visits,
+      "loop_iterations_total": self.loop_iterations_total,
+      "loop_iterations_avg": self.loop_iterations_avg,
       "total_masks": self.total_masks,
       "const_budget_entries": self.const_budget_entries,
       "const_budget_total": self.const_budget_total,
@@ -264,6 +270,28 @@ def analyze_puzzle(path: Path) -> PuzzleMetrics:
   repeated_visits = sum(max(0, c - 1) for c in path_counts.values())
   max_block_visits = max(path_counts.values(), default=0)
 
+  # Loops on the prescribed path.  A declared CFG edge whose target first
+  # occurs earlier on the path than its source is a back-edge; its target
+  # heads a loop, and the header's occurrence count estimates that loop's
+  # trip count.  One visit is subtracted when the trace's final step departs
+  # from the header itself: the failing test exits without completing an
+  # iteration (exits from inside the body need no correction).
+  first_seen: dict[str, int] = {}
+  for idx, block in enumerate(path_blocks):
+    first_seen.setdefault(block, idx)
+  edge_set = set(cfg_edges)
+  headers = {
+    dst
+    for src, dst in edge_set
+    if dst in first_seen and src in first_seen and first_seen[dst] < first_seen[src]
+  }
+  iterations_by_header = {h: path_counts[h] for h in headers}
+  if len(path_blocks) >= 2 and path_blocks[-2] in headers:
+    iterations_by_header[path_blocks[-2]] -= 1
+  n_loops = len(headers)
+  loop_iters_total = sum(iterations_by_header.values())
+  loop_iters_avg = loop_iters_total / n_loops if n_loops else 0.0
+
   masks = count_code_masks(text)
   for known_mask in KNOWN_MASKS:
     masks.setdefault(known_mask, 0)
@@ -283,6 +311,9 @@ def analyze_puzzle(path: Path) -> PuzzleMetrics:
     unique_path_blocks=unique_path_blocks,
     repeated_block_visits=repeated_visits,
     max_block_visits=max_block_visits,
+    n_loops=n_loops,
+    loop_iterations_total=loop_iters_total,
+    loop_iterations_avg=round(loop_iters_avg, 2),
     total_masks=sum(masks.values()),
     masks_by_kind=dict(sorted(masks.items())),
     sol_space_log10=round(sol_space_log10, 4),
@@ -311,12 +342,14 @@ def estimate_complexity(metrics: PuzzleMetrics) -> ComplexityEstimate:
     weights decision points; non-comment lines add a minor term for code volume.
 
   - dynamic_trace: how long the prescribed execution must be followed.
-      dynamic_trace = 0.6 * exec_path_length + 0.5 * max_block_visits
-    Path length is the primary term; the most-visited block adds a small
-    bonus because deep repetition is harder to track than an equally long
-    straight-line path (repeated visits are already inside path length, so
-    they are not counted again at full weight).
-
+      dynamic_trace = 0.6 * exec_path_length + 0.5 * loop_iterations_avg
+    Path length is the primary term and already carries the repetition
+    volume (every iteration re-executes its body on the path).  The average
+    loop depth adds a small bonus because many consecutive passes through
+    one loop are harder to track than the same number of blocks spread over
+    distinct code; it is body-size-independent and sees every loop, unlike
+    the previous max_block_visits term, which conflated loop depth with
+    loop-body size and ignored all but the hottest loop.
   - masking: how many blanks must be filled and how costly each kind is.
       masking = sum(MASK_WEIGHTS[kind] * count for kind, count in masks)
     Control-flow masks (<FILL_CTRL>) are the most expensive (they steer the
@@ -342,7 +375,7 @@ def estimate_complexity(metrics: PuzzleMetrics) -> ComplexityEstimate:
     + 2.0 * metrics.cyclomatic_complexity
     + 0.05 * metrics.non_comment_source_lines
   )
-  dynamic_trace = 0.6 * metrics.exec_path_length + 0.5 * metrics.max_block_visits
+  dynamic_trace = 0.6 * metrics.exec_path_length + 0.5 * metrics.loop_iterations_avg
   masking = sum(
     MASK_WEIGHTS.get(kind, 1.0) * count for kind, count in metrics.masks_by_kind.items()
   )
