@@ -356,7 +356,7 @@ PROFILES: dict[str, GenerationProfile] = {
     p_branch=FloatRange(0.3, 0.5),
     n_vars=IntRange(6, 10),
     n_params=IntRange(2, 3),
-    lift_consts=True,
+    lift_consts=False,
     features=(
       "--no-fp",
       "--no-vec",
