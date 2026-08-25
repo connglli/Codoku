@@ -146,6 +146,7 @@ FILL_PARSE_PLACEHOLDERS: Mapping[str, str] = {
   "<FILL_OP>": "+",
   "<FILL_FUNC>": "_fun_slot",
   "<FILL_CTRL>": "pass",
+  "<FILL_LABEL>": "exit",
 }
 
 
@@ -168,7 +169,9 @@ def count_code_masks(text: str) -> Counter[str]:
   return counts
 
 
-def collect_fill_choices(text: str, budget_values: set[str]) -> dict[str, int]:
+def collect_fill_choices(
+  text: str, budget_values: set[str], n_cfg_nodes: int
+) -> dict[str, int]:
   """Candidate-token vocabulary size for one slot of each mask kind.
 
   Per-kind sets, mirroring the masking rules in codoku_common:
@@ -180,7 +183,10 @@ def collect_fill_choices(text: str, budget_values: set[str]) -> dict[str, int]:
   - <FILL_OP>:    operator/keyword vocabulary masked as <FILL_OP>.
   - <FILL_FUNC>:  functions defined in the file except internal helpers.
   - <FILL_CTRL>:  break / continue.
-  - <FILL_TYPE>/<FILL_LABEL>/<FILL_FIELD>: unused by the Python target (0).
+  - <FILL_LABEL>: CFG nodes, i.e., the possible destinations of a _go_ flag
+                  (the concrete flag names are hidden behind the masks, so
+                  the node count is the approximation).
+  - <FILL_TYPE>/<FILL_FIELD>: unused by the Python target (0).
 
   If the de-masked source fails to parse, the AST-derived entries
   (<FILL_VAR>, <FILL_FUNC>) stay 0.
@@ -193,6 +199,7 @@ def collect_fill_choices(text: str, budget_values: set[str]) -> dict[str, int]:
   }
   choices["<FILL_OP>"] = len(op_symbols)
   choices["<FILL_CTRL>"] = len(CONTROL_FLOW_KEYWORDS)
+  choices["<FILL_LABEL>"] = max(1, n_cfg_nodes)
   choices["<FILL_CONST>"] = (
     len(budget_values) if budget_values else UNBOUNDED_FILL_CONST_CHOICES
   )
@@ -299,7 +306,7 @@ def analyze_puzzle(path: Path) -> PuzzleMetrics:
   for known_mask in KNOWN_MASKS:
     masks.setdefault(known_mask, 0)
 
-  fill_choices = collect_fill_choices(text, const_budget_values)
+  fill_choices = collect_fill_choices(text, const_budget_values, node_count)
   sol_space_log10 = estimate_sol_space_log10(masks, fill_choices)
 
   non_comment_lines = sum(
