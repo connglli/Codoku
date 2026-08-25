@@ -1,17 +1,30 @@
 """codoku_complexity.py - realized puzzle metrics and complexity estimation.
 
 Measures the generated puzzle's static structure, dynamic execution path,
-masking, and constant-budget constraints; collapses them into a heuristic
-(not calibrated) complexity estimate.
+masking, constant-budget constraints, and an enumerated solution-space size;
+collapses them into a heuristic (not calibrated) complexity estimate.
 """
 
 from __future__ import annotations
 
+import ast
+import math
 import re
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
+
+from codoku_common import (
+  BINARY_OP_SPANS,
+  COMPARISON_OP_SPANS,
+  CONTROL_FLOW_KEYWORDS,
+  IFEXP_KEYWORDS,
+  INTERNAL_HELPER_FUNCS,
+  UNARY_OP_SPANS,
+  collect_python_leaf_locals,
+  find_python_leaf_function,
+)
 
 
 @dataclass(frozen=True)
@@ -34,6 +47,9 @@ class PuzzleMetrics:
   # Information hiding
   total_masks: int  # total <FILL_*> tokens in the puzzle body
   masks_by_kind: Mapping[str, int]  # count per mask kind, e.g. {"<FILL_VAR>": 3}
+
+  # Solution space (enumerated fill combinations, reported as log10)
+  sol_space_log10: float
 
   # Constant-budget constraints
   const_budget_entries: int  # distinct values in the //@ <FILL_CONST> budget
@@ -60,6 +76,7 @@ class PuzzleMetrics:
     }
     for kind, count in self.masks_by_kind.items():
       result[f"mask_{kind.lower()}"] = count
+    result["sol_space_log10"] = self.sol_space_log10
     return result
 
 
@@ -89,6 +106,7 @@ CFG_EDGE_RE = re.compile(r"#//@\s*CFG_EDGE\s*:\s*(.+)")
 EXEC_PATH_RE = re.compile(r"#//@\s*EXEC_PATH\s*:\s*(.+)")
 CONST_BUDGET_RE = re.compile(r"#//@\s*<FILL_CONST>\s*:\s*(.+?)\s+(\d+)\s*$")
 BLOCK_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*|\d+")
+MASK_TOKEN_RE = re.compile(r"<FILL_[A-Z_]+>")
 KNOWN_MASKS = (
   "<FILL_VAR>",
   "<FILL_CONST>",
@@ -99,6 +117,27 @@ KNOWN_MASKS = (
   "<FILL_FIELD>",
   "<FILL_CTRL>",
 )
+
+# ---------------------------------------------------------------------------
+# Solution-space estimation
+# ---------------------------------------------------------------------------
+
+# Nominal vocabulary for an unconstrained <FILL_CONST> slot: puzzles generated
+# with lift_consts carry no budget, so any literal is admissible.
+UNBOUNDED_FILL_CONST_CHOICES = 65536
+
+# Per-kind placeholders used only so the de-masked source parses.  Each kind
+# always occurs in positions where its placeholder is grammatically valid:
+# identifiers for names/lvalues, a literal for constants, `pass` for
+# break/continue statements, and an infix operator for operators (including
+# the if/else keywords of a ternary, both of which are masked together).
+FILL_PARSE_PLACEHOLDERS: Mapping[str, str] = {
+  "<FILL_VAR>": "_var_slot",
+  "<FILL_CONST>": "0",
+  "<FILL_OP>": "+",
+  "<FILL_FUNC>": "_fun_slot",
+  "<FILL_CTRL>": "pass",
+}
 
 
 def extract_block_tokens(payload: str) -> list[str]:
@@ -115,9 +154,75 @@ def count_code_masks(text: str) -> Counter[str]:
     stripped = line.lstrip()
     if stripped.startswith("#"):
       continue
-    for mask in re.findall(r"<FILL_[A-Z_]+>", line):
+    for mask in MASK_TOKEN_RE.findall(line):
       counts[mask] += 1
   return counts
+
+
+def collect_fill_choices(text: str, budget_values: set[str]) -> dict[str, int]:
+  """Candidate-token vocabulary size for one slot of each mask kind.
+
+  Per-kind sets, mirroring the masking rules in codoku_common:
+
+  - <FILL_VAR>:   local/parameter names visible in the leaf function.
+  - <FILL_CONST>: distinct values admitted by the //@ <FILL_CONST> budget;
+                  with no budget any literal is admissible, approximated by
+                  UNBOUNDED_FILL_CONST_CHOICES.
+  - <FILL_OP>:    operator/keyword vocabulary masked as <FILL_OP>.
+  - <FILL_FUNC>:  functions defined in the file except internal helpers.
+  - <FILL_CTRL>:  break / continue.
+  - <FILL_TYPE>/<FILL_LABEL>/<FILL_FIELD>: unused by the Python target (0).
+
+  If the de-masked source fails to parse, the AST-derived entries
+  (<FILL_VAR>, <FILL_FUNC>) stay 0.
+  """
+  choices: dict[str, int] = {kind: 0 for kind in KNOWN_MASKS}
+  op_symbols = {
+    sym.decode("ascii")
+    for spans in (BINARY_OP_SPANS, COMPARISON_OP_SPANS, UNARY_OP_SPANS, IFEXP_KEYWORDS)
+    for sym in spans
+  }
+  choices["<FILL_OP>"] = len(op_symbols)
+  choices["<FILL_CTRL>"] = len(CONTROL_FLOW_KEYWORDS)
+  choices["<FILL_CONST>"] = (
+    len(budget_values) if budget_values else UNBOUNDED_FILL_CONST_CHOICES
+  )
+
+  try:
+    tree = ast.parse(
+      MASK_TOKEN_RE.sub(lambda m: FILL_PARSE_PLACEHOLDERS.get(m.group(0), "None"), text)
+    )
+  except SyntaxError:
+    return choices
+
+  leaf, _ = find_python_leaf_function(tree, b"")
+  if leaf is not None:
+    choices["<FILL_VAR>"] = len(collect_python_leaf_locals(leaf))
+  defined_funcs = {
+    node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+  }
+  choices["<FILL_FUNC>"] = len(defined_funcs - INTERNAL_HELPER_FUNCS)
+  return choices
+
+
+def estimate_sol_space_log10(
+  masks_by_kind: Mapping[str, int], fill_choices: Mapping[str, int]
+) -> float:
+  """log10 of the solution space: the cartesian product of per-slot candidate counts across all mask slots.
+
+  Each mask of a kind contributes fill_choices[kind] options, so
+  log10(sol_space) = sum(count[kind] * log10(choices[kind])).  Returns -inf
+  when a masked kind has no enumerable candidates.
+  """
+  total = 0.0
+  for kind, count in masks_by_kind.items():
+    if count <= 0:
+      continue
+    n_choices = fill_choices.get(kind, 0)
+    if n_choices <= 0:
+      return float("-inf")
+    total += count * math.log10(n_choices)
+  return total
 
 
 def analyze_puzzle(path: Path) -> PuzzleMetrics:
@@ -129,6 +234,7 @@ def analyze_puzzle(path: Path) -> PuzzleMetrics:
   path_blocks: list[str] = []
   const_budget_entries = 0
   const_budget_total = 0
+  const_budget_values: set[str] = set()
 
   for line in lines:
     edge_match = CFG_EDGE_RE.search(line)
@@ -145,6 +251,7 @@ def analyze_puzzle(path: Path) -> PuzzleMetrics:
     if budget_match:
       const_budget_entries += 1
       const_budget_total += int(budget_match.group(2))
+      const_budget_values.add(budget_match.group(1))
 
   cfg_nodes = {node for s, t in cfg_edges for node in (s, t)}
   cfg_nodes.update(path_blocks)
@@ -161,6 +268,9 @@ def analyze_puzzle(path: Path) -> PuzzleMetrics:
   for known_mask in KNOWN_MASKS:
     masks.setdefault(known_mask, 0)
 
+  fill_choices = collect_fill_choices(text, const_budget_values)
+  sol_space_log10 = estimate_sol_space_log10(masks, fill_choices)
+
   non_comment_lines = sum(
     1 for line in lines if line.strip() and not line.lstrip().startswith("#")
   )
@@ -175,6 +285,7 @@ def analyze_puzzle(path: Path) -> PuzzleMetrics:
     max_block_visits=max_block_visits,
     total_masks=sum(masks.values()),
     masks_by_kind=dict(sorted(masks.items())),
+    sol_space_log10=round(sol_space_log10, 4),
     const_budget_entries=const_budget_entries,
     const_budget_total=const_budget_total,
     source_lines=len(lines),

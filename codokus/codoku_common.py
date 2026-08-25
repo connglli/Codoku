@@ -7,6 +7,81 @@ target's needs: mask tokens are the angle-bracketed <FILL_XXX> forms.
 import ast
 
 # ---------------------------------------------------------------------------
+# Masking vocabularies
+#
+# Single source of truth for what each <FILL_XXX> kind can be filled with;
+# used by the masker below and by the solution-space estimator in
+# codoku_complexity.py.  Op symbols/keywords are byte spans because masking
+# locates them inside byte slices; helper/function names are text.
+# ---------------------------------------------------------------------------
+
+# Preamble helper calls masked as <FILL_FUNC>.
+RETAINED_HELPER_FUNCS: tuple[str, ...] = (
+  "_cast_int",
+  "_padd",
+  "_pdiff",
+  "_peq",
+  "_prel",
+  "_load",
+  "_store",
+  "_pidx",
+  "_pfield",
+)
+
+# File-internal functions never masked as <FILL_FUNC>.
+INTERNAL_HELPER_FUNCS: frozenset[str] = frozenset(
+  {
+    "_crc32_update_i32",
+    "_check_chksum_i32",
+    "_in_check_chksum",
+    "_trap",
+    "_ichk",
+    "_fin",
+    "_f32",
+    "_f64",
+    "_Ptr",
+    "_rd",
+    "_vrd",
+    "_idx",
+  }
+)
+
+# Operators masked as <FILL_OP>, by construct.  Within each tuple the order
+# matters: longer symbols must precede their prefixes (e.g. b"//" before
+# b"/") so the byte-slice search picks the intended span.
+BINARY_OP_SPANS: tuple[bytes, ...] = (
+  b"**",
+  b"<<",
+  b">>",
+  b"//",
+  b"+",
+  b"-",
+  b"*",
+  b"/",
+  b"%",
+  b"&",
+  b"|",
+  b"^",
+)
+COMPARISON_OP_SPANS: tuple[bytes, ...] = (
+  b"==",
+  b"!=",
+  b"<=",
+  b">=",
+  b"<",
+  b">",
+  b"is not",
+  b"is",
+  b"not in",
+  b"in",
+)
+UNARY_OP_SPANS: tuple[bytes, ...] = (b"not", b"~", b"+", b"-")
+IFEXP_KEYWORDS: tuple[bytes, ...] = (b"if", b"else")
+
+# Control keywords masked as <FILL_CTRL>.
+CONTROL_FLOW_KEYWORDS: tuple[str, ...] = ("break", "continue")
+
+# ---------------------------------------------------------------------------
 # Prefix Stripping
 # ---------------------------------------------------------------------------
 
@@ -329,33 +404,8 @@ def collect_python_replacements(
   if isinstance(node, ast.Call):
     if isinstance(node.func, ast.Name):
       func_name = node.func.id
-      if func_name in (
-        "_cast_int",
-        "_padd",
-        "_pdiff",
-        "_peq",
-        "_prel",
-        "_load",
-        "_store",
-        "_pidx",
-        "_pfield",
-      ) or (
-        func_name in defined_funcs
-        and func_name
-        not in (
-          "_crc32_update_i32",
-          "_check_chksum_i32",
-          "_in_check_chksum",
-          "_trap",
-          "_ichk",
-          "_fin",
-          "_f32",
-          "_f64",
-          "_Ptr",
-          "_rd",
-          "_vrd",
-          "_idx",
-        )
+      if func_name in RETAINED_HELPER_FUNCS or (
+        func_name in defined_funcs and func_name not in INTERNAL_HELPER_FUNCS
       ):
         start, end = get_node_offsets(node.func)
         replacements.append((start, end, "<FILL_FUNC>"))
@@ -385,20 +435,7 @@ def collect_python_replacements(
     start_left, end_left = get_node_offsets(node.left)
     start_right, end_right = get_node_offsets(node.right)
     op_slice = src_bytes[end_left:start_right]
-    for op_sym in (
-      b"**",
-      b"<<",
-      b">>",
-      b"//",  # must precede b"/" - floor-div is two chars
-      b"+",
-      b"-",
-      b"*",
-      b"/",
-      b"%",
-      b"&",
-      b"|",
-      b"^",
-    ):
+    for op_sym in BINARY_OP_SPANS:
       idx = op_slice.find(op_sym)
       if idx != -1:
         op_start = end_left + idx
@@ -430,18 +467,7 @@ def collect_python_replacements(
     for op, comp in zip(node.ops, node.comparators):
       comp_start, comp_end = get_node_offsets(comp)
       op_slice = src_bytes[prev_end:comp_start]
-      for op_sym in (
-        b"==",
-        b"!=",
-        b"<=",
-        b">=",
-        b"<",
-        b">",
-        b"is not",
-        b"is",
-        b"not in",
-        b"in",
-      ):
+      for op_sym in COMPARISON_OP_SPANS:
         idx = op_slice.find(op_sym)
         if idx != -1:
           op_start = prev_end + idx
@@ -473,7 +499,7 @@ def collect_python_replacements(
     op_start, op_end = get_node_offsets(node)
     operand_start, operand_end = get_node_offsets(node.operand)
     op_slice = src_bytes[op_start:operand_start]
-    for op_sym in (b"not", b"~", b"+", b"-"):
+    for op_sym in UNARY_OP_SPANS:
       idx = op_slice.find(op_sym)
       if idx != -1:
         start = op_start + idx
@@ -495,14 +521,19 @@ def collect_python_replacements(
     body_start, body_end = get_node_offsets(node.body)
     test_start, test_end = get_node_offsets(node.test)
     orelse_start, orelse_end = get_node_offsets(node.orelse)
+    kw_if, kw_else = IFEXP_KEYWORDS
     if_slice = src_bytes[body_end:test_start]
-    idx_if = if_slice.find(b"if")
+    idx_if = if_slice.find(kw_if)
     if idx_if != -1:
-      replacements.append((body_end + idx_if, body_end + idx_if + 2, "<FILL_OP>"))
+      replacements.append(
+        (body_end + idx_if, body_end + idx_if + len(kw_if), "<FILL_OP>")
+      )
     else_slice = src_bytes[test_end:orelse_start]
-    idx_else = else_slice.find(b"else")
+    idx_else = else_slice.find(kw_else)
     if idx_else != -1:
-      replacements.append((test_end + idx_else, test_end + idx_else + 4, "<FILL_OP>"))
+      replacements.append(
+        (test_end + idx_else, test_end + idx_else + len(kw_else), "<FILL_OP>")
+      )
     collect_python_replacements(
       node.body,
       src_bytes,

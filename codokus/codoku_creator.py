@@ -898,6 +898,7 @@ def generate(args: argparse.Namespace, rysmith_path: Path) -> int:
         f"seed={master_seed} "
         f"path_length={candidate.metrics.exec_path_length} "
         f"masks={candidate.metrics.total_masks} "
+        f"estimated_sol_space_log10={candidate.metrics.sol_space_log10:.2f} "
         f"estimated_complexity={candidate.complexity.total}"
       )
       return 0
