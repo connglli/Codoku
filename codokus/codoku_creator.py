@@ -33,6 +33,7 @@ from codoku_common import (
   find_python_leaf_function,
   get_line_indent,
   get_python_maskable_statements,
+  mentions_go_flag,
   strip_refractir_prefix,
 )
 from codoku_complexity import (
@@ -74,7 +75,7 @@ That also said, avoid generating the solution file before you solve the puzzle s
 - {{CONST_FILL}}
 - `<FILL_OP>` → a Python operator (`+`, `-`, `*`, `/`, `%`, `//`, `&`, `|`, `^`, `<<`, `>>`, `~`, `==`, `!=`, `<`, `>`, `<=`, `>=`, `if`, `else`, `not`, `and`, `or`)
 - `<FILL_TYPE>` → not used (Python is dynamically typed)
-- `<FILL_LABEL>` → not used (Python has no goto-based blocks)
+- `<FILL_LABEL>` → the destination of a `_go_<FILL_LABEL>` flag (such as `_go_b3`)
 - `<FILL_FUNC>` → a function call name (e.g., `_cast_int`, `_padd`, `_pdiff`, `_peq`, `_prel`, `_load`, `_store`, `_pidx`, `_pfield`, or any function defined in the file)
 - `<FILL_FIELD>` → not used
 - `<FILL_CTRL>` → a control keyword (`break` or `continue`)
@@ -572,6 +573,12 @@ def mask_puzzle(
         break
     if not mask_set and p_mask > 1e-9:
       raise RuntimeError("failed to build a non-empty mask set after 100 attempts")
+
+  # _go_* goto flags are always masked: a single visible occurrence would
+  # reveal which CFG target every other <FILL_LABEL> slot jumps to.
+  for idx, stmt in enumerate(maskable):
+    if mentions_go_flag(stmt):
+      mask_set.add(idx)
 
   trace_repls = build_trace_replacements(leaf_node, src)
   budget_counts: dict[str, int] = {}

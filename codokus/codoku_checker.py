@@ -275,7 +275,12 @@ def infer_mask_set_from_puzzle(
 
 
 def check_cfg(func_node, src: bytes, cfg_edges: list[tuple[str, str]]) -> None:
-  """Verify that the solution's CFG matches the declared edges exactly."""
+  """Verify the solution's CFG matches the declared edges exactly.
+
+  Also verifies that every ``_go_*`` goto flag in the solution references a
+  declared CFG node: the flag name encodes its jump target (``_go_exit`` →
+  ``exit``, ``_go_b6`` → ``b6``), so an unknown target is a structural error.
+  """
   if not cfg_edges:
     return
 
@@ -290,6 +295,17 @@ def check_cfg(func_node, src: bytes, cfg_edges: list[tuple[str, str]]) -> None:
     for f, t in sorted(missing):
       msg_parts.append(f"  missing edge:    {f} -> {t}")
     fail(CheckResult.FAIL_CFG, "\n".join(msg_parts))
+
+  declared_nodes = {n for edge in cfg_edges for n in edge}
+  for node in ast.walk(func_node):
+    if isinstance(node, ast.Name) and node.id.startswith("_go_"):
+      target = node.id[4:]
+      if target not in declared_nodes:
+        fail(
+          CheckResult.FAIL_CFG,
+          f"Unknown goto target '{target}' in flag '{node.id}'. "
+          f"Valid targets: {sorted(declared_nodes)}",
+        )
 
 
 # ---------------------------------------------------------------------------

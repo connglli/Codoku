@@ -235,6 +235,13 @@ def collect_python_leaf_locals(leaf_node: ast.FunctionDef) -> set[str]:
 # ---------------------------------------------------------------------------
 
 
+def mentions_go_flag(node: ast.AST) -> bool:
+  """True if the node references a ``_go_*`` structured-goto flag."""
+  return any(
+    isinstance(n, ast.Name) and n.id.startswith("_go_") for n in ast.walk(node)
+  )
+
+
 def get_python_maskable_statements(
   leaf_node: ast.FunctionDef, src: bytes
 ) -> tuple[list[ast.AST], int, int]:
@@ -258,7 +265,8 @@ def get_python_maskable_statements(
   decls_before_entry = []
   body_statements = []
 
-  # Top-level declarations/assignments before entry block
+  # Top-level declarations/assignments before entry block.  Scratch variables
+  # stay visible, except ``_go_*`` goto flags, which are always maskable.
   for stmt in leaf_node.body:
     if stmt.lineno < entry_line:
       if isinstance(stmt, ast.Assign):
@@ -268,7 +276,7 @@ def get_python_maskable_statements(
             target.id.startswith("_") or target.id.startswith("v__")
           ):
             is_scratch = True
-        if not is_scratch:
+        if not is_scratch or mentions_go_flag(stmt):
           decls_before_entry.append(stmt)
 
   def get_block_for_line(lineno):
@@ -299,7 +307,8 @@ def get_python_maskable_statements(
     if isinstance(node, (ast.While, ast.For)):
       block = get_loop_header(node)
 
-    # Exclude entry and exit blocks
+    # Exclude entry and exit blocks -- except goto-flag plumbing, which is
+    # maskable wherever it appears.
     if block is not None and block != "entry" and block != "exit":
       if isinstance(node, (ast.Assign, ast.Break, ast.Continue, ast.Expr)):
         body_statements.append(node)
@@ -314,6 +323,11 @@ def get_python_maskable_statements(
         for child in getattr(node, "orelse", []):
           walk(child)
         return
+    elif block is not None and isinstance(node, ast.If) and mentions_go_flag(node.test):
+      # A ``if (not) _go_X:`` guard outside body blocks is goto plumbing;
+      # expose its test for <FILL_LABEL> masking, then keep descending so
+      # nested statements retain their own block attribution.
+      body_statements.append(node.test)
 
     for child in ast.iter_child_nodes(node):
       walk(child)
@@ -352,6 +366,10 @@ def collect_python_replacements(
   ``is_body`` is True for statements strictly inside the function body (between
   entry/exit).  For let-initialisers (``is_body=False``) the sentinels ``0``
   and ``1`` are left visible.
+
+  Regardless of zone: every identifier of a ``_go_*`` structured-goto flag is
+  replaced by ``_go_<FILL_LABEL>`` (the solver must derive which CFG target
+  each flag jumps to from the CFG/EXEC_PATH markers).
   """
   if not hasattr(node, "lineno"):
     return
@@ -361,6 +379,11 @@ def collect_python_replacements(
       src_bytes, n.lineno, n.col_offset, n.end_lineno, n.end_col_offset
     )
 
+  if isinstance(node, ast.Name) and node.id.startswith("_go_"):
+    start, end = get_node_offsets(node)
+    replacements.append((start, end, "_go_<FILL_LABEL>"))
+    return
+
   def get_py_leftmost_base(n):
     if isinstance(n, ast.Subscript):
       return get_py_leftmost_base(n.value)
@@ -369,6 +392,17 @@ def collect_python_replacements(
   leftmost = get_py_leftmost_base(node)
 
   if not is_body and isinstance(node, ast.Assign):
+    for target in node.targets:
+      if mentions_go_flag(target):
+        collect_python_replacements(
+          target,
+          src_bytes,
+          is_body,
+          replacements,
+          budget_counts,
+          local_names,
+          defined_funcs,
+        )
     collect_python_replacements(
       node.value,
       src_bytes,
