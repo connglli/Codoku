@@ -7,11 +7,14 @@ collapses them into a heuristic (not calibrated) complexity estimate.
 
 from __future__ import annotations
 
+import argparse
 import ast
+import json
 import math
 import re
+import sys
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Mapping
 
@@ -395,3 +398,96 @@ def estimate_complexity(metrics: PuzzleMetrics) -> ComplexityEstimate:
     constraints=round(constraints, 2),
     total=round(total, 2),
   )
+
+
+# ---------------------------------------------------------------------------
+# CLI (mirrors codoku_checker.py; `codoku analyze` forwards here)
+# ---------------------------------------------------------------------------
+
+
+def run_analyze(puzzle: str, as_json: bool = False) -> int:
+  """Analyze one puzzle file and print its metrics and complexity estimate."""
+  path = Path(puzzle)
+  if not path.is_file():
+    print(f"codoku: error: puzzle file not found: {puzzle}", file=sys.stderr)
+    return 2
+  try:
+    metrics = analyze_puzzle(path)
+  except (OSError, UnicodeError) as e:
+    print(f"codoku: error: cannot read puzzle '{puzzle}': {e}", file=sys.stderr)
+    return 2
+  estimate = estimate_complexity(metrics)
+
+  if as_json:
+    payload = {
+      "target": "python",
+      "puzzle": str(path),
+      "realized_metrics": asdict(metrics),
+      "complexity_estimate": asdict(estimate),
+    }
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+  print(f"Puzzle analysis: {path}")
+  print("  structure:")
+  print(f"    cfg_nodes={metrics.cfg_nodes} cfg_edges={metrics.cfg_edges}")
+  print(f"    cyclomatic_complexity={metrics.cyclomatic_complexity}")
+  print(
+    f"    source_lines={metrics.source_lines}"
+    f" non_comment_source_lines={metrics.non_comment_source_lines}"
+  )
+  print("  execution path:")
+  print(
+    f"    exec_path_length={metrics.exec_path_length}"
+    f" unique_path_blocks={metrics.unique_path_blocks}"
+  )
+  print(
+    f"    repeated_block_visits={metrics.repeated_block_visits}"
+    f" max_block_visits={metrics.max_block_visits}"
+  )
+  print(
+    f"    n_loops={metrics.n_loops}"
+    f" loop_iterations_total={metrics.loop_iterations_total}"
+    f" loop_iterations_avg={metrics.loop_iterations_avg:.2f}"
+  )
+  print("  masks:")
+  print(f"    total_masks={metrics.total_masks}")
+  kinds = " ".join(f"{kind}={count}" for kind, count in metrics.masks_by_kind.items())
+  print(f"    {kinds}")
+  print("  constant budget:")
+  print(
+    f"    entries={metrics.const_budget_entries}"
+    f" total_slots={metrics.const_budget_total}"
+  )
+  print(f"  solution space: log10={metrics.sol_space_log10:.2f}")
+  print("  complexity estimate (heuristic, uncalibrated):")
+  for axis in ("static_struct", "dynamic_trace", "masking", "constraints"):
+    print(f"    {axis}={getattr(estimate, axis):.2f}")
+  print(f"    total={estimate.total:.2f}")
+  return 0
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+  p = argparse.ArgumentParser(
+    description="Analyze a codoku puzzle file and report its realized metrics "
+    "and the heuristic complexity estimate.",
+  )
+  p.add_argument(
+    "puzzle",
+    nargs="?",
+    default="puzzle.py",
+    help="puzzle file path (.py with <FILL_XXX> marks; default: puzzle.py)",
+  )
+  p.add_argument(
+    "--json", action="store_true", help="emit machine-readable JSON instead of text"
+  )
+  return p
+
+
+def main(argv: list[str] | None = None) -> int:
+  args = build_arg_parser().parse_args(argv)
+  return run_analyze(args.puzzle, args.json)
+
+
+if __name__ == "__main__":
+  sys.exit(main())

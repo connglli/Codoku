@@ -571,14 +571,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
   p = argparse.ArgumentParser(
     description="Puzzle Checker - validates a candidate solution against a Python codoku puzzle.",
   )
-  p.add_argument("puzzle", help="Puzzle file path (.py with <FILL_XXX> marks).")
-  p.add_argument("solution", help="Candidate solution file path (.py).")
+  p.add_argument(
+    "puzzle",
+    nargs="?",
+    default="puzzle.py",
+    help="Puzzle file path (.py with <FILL_XXX> marks; default: puzzle.py).",
+  )
+  p.add_argument(
+    "solution",
+    nargs="?",
+    default="solution.py",
+    help="Candidate solution file path (.py; default: solution.py).",
+  )
   return p
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
   parser = build_arg_parser()
-  args = parser.parse_args()
+  args = parser.parse_args(argv)
   try:
     check(args.puzzle, args.solution)
   except CheckFailure as exc:
