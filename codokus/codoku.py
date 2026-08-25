@@ -2,12 +2,14 @@
 """codoku - CLI for the rysmith-based Python codoku puzzle tooling.
 
 Subcommands:
-  create - generate one puzzle (codoku_creator)
-  check  - validate a solution (codoku_checker)
+  create  - generate one puzzle (codoku_creator)
+  check   - validate a solution (codoku_checker)
+  analyze - report a puzzle's realized metrics and complexity estimate
 
 Usage:
   codoku create [--profile easy|medium|hard] [--seed N] [-o DIR]
   codoku check <puzzle> [<solution>]
+  codoku analyze [--json] [puzzle]
 """
 
 from __future__ import annotations
@@ -18,8 +20,8 @@ import shutil
 import sys
 from pathlib import Path
 
-from codoku_checker import CheckFailure
-from codoku_checker import check as run_check
+from codoku_checker import main as check_main
+from codoku_complexity import main as analyze_main
 from codoku_creator import DEFAULT_MAX_ATTEMPTS, PROFILES, generate
 
 
@@ -94,13 +96,19 @@ def build_parser() -> argparse.ArgumentParser:
     help=f"maximum candidate-generation attempts (default: {DEFAULT_MAX_ATTEMPTS})",
   )
 
-  check_parser = subparsers.add_parser(
+  subparsers.add_parser(
     "check",
     help="check a solution against a codoku puzzle",
     description="Check a solution against a generated puzzle.",
   )
-  check_parser.add_argument("puzzle", nargs="?", default="puzzle.py")
-  check_parser.add_argument("solution", nargs="?", default="solution.py")
+
+  subparsers.add_parser(
+    "analyze",
+    help="analyze a puzzle against complexity estimate",
+    description="Analyze a puzzle file and report its realized metrics "
+    "(structure, path, loops, masks, budget, solution space) and the "
+    "heuristic complexity estimate.",
+  )
 
   return parser
 
@@ -109,14 +117,9 @@ def main() -> int:
   parser = build_parser()
   argv = sys.argv[1:]
   if argv and argv[0] == "check":
-    args = parser.parse_args(argv)
-    try:
-      run_check(args.puzzle, args.solution)
-    except CheckFailure as exc:
-      print(f"[{exc.result.value}] {exc.message}", file=sys.stderr)
-      return 1
-    print("[PASS] Solution is valid!")
-    return 0
+    return check_main(argv[1:])
+  if argv and argv[0] == "analyze":
+    return analyze_main(argv[1:])
   if argv and argv[0] in ("-h", "--help"):
     parser.parse_args(["-h"])
     return 0
