@@ -15,7 +15,7 @@ cd "$(dirname "$0")/.."
 seed="$RANDOM$RANDOM"
 NUM_FUNCS=100
 NUM_PROGS=$((NUM_FUNCS * 20))
-STRUCTURED_LOWERING=true # true|false|random
+STRUCTURED_LOWERING=random # true|false|random
 # CFLAGS="-Wunused-variable -Werror=unused-variable -Wincompatible-pointer-types -Werror=incompatible-pointer-types -fsanitize=address,undefined"
 CFLAGS="-Wincompatible-pointer-types -Werror=incompatible-pointer-types -fsanitize=address,undefined"
 LDFLAGS="-lm"
