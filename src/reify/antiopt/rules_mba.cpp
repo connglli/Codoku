@@ -274,8 +274,9 @@ namespace refractir::reify::antiopt {
         return c_.emit(o, ctx);
       }
 
-      std::optional<SelfTest> selfTest() const override {
+      std::optional<SelfTest> selfTest(int bits) const override {
         SelfTest t;
+        (void) bits;
         t.body = c_.example;
         // A crossing keyed on a value rather than an operator re-expresses
         // whatever the statement produced, and only a non-negative one: the

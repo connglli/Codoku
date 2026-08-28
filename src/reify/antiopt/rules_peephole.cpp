@@ -62,8 +62,9 @@ namespace refractir::reify::antiopt {
         return out;
       }
 
-      std::optional<SelfTest> selfTest() const override {
+      std::optional<SelfTest> selfTest(int bits) const override {
         SelfTest t;
+        (void) bits;
         t.body = "  %d = %x;";
         return t;
       }
@@ -134,8 +135,9 @@ namespace refractir::reify::antiopt {
         return res;
       }
 
-      std::optional<SelfTest> selfTest() const override {
+      std::optional<SelfTest> selfTest(int bits) const override {
         SelfTest t;
+        (void) bits;
         t.body = "  %d = %x + 100;";
         return t;
       }
@@ -192,8 +194,9 @@ namespace refractir::reify::antiopt {
         return res;
       }
 
-      std::optional<SelfTest> selfTest() const override {
+      std::optional<SelfTest> selfTest(int bits) const override {
         SelfTest t;
+        (void) bits;
         t.body = "  %d = %x - 100;";
         return t;
       }
@@ -256,8 +259,9 @@ namespace refractir::reify::antiopt {
         return out;
       }
 
-      std::optional<SelfTest> selfTest() const override {
+      std::optional<SelfTest> selfTest(int bits) const override {
         SelfTest t;
+        (void) bits;
         t.body = plusOne_ ? "  %d = 9 * %x;" : "  %d = 8 * %x;";
         return t;
       }
@@ -317,8 +321,9 @@ namespace refractir::reify::antiopt {
         return out;
       }
 
-      std::optional<SelfTest> selfTest() const override {
+      std::optional<SelfTest> selfTest(int bits) const override {
         SelfTest t;
+        (void) bits;
         t.body = "  %d = ~%x;";
         return t;
       }
@@ -370,8 +375,9 @@ namespace refractir::reify::antiopt {
         return out;
       }
 
-      std::optional<SelfTest> selfTest() const override {
+      std::optional<SelfTest> selfTest(int bits) const override {
         SelfTest t;
+        (void) bits;
         t.body = "  %d = %x - %y;";
         return t;
       }
@@ -415,8 +421,9 @@ namespace refractir::reify::antiopt {
         return out;
       }
 
-      std::optional<SelfTest> selfTest() const override {
+      std::optional<SelfTest> selfTest(int bits) const override {
         SelfTest t;
+        (void) bits;
         t.body = "  %d = %x + %x;";
         return t;
       }
@@ -463,9 +470,10 @@ namespace refractir::reify::antiopt {
         return out;
       }
 
-      std::optional<SelfTest> selfTest() const override {
+      std::optional<SelfTest> selfTest(int bits) const override {
         SelfTest t;
-        t.body = "  %c = cmp < %x, %y;\n  %d = %c as i8;";
+        std::string type = "i" + std::to_string(bits);
+        t.body = std::string("  %c = cmp < %x, %y;\n  %d = %c as ") + type + ";";
         return t;
       }
 
@@ -530,8 +538,9 @@ namespace refractir::reify::antiopt {
         return out;
       }
 
-      std::optional<SelfTest> selfTest() const override {
+      std::optional<SelfTest> selfTest(int bits) const override {
         SelfTest t;
+        (void) bits;
         t.body = "  %d = %x;";
         return t;
       }

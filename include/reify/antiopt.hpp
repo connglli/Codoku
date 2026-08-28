@@ -166,7 +166,10 @@ namespace refractir::reify {
       std::vector<std::string> free;
     };
 
-    virtual std::optional<SelfTest> selfTest() const { return std::nullopt; }
+    virtual std::optional<SelfTest> selfTest(int bits) const {
+      (void) bits;
+      return std::nullopt;
+    }
   };
 
   // How a body changed, so a sweep can be tuned by what actually survives the
@@ -212,6 +215,7 @@ namespace refractir::reify {
   // rule may, and is compared only where both runs are UB-free — that is the
   // permission the caller's proof buys it. Returns the names of the rules
   // checked, or nullopt on the first disagreement (described in `failure`).
-  std::optional<std::vector<std::string>> selfTestRules(std::string &failure);
+  std::optional<std::vector<std::string>>
+  selfTestRules(std::string &failure, int bits, bool verbose = false);
 
 } // namespace refractir::reify

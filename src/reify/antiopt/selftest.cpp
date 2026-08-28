@@ -13,12 +13,17 @@
 // exactly this for regions, so the harness is the same machinery a guard's
 // spot checks run on.
 
+#include <algorithm>
+#include <climits>
+#include <iostream>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
+#include "ast/sir_printer.hpp"
 #include "frontend/pipeline.hpp"
 #include "internal.hpp"
 #include "reify/common.hpp"
@@ -33,15 +38,15 @@ namespace refractir::reify {
     // The locals every example is written over. All one width, so any rule can
     // combine them, and narrow enough that sweeping two of them covers every
     // pair of values there is.
-    constexpr const char *kCheckType = "i8";
     const char *const kCheckLocals[] = {"%x", "%y", "%d", "%e", "%k"};
     constexpr const char *kCheckBool = "%c";
 
-    std::string harnessSource(const AntiOptRule::SelfTest &t) {
+    std::string harnessSource(const AntiOptRule::SelfTest &t, int bits) {
+      std::string checkType = "i" + std::to_string(bits);
       std::string src = t.decls.empty() ? "" : t.decls + "\n\n";
-      src += "fun @check(%pa0: i8) : i8 {\n";
+      src += std::string("fun @check") + "(%pa0: " + checkType + ") : " + checkType + " {\n";
       for (const char *nm: kCheckLocals)
-        src += std::string("  let mut ") + nm + ": " + kCheckType + " = 0;\n";
+        src += std::string("  let mut ") + nm + ": " + checkType + " = 0;\n";
       src += std::string("  let mut ") + kCheckBool + ": i1 = 0;\n";
       src += "^body:\n";
       src += t.body;
@@ -90,31 +95,39 @@ namespace refractir::reify {
     };
 
     // The value range the sweep gives a local: whatever the rule assumed, or
-    // the whole of i8.
-    std::pair<I64, I64> sweepRange(const AntiOptRule::SelfTest &t, const std::string &nm) {
+    // the whole of the harness width `bits`.
+    std::pair<I64, I64>
+    sweepRange(const AntiOptRule::SelfTest &t, const std::string &nm, int bits) {
       for (const auto &[name, r]: t.assume)
         if (name == nm)
           return {r.lo, r.hi};
+      if (bits >= 64)
+        return {INT64_MIN, INT64_MAX};
+      if (bits > 0 && bits < 64) {
+        int64_t hi = static_cast<int64_t>((1ULL << (bits - 1)) - 1ULL);
+        int64_t lo = -static_cast<int64_t>(1ULL << (bits - 1));
+        return {lo, hi};
+      }
       return {-128, 127};
     }
 
-    StateValue intState(I64 v) {
+    StateValue intState(I64 v, int bits) {
       StateValue sv;
       sv.kind = StateValue::Kind::Int;
       sv.intVal = v;
-      sv.bits = 8;
+      sv.bits = bits;
       return sv;
     }
 
     // One root per check local, in the order `kCheckLocals` names them. The
     // i1 is left out: no example needs it seeded, and its width would have to
     // be modelled separately.
-    std::vector<MiniRoot> checkRoots(const FunDecl &fn) {
+    std::vector<MiniRoot> checkRoots(const FunDecl &fn, int bits) {
       std::vector<MiniRoot> roots;
       for (const char *nm: kCheckLocals)
         for (const auto &l: fn.lets)
           if (l.name.name == nm) {
-            roots.push_back(MiniRoot{nm, l.type, false, intState(0), intState(0), {}});
+            roots.push_back(MiniRoot{nm, l.type, false, intState(0, bits), intState(0, bits), {}});
             break;
           }
       return roots;
@@ -146,6 +159,23 @@ namespace refractir::reify {
         out += r.name + "=" + std::to_string(r.init.intVal);
       }
       return out;
+    }
+
+    void dumpRuleTransform(const AntiOptRule &rule, const Program &before, const Program &after) {
+      std::ostringstream osBefore, osAfter;
+      SIRPrinter prBefore(osBefore);
+      prBefore.print(before);
+      SIRPrinter prAfter(osAfter);
+      prAfter.print(after);
+      std::string beforeStr = osBefore.str();
+      std::string afterStr = osAfter.str();
+      while (!beforeStr.empty() && (beforeStr.back() == '\n' || beforeStr.back() == '\r' ||
+                                    beforeStr.back() == ' ' || beforeStr.back() == '\t'))
+        beforeStr.pop_back();
+      while (!afterStr.empty() && (afterStr.back() == '\n' || afterStr.back() == '\r' ||
+                                   afterStr.back() == ' ' || afterStr.back() == '\t'))
+        afterStr.pop_back();
+      std::cout << rule.name() << ":\n" << beforeStr << "\n=>\n" << afterStr << "\n\n";
     }
 
     // Apply `rule` to the harness in `prog`, returning false when it declines
@@ -189,12 +219,12 @@ namespace refractir::reify {
     }
 
     // Run one rule's example both ways over the sweep.
-    bool checkRule(const AntiOptRule &rule, std::string &failure) {
-      auto t = rule.selfTest();
+    bool checkRule(const AntiOptRule &rule, std::string &failure, int bits, bool verbose) {
+      auto t = rule.selfTest(bits);
       if (!t)
         return true;
 
-      const std::string src = harnessSource(*t);
+      const std::string src = harnessSource(*t, bits);
       auto before = parseHarness(src), after = parseHarness(src);
       if (!before || !after) {
         failure = std::string(rule.name()) + ": example does not parse";
@@ -204,7 +234,7 @@ namespace refractir::reify {
       if (!applyToHarness(rule, *t, *after, rng, failure))
         return false;
 
-      std::vector<MiniRoot> roots = checkRoots(before->funs.front());
+      std::vector<MiniRoot> roots = checkRoots(before->funs.front(), bits);
       if (roots.empty()) {
         failure = std::string(rule.name()) + ": harness has no roots";
         return false;
@@ -217,6 +247,8 @@ namespace refractir::reify {
                                                   : ": the example is not a valid program");
         return false;
       }
+      if (verbose)
+        dumpRuleTransform(rule, *before, *after);
 
       // Sweep what the bodies read. A rule whose example never mentions %y
       // is not tested by giving %y 256 values, and the difference is a
@@ -226,8 +258,8 @@ namespace refractir::reify {
         for (const auto &ins: p->funs.front().blocks.front().instrs)
           for (const auto &nm: antiopt::touchesOf(ins).reads)
             read.insert(nm);
-      auto [xLo, xHi] = sweepRange(*t, "%x");
-      auto [yLo, yHi] = sweepRange(*t, "%y");
+      auto [xLo, xHi] = sweepRange(*t, "%x", bits);
+      auto [yLo, yHi] = sweepRange(*t, "%y", bits);
       if (!read.count("%x"))
         xHi = xLo;
       if (!read.count("%y"))
@@ -235,15 +267,15 @@ namespace refractir::reify {
       // Everything the sweep does not drive is held at the value the rule
       // assumed for it, or zero.
       for (auto &r: roots)
-        r.init = intState(sweepRange(*t, r.name).first);
+        r.init = intState(sweepRange(*t, r.name, bits).first, bits);
 
       for (I64 x = xLo; x <= xHi; ++x)
         for (I64 y = yLo; y <= yHi; ++y) {
           for (auto &r: roots) {
             if (r.name == "%x")
-              r.init = intState(x);
+              r.init = intState(x, bits);
             else if (r.name == "%y")
-              r.init = intState(y);
+              r.init = intState(y, bits);
           }
           const ProbeResult a = orig.run(roots);
           const ProbeResult b = twin.run(roots);
@@ -268,12 +300,13 @@ namespace refractir::reify {
 
   } // namespace
 
-  std::optional<std::vector<std::string>> selfTestRules(std::string &failure) {
+  std::optional<std::vector<std::string>>
+  selfTestRules(std::string &failure, int bits, bool verbose) {
     std::vector<std::string> checked;
     for (const auto &rule: antiopt::catalog()) {
-      if (!rule->selfTest())
+      if (!rule->selfTest(bits))
         continue;
-      if (!checkRule(*rule, failure))
+      if (!checkRule(*rule, failure, bits, verbose))
         return std::nullopt;
       checked.push_back(rule->name());
     }

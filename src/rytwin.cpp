@@ -20,6 +20,7 @@
 #include "reify/antiopt.hpp"
 #include "reify/common.hpp"
 #include "reify/func_desc.hpp"
+#include "reify/hyperparameters.hpp"
 #include "reify/state_profile.hpp"
 #include "reify/transform.hpp"
 #include "reify/twin_transform.hpp"
@@ -120,7 +121,9 @@ int main(int argc, char **argv) {
                 cxxopts::value<std::string>()->default_value("vecext"))
     ("emit-main", "Keep @main un-mangled in compiled output (so p2 is runnable)")
     ("validate", "Run symiri on p1 and p2 with the profiled input and assert they agree")
-    ("selftest-antiopt", "Run every anti-optimization rule's example through the interpreter and exit")
+    ("selftest-antiopt",
+     "Run every anti-optimization rule's example through the interpreter and exit (takes width N, rejects N>10)",
+     cxxopts::value<int>()->implicit_value(std::to_string(antiopt::hp::kSelfTestWidth)))
     ("v,verbose", "Log each twin decision (grafted / skipped / rejected, with reason)")
     ("o,output","Output .sir (p2)", cxxopts::value<std::string>())
     ("h,help",  "Print usage");
@@ -136,8 +139,28 @@ int main(int argc, char **argv) {
     return 2;
   }
   if (result.count("selftest-antiopt")) {
+    int bits = result["selftest-antiopt"].as<int>();
+    // cxxopts with `implicit_value` treats `--selftest-antiopt 5` (space) as
+    // `--selftest-antiopt` (implicit) + positional `5`; handle that by stealing
+    // a trailing integer positional as the width, using hyperparameter as default
+    // when no integer is given.
+    if (bits == antiopt::hp::kSelfTestWidth && result.count("input")) {
+      try {
+        std::string maybe = result["input"].as<std::string>();
+        size_t pos = 0;
+        int v = std::stoi(maybe, &pos);
+        if (pos == maybe.size())
+          bits = v;
+      } catch (...) {
+      }
+    }
+    if (bits > 10) {
+      std::cerr << "rytwin: --selftest-antiopt value must be <= 10 (got " << bits << ")\n";
+      return 2;
+    }
     std::string failure;
-    auto checked = selfTestRules(failure);
+    bool verbose = result.count("verbose") > 0;
+    auto checked = selfTestRules(failure, bits, verbose);
     if (!checked) {
       std::cerr << "rytwin: antiopt selftest FAILED: " << failure << "\n";
       return 1;
@@ -146,7 +169,7 @@ int main(int argc, char **argv) {
       for (const auto &nm: *checked)
         std::cout << "  checked " << nm << "\n";
     std::cout << "rytwin: antiopt selftest OK (" << checked->size()
-              << " rule(s) run through the interpreter, every i8 operand value)\n";
+              << " rule(s) run through the interpreter, every i" << bits << " operand value)\n";
     return 0;
   }
 

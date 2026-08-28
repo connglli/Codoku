@@ -618,3 +618,24 @@ namespace refractir::reify::rytwin::hp {
   inline constexpr std::size_t kTwinRewritesPerRound = 8;
 
 } // namespace refractir::reify::rytwin::hp
+
+// Central place to manage antiopt's *code-level* tunable hyperparameters.
+//
+// Scope:
+//   - Self-test harness width for the catalog's self-check.
+//
+// Not in scope (these live elsewhere as struct defaults or CLI-tunable flags):
+//   - Rule families, trap tiers, per-rule rewrite logic
+//
+// Editing a value here changes behaviour for all antiopt self-tests without
+// touching any rule body.
+namespace refractir::reify::antiopt::hp {
+
+  // Bit-width the self-test harness uses for every rule example.  The harness
+  // declares `%x/%y/%d/%e/%k` and `%pa0` as `iN` where `N` is this width, and
+  // each rule's `selfTest(bits)` receives the same `N` to keep its example
+  // type-consistent.  Changing this from 8 to 16 (or 32) makes the whole
+  // catalog parametric without touching any rule body.
+  inline constexpr int kSelfTestWidth = 8;
+
+} // namespace refractir::reify::antiopt::hp
