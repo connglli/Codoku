@@ -71,29 +71,6 @@ namespace refractir::reify {
       return cell;
     }
 
-    // Variables of `bits` width that hold one value across every visit. A
-    // policy leaning on a variable that moves has nothing to pin to, and a
-    // variable missing from a visit is not live there at all.
-    [[nodiscard]] std::vector<Pin> stablePins(const DataflowSite &site, std::uint32_t bits) {
-      if (site.visits.empty())
-        return {};
-      std::vector<Pin> stable;
-      for (const auto &pin: site.visits.front()) {
-        if (pin.bits != bits)
-          continue;
-        const bool everywhere = std::all_of(
-            site.visits.begin() + 1, site.visits.end(), [&](const std::vector<Pin> &visit) {
-              return std::any_of(visit.begin(), visit.end(), [&](const Pin &other) {
-                return other.key == pin.key && other.value == pin.value;
-              });
-            }
-        );
-        if (everywhere)
-          stable.push_back(pin);
-      }
-      return stable;
-    }
-
     // The signed `iN` value whose low `bits` bits are `value`'s. Bitwise work
     // is done on 64-bit patterns and has to come back as a literal the
     // argument's own width can carry.
@@ -104,6 +81,35 @@ namespace refractir::reify {
           static_cast<std::uint64_t>(value) & ((std::uint64_t{1} << bits) - 1);
       const std::uint64_t signBit = std::uint64_t{1} << (bits - 1);
       return static_cast<std::int64_t>((low ^ signBit) - signBit);
+    }
+
+    // Variables of `bits` width that hold one value across every visit. A
+    // policy leaning on a variable that moves has nothing to pin to, and a
+    // variable missing from a visit is not live there at all.
+    // For narrow widths the comparison is on the truncated value, matching
+    // how `materialize` and the `C` backend truncate — two `i32` values that
+    // coincide in low `bits` are the same `iN` value. For pointer leaves the
+    // `Pin.value` is already the fully dereferenced scalar (`viaLoad`), so the
+    // same truncated comparison applies.
+    [[nodiscard]] std::vector<Pin> stablePins(const DataflowSite &site, std::uint32_t bits) {
+      if (site.visits.empty())
+        return {};
+      std::vector<Pin> stable;
+      for (const auto &pin: site.visits.front()) {
+        if (pin.bits != bits)
+          continue;
+        const std::int64_t want = signExtend(pin.value, bits);
+        const bool everywhere = std::all_of(
+            site.visits.begin() + 1, site.visits.end(), [&](const std::vector<Pin> &visit) {
+              return std::any_of(visit.begin(), visit.end(), [&](const Pin &other) {
+                return other.key == pin.key && signExtend(other.value, bits) == want;
+              });
+            }
+        );
+        if (everywhere)
+          stable.push_back(pin);
+      }
+      return stable;
     }
 
     // `%cell + bias`, or bare `%cell` when it already holds the target.
