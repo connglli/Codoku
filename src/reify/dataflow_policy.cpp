@@ -173,10 +173,13 @@ namespace refractir::reify {
       return live;
     }
 
-    [[nodiscard]] std::int64_t valueAt(const std::vector<Pin> &visit, const std::string &key) {
+    [[nodiscard]] std::optional<std::int64_t>
+    valueAt(const std::vector<Pin> &visit, const std::string &key) {
       const auto it =
           std::find_if(visit.begin(), visit.end(), [&](const Pin &pin) { return pin.key == key; });
-      return it == visit.end() ? 0 : it->value;
+      if (it == visit.end())
+        return std::nullopt;
+      return it->value;
     }
 
     // Draw a non-empty subset, capped so an argument stays readable.
@@ -214,8 +217,12 @@ namespace refractir::reify {
         std::vector<std::int64_t> seen;
         for (const auto &visit: site.visits) {
           std::int64_t g = 0;
-          for (const auto &v: probe)
-            g ^= signExtend(valueAt(visit, v.key), bits);
+          for (const auto &v: probe) {
+            auto ov = valueAt(visit, v.key);
+            if (!ov)
+              return std::nullopt;
+            g ^= signExtend(*ov, bits);
+          }
           seen.push_back(signExtend(g, bits));
         }
         std::sort(seen.begin(), seen.end());
@@ -442,7 +449,10 @@ namespace refractir::reify {
           return std::nullopt;
         const std::vector<Pin> probe = pickSubset(live, rylink::hp::kMaxProbeVars, rng);
 
-        std::vector<std::vector<std::int64_t>> points = constraintPoints(site, probe, bits, p);
+        auto pointsOpt = constraintPoints(site, probe, bits, p);
+        if (!pointsOpt)
+          return std::nullopt;
+        std::vector<std::vector<std::int64_t>> points = std::move(*pointsOpt);
         if (points.empty() || points.size() >= rylink::hp::kMaxConstraintPoints)
           return std::nullopt;
 
@@ -482,7 +492,7 @@ namespace refractir::reify {
     private:
       // The distinct residue vectors the probe takes across the visits. Two
       // visits agreeing on the probe are one constraint, not two.
-      [[nodiscard]] static std::vector<std::vector<std::int64_t>> constraintPoints(
+      [[nodiscard]] static std::optional<std::vector<std::vector<std::int64_t>>> constraintPoints(
           const DataflowSite &site, const std::vector<Pin> &probe, std::uint32_t bits,
           std::int64_t p
       ) {
@@ -490,8 +500,12 @@ namespace refractir::reify {
         for (const auto &visit: site.visits) {
           std::vector<std::int64_t> point;
           point.reserve(probe.size());
-          for (const auto &v: probe)
-            point.push_back(residue(signExtend(valueAt(visit, v.key), bits), p));
+          for (const auto &v: probe) {
+            auto ov = valueAt(visit, v.key);
+            if (!ov)
+              return std::nullopt;
+            point.push_back(residue(signExtend(*ov, bits), p));
+          }
           if (std::find(points.begin(), points.end(), point) == points.end())
             points.push_back(std::move(point));
         }
