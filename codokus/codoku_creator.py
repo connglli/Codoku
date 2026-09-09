@@ -368,7 +368,7 @@ PROFILES: dict[str, GenerationProfile] = {
       "exec_path_length": (3, 15),
       "total_masks": (10, 90),
       "mask_<fill_ctrl>": (0, 4),
-      "cyclomatic_complexity": (2, 6),
+      "cyclomatic": (2, 6),
     },
   ),
   # A loop-driven function where most statement is masked and constants must match a budget.
@@ -391,7 +391,7 @@ PROFILES: dict[str, GenerationProfile] = {
       "exec_path_length": (6, 20),
       "total_masks": (50, 400),
       "mask_<fill_ctrl>": (0, 6),
-      "cyclomatic_complexity": (2, 10),
+      "cyclomatic": (2, 10),
     },
   ),
   # A large branching function with deep loops, nothing visible but the skeleton, and a tight constant budget.
@@ -411,7 +411,7 @@ PROFILES: dict[str, GenerationProfile] = {
       "exec_path_length": (10, 2147483647),
       "total_masks": (150, 2147483647),
       "mask_<fill_ctrl>": (0, 2147483647),
-      "cyclomatic_complexity": (3, 2147483647),
+      "cyclomatic": (3, 2147483647),
     },
   ),
 }
@@ -846,7 +846,9 @@ def generate_candidate(
   (candidate_dir / "puzzle.py").write_text(header + puzzle_body)
   (candidate_dir / "puzzle.gt.py").write_text(gt_body)
 
-  metrics = analyze_puzzle(candidate_dir / "puzzle.py")
+  metrics = analyze_puzzle(
+    candidate_dir / "puzzle.py", gt_path=candidate_dir / "puzzle.gt.py"
+  )
   complexity = estimate_complexity(metrics)
   return GeneratedCandidate(
     directory=candidate_dir,

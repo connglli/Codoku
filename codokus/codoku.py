@@ -9,7 +9,7 @@ Subcommands:
 Usage:
   codoku create [--profile small|medium|large] [--seed N] [-o DIR]
   codoku check <puzzle> [<solution>]
-  codoku analyze [--json] [puzzle]
+  codoku analyze [--json] [--ground-truth GT] [puzzle]
 """
 
 from __future__ import annotations
