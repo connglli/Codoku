@@ -7,7 +7,7 @@ Subcommands:
   analyze - report a puzzle's realized metrics and complexity estimate
 
 Usage:
-  codoku create [--profile easy|medium|hard] [--seed N] [-o DIR]
+  codoku create [--profile small|medium|large] [--seed N] [-o DIR]
   codoku check <puzzle> [<solution>]
   codoku analyze [--json] [puzzle]
 """

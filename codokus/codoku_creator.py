@@ -347,7 +347,7 @@ class GenerationProfile:
 
 PROFILES: dict[str, GenerationProfile] = {
   # A small function with a short path, where part of the code stays visible and constants need no maching.
-  "easy": GenerationProfile(
+  "small": GenerationProfile(
     n_bbls=IntRange(2, 4),
     n_stmts=IntRange(2, 3),
     min_loop_iter=IntRange(0, 1),
@@ -395,7 +395,7 @@ PROFILES: dict[str, GenerationProfile] = {
     },
   ),
   # A large branching function with deep loops, nothing visible but the skeleton, and a tight constant budget.
-  "hard": GenerationProfile(
+  "large": GenerationProfile(
     n_bbls=IntRange(6, 10),
     n_stmts=IntRange(3, 5),
     min_loop_iter=IntRange(2, 4),
@@ -415,6 +415,10 @@ PROFILES: dict[str, GenerationProfile] = {
     },
   ),
 }
+
+# Profile aliases
+PROFILES["easy"] = PROFILES["small"]
+PROFILES["hard"] = PROFILES["large"]
 
 
 # ---------------------------------------------------------------------------
