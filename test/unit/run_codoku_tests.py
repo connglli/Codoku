@@ -17,8 +17,10 @@ Run as:
   python3 -m test.unit.run_codoku_tests <codoku.py> <rysmith>
 """
 
+import ast
 import importlib.util
 import json
+import math
 import os
 import re
 import shutil
@@ -76,6 +78,273 @@ def import_codoku_checker(codoku_path):
   sys.modules[spec.name] = mod
   spec.loader.exec_module(mod)
   return mod
+
+
+def import_codoku_complexity(codoku_path):
+  """Import codoku_complexity as a module (for direct unit tests)."""
+  module_dir = os.path.dirname(os.path.realpath(codoku_path))
+  if module_dir not in sys.path:
+    sys.path.insert(0, module_dir)
+  cfile = os.path.join(module_dir, "codoku_complexity.py")
+  spec = importlib.util.spec_from_file_location("_codoku_cplx_mod", cfile)
+  mod = importlib.util.module_from_spec(spec)
+  sys.modules[spec.name] = mod
+  spec.loader.exec_module(mod)
+  return mod
+
+
+def complexity_unit_tests_pass(cmod) -> bool:
+  ok = True
+
+  # Halstead vocabulary on `def f(a, b): c = a + b; return c`:
+  # operators {FunctionDef, arguments, Assign, BinOp, Add, Return},
+  # operands {a x2, b x2, c x2}.
+  leaf = ast.parse("def f(a, b):\n    c = a + b\n    return c\n").body[0]
+  h = cmod.compute_halstead(leaf)
+  good = (
+    (h.operators, h.operands, h.total_operators, h.total_operands) == (6, 3, 6, 6)
+    and h.vocabulary == 9
+    and h.length == 12
+    and h.volume == round(12 * math.log2(9), 2)
+    and h.difficulty == 6.0
+    and h.effort == round(6.0 * h.volume, 2)
+  )
+  check("unit: halstead counts (no time/defects)", good, str(h))
+  ok = ok and good
+
+  # DepDegree: params -> stmt -> return; the two param uses open one pair
+  # edge, plus one edge for c.
+  d = cmod.compute_depdegree(leaf)
+  good = (
+    (d.nodes, d.edges) == (3, 2)
+    and d.avg_degree == round(2 * 2 / 3, 2)
+    and d.max_degree == 2
+    and d.density == round(2 / (3 * 2), 4)
+  )
+  check("unit: depdegree counts", good, str(d))
+  ok = ok and good
+
+  # McCabe: straight line is 1, if/else diamond is 2, empty is 0.
+  m_line = cmod.compute_mccabe({"a", "b", "c"}, [("a", "b"), ("b", "c")])
+  m_diamond = cmod.compute_mccabe(
+    {"entry", "b0", "b1", "exit"},
+    [("entry", "b0"), ("entry", "b1"), ("b0", "exit"), ("b1", "exit")],
+  )
+  m_empty = cmod.compute_mccabe(set(), [])
+  good = (
+    (m_line.nodes, m_line.edges, m_line.cyclomatic) == (3, 2, 1)
+    and (m_diamond.nodes, m_diamond.edges, m_diamond.cyclomatic) == (4, 4, 2)
+    and (m_empty.nodes, m_empty.edges, m_empty.cyclomatic) == (0, 0, 0)
+    and cmod.McCabeMetrics.zero() == m_empty
+  )
+  check("unit: mccabe counts", good, f"{m_line} {m_diamond} {m_empty}")
+  ok = ok and good
+
+  # Estimated time (E/18) and defects (V/3000) are deliberately absent.
+  import dataclasses
+
+  hal_fields = {f.name for f in dataclasses.fields(cmod.HalsteadMetrics)}
+  est_fields = {f.name for f in dataclasses.fields(cmod.ComplexityEstimate)}
+  good = not any(
+    "time" in f or "bug" in f or "defect" in f for f in hal_fields | est_fields
+  )
+  check("unit: no time/defect heuristics", good, str(sorted(hal_fields | est_fields)))
+  ok = ok and good
+
+  # Vocab + dataflow are static terms inside static_struct (no separate axes).
+  metrics = cmod.PuzzleMetrics(
+    cfg_nodes=2,
+    cfg_edges=1,
+    cyclomatic=1,
+    n_loops=0,
+    exec_path_length=2,
+    unique_path_blocks=2,
+    repeated_block_visits=0,
+    max_block_visits=1,
+    loop_iterations_total=0,
+    loop_iterations_avg=0.0,
+    total_masks=0,
+    masks_by_kind={},
+    sol_space_log10=0.0,
+    const_budget_entries=0,
+    const_budget_total=0,
+    source_lines=5,
+    non_comment_source_lines=3,
+    hal_operators=6,
+    hal_operands=3,
+    hal_total_operators=6,
+    hal_total_operands=6,
+    hal_vocabulary=9,
+    hal_length=12,
+    hal_volume=38.04,
+    hal_difficulty=6.0,
+    hal_effort=228.24,
+    dep_nodes=3,
+    dep_edges=2,
+    dep_avg_degree=1.33,
+    dep_max_degree=2,
+    dep_density=0.3333,
+  )
+  # Vocab + dataflow fold into static_struct (no separate axes); total is
+  # the four-axis sum.
+  est = cmod.estimate_complexity(metrics)
+  parts = est.static_struct + est.dynamic_trace + est.masking + est.constraints
+  good = (
+    not hasattr(est, "vocab")
+    and not hasattr(est, "dataflow")
+    and abs(
+      est.static_struct - (2 + 1 + 2 + 0.15 + 0.01 * 38.04 + 0.5 * 6.0 + 2.0 * 1.33 + 2)
+    )
+    < 0.01
+    and abs(est.total - parts) < 1e-9
+  )
+  check("unit: vocab/dataflow folded into static", good, str(est))
+  ok = ok and good
+
+  # Unparsable input measures zero instead of raising.
+  tmpdir = tempfile.mkdtemp(prefix="codoku_cplx_edge_")
+  try:
+    bad = os.path.join(tmpdir, "puzzle.py")
+    with open(bad, "w") as f:
+      f.write("def broken(:\n  <FILL_VAR> ???\n")
+    from pathlib import Path
+
+    edge_metrics = cmod.analyze_puzzle(Path(bad))
+    edge_est = cmod.estimate_complexity(edge_metrics)
+    edge_parts = (
+      edge_est.static_struct
+      + edge_est.dynamic_trace
+      + edge_est.masking
+      + edge_est.constraints
+    )
+    good = (
+      edge_metrics.hal_volume == 0.0
+      and edge_metrics.dep_nodes == 0
+      and abs(edge_est.total - edge_parts) < 1e-9
+    )
+    check("unit: unparsable puzzle measures zero", good, str(edge_metrics))
+    ok = ok and good
+  finally:
+    shutil.rmtree(tmpdir, ignore_errors=True)
+
+  # Vocab/dataflow come from the ground truth when available: the explicit
+  # gt_path, else the oracle sibling.  Markers still come from the puzzle.
+  gt_body = "def func_tiny(a, b):\n    c = a + b\n    d = c * 2\n    return d\n"
+  masked_body = (
+    "#//@ CFG_EDGE: entry -> exit\n"
+    "#//@ EXEC_PATH: entry -> exit\n"
+    "def func_tiny(a, b):\n"
+    "    <FILL_VAR> = a + <FILL_CONST>\n"
+    "    <FILL_VAR> = <FILL_VAR> <FILL_OP> <FILL_CONST>\n"
+    "    return <FILL_VAR>\n"
+  )
+  gt_dir = tempfile.mkdtemp(prefix="codoku_cplx_gt_")
+  try:
+    from pathlib import Path
+
+    outdir = Path(gt_dir) / "out"
+    (outdir / "oracle").mkdir(parents=True)
+    puzzle_path = outdir / "puzzle.py"
+    puzzle_path.write_text(masked_body)
+    gt_path = outdir / "oracle" / "puzzle.gt.py"
+    gt_path.write_text(gt_body)
+    met_gt = cmod.analyze_puzzle(gt_path)
+    met_explicit = cmod.analyze_puzzle(puzzle_path, gt_path=gt_path)
+    met_found = cmod.analyze_puzzle(puzzle_path)
+    good = (
+      met_explicit.hal_volume == met_gt.hal_volume
+      and (met_explicit.dep_nodes, met_explicit.dep_edges)
+      == (met_gt.dep_nodes, met_gt.dep_edges)
+      and met_found.hal_volume == met_gt.hal_volume
+      and met_found.dep_max_degree == met_gt.dep_max_degree
+      and met_found.cfg_nodes == 2
+      and met_found.exec_path_length == 2
+      and met_found.total_masks > 0
+    )
+    check("unit: vocab/dataflow measured on GT", good, str(met_found))
+    ok = ok and good
+
+    # The vocab source is visible, not silent: text names the GT file (or
+    # says fallback), --json carries it, and --ground-truth names it.
+    import io
+    import json as json_lib
+    from contextlib import redirect_stdout
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+      rc_text = cmod.main([str(puzzle_path)])
+    text_out = buf.getvalue()
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+      rc_json = cmod.main([str(puzzle_path), "--json"])
+    payload = json_lib.loads(buf.getvalue())
+    elsewhere = outdir / "elsewhere_gt.py"
+    elsewhere.write_text(gt_body)
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+      rc_flag = cmod.main([str(puzzle_path), "--ground-truth", str(elsewhere)])
+    # The flag wins even with different content: bare puzzle, no sibling.
+    bare_dir = Path(gt_dir) / "bare"
+    bare_dir.mkdir()
+    lonely = bare_dir / "lonely.py"
+    lonely.write_text(masked_body)
+    other_gt = bare_dir / "other.py"
+    other_gt.write_text(gt_body.replace("c * 2", "c * 2 + a - b"))
+    met_flagged = cmod.analyze_puzzle(lonely, gt_path=other_gt)
+    met_other = cmod.analyze_puzzle(other_gt)
+    good = (
+      rc_text == 0
+      and str(gt_path) in text_out
+      and rc_json == 0
+      and payload.get("vocab_source") == str(gt_path)
+      and rc_flag == 0
+      and cmod.resolve_vocab_source(puzzle_path) == gt_path
+      and cmod.resolve_vocab_source(lonely) is None
+      and met_flagged.hal_volume == met_other.hal_volume
+      and met_flagged.hal_volume != met_gt.hal_volume
+    )
+    check("unit: vocab source visible + --ground-truth", good, text_out[-200:])
+    ok = ok and good
+
+    # Review fixes: trace scaffolding is not puzzle logic, subscript
+    # AugAssign redefines the base, and an unusable explicit GT is an error.
+    trace_if = (
+      '    if __import__("os").environ.get("DUMP_TRACE"):\n        print("^b0:")\n'
+    )
+    traced_src = "def f(a, b):\n" + trace_if + "    c = a + b\n    return c\n"
+    traced_leaf = ast.parse(traced_src).body[0]
+    h_traced = cmod.compute_halstead(traced_leaf)
+    d_traced = cmod.compute_depdegree(traced_leaf)
+    hal_ok = (
+      h_traced.operators,
+      h_traced.operands,
+      h_traced.total_operators,
+      h_traced.total_operands,
+    ) == (6, 3, 6, 6)
+    dep_ok = (d_traced.nodes, d_traced.edges) == (3, 2)
+    good = hal_ok and dep_ok
+    check("unit: trace scaffolding excluded", good, f"{h_traced} {d_traced}")
+    ok = ok and good
+
+    collector = cmod._DepCollector()
+    collector.visit(ast.parse("a[i] += v\n").body[0])
+    (a_defs, a_uses), *_ = collector.stmts
+    good = a_defs == {"a"} and {"i", "v", "a"} <= a_uses
+    check("unit: augassign subscript redefines base", good, f"{a_defs} {a_uses}")
+    ok = ok and good
+
+    from contextlib import redirect_stderr
+
+    err = io.StringIO()
+    with redirect_stderr(err):
+      rc_bad = cmod.main([str(puzzle_path), "--ground-truth", str(outdir / "nope.py")])
+    good = rc_bad == 2 and "ground-truth" in err.getvalue().lower()
+    check("unit: unusable --ground-truth errors", good, err.getvalue()[-200:])
+    ok = ok and good
+  finally:
+    shutil.rmtree(gt_dir, ignore_errors=True)
+
+  return ok
 
 
 def unit_tests_pass(mod) -> bool:
@@ -149,6 +418,7 @@ def main():
   mod = import_codoku(codoku_src)
   unit_tests_pass(mod)
   checker_unit_tests_pass(import_codoku_checker(codoku_src))
+  complexity_unit_tests_pass(import_codoku_complexity(codoku_src))
 
   with tempfile.TemporaryDirectory(prefix="codoku_gen_") as workdir:
     # Mirror the image layout: codoku + vendored modules + rysmith in one dir.
@@ -237,7 +507,11 @@ def main():
       and metrics["exec_path_length"] > 0
       and metrics["cfg_nodes"] > 0
       and metrics["total_masks"] > 0
+      and metrics["hal_volume"] > 0
+      and metrics["dep_nodes"] > 0
       and "static_struct" in complexity
+      and "vocab" not in complexity
+      and "dataflow" not in complexity
       and "size" not in complexity
       and "static_structure" not in complexity
     )
