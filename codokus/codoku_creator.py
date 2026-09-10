@@ -74,11 +74,12 @@ That also said, avoid generating the solution file before you solve the puzzle s
 - `<FILL_VAR>` → a local variable or parameter name (possibly with `[idx]` subscript)
 - {{CONST_FILL}}
 - `<FILL_OP>` → a Python operator (`+`, `-`, `*`, `/`, `%`, `//`, `&`, `|`, `^`, `<<`, `>>`, `~`, `==`, `!=`, `<`, `>`, `<=`, `>=`, `if`, `else`, `not`, `and`, `or`)
-- `<FILL_TYPE>` → not used (Python is dynamically typed)
-- `<FILL_LABEL>` → the destination of a `_go_<FILL_LABEL>` flag (such as `_go_b3`)
+- `<FILL_CTRL>` → a control keyword (`break` or `continue`)
+- `<FILL_LABEL>` → the destination of a goto flag (`_go_<FILL_LABEL>` such as `_go_b3`)
+- `_<FILL_CTRL>_<FILL_LABEL>` → a break/continue flag: the kind and the destination are both hidden, so fill in both (e.g. `_break_exit`, `_continue_b4`)
 - `<FILL_FUNC>` → a function call name (e.g., `_cast_int`, `_padd`, `_pdiff`, `_peq`, `_prel`, `_load`, `_store`, `_pidx`, `_pfield`, or any function defined in the file)
 - `<FILL_FIELD>` → not used
-- `<FILL_CTRL>` → a control keyword (`break` or `continue`)
+- `<FILL_TYPE>` → not used (Python is dynamically typed)
 
 ## Verification
 
@@ -578,8 +579,8 @@ def mask_puzzle(
     if not mask_set and p_mask > 1e-9:
       raise RuntimeError("failed to build a non-empty mask set after 100 attempts")
 
-  # _go_* goto flags are always masked: a single visible occurrence would
-  # reveal which CFG target every other <FILL_LABEL> slot jumps to.
+  # Goto flags of any spelling are always masked: one visible occurrence
+  # would reveal every other <FILL_LABEL> slot's target.
   for idx, stmt in enumerate(maskable):
     if mentions_go_flag(stmt):
       mask_set.add(idx)

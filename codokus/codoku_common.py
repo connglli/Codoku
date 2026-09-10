@@ -46,6 +46,37 @@ INTERNAL_HELPER_FUNCS: frozenset[str] = frozenset(
   }
 )
 
+# Mask token per goto-flag kind. ``_go_`` keeps its kind (a general goto
+# pairs with no keyword). ``_brk_``/``_cnt_`` pair 1:1 with ``break``/
+# ``continue``, so their kind hides behind ``<FILL_CTRL>`` too. Both
+# spellings (``_brk_``/``_break_``, ``_cnt_``/``_continue_``) map alike.
+# Counting reuses existing vocabularies: one <FILL_CTRL> (2 kinds) times
+# one <FILL_LABEL> (N targets).
+GOTO_FLAG_MASK_TEMPLATE: dict[str, str] = {
+  "_go_": "_go_<FILL_LABEL>",
+  "_brk_": "_<FILL_CTRL>_<FILL_LABEL>",
+  "_break_": "_<FILL_CTRL>_<FILL_LABEL>",
+  "_cnt_": "_<FILL_CTRL>_<FILL_LABEL>",
+  "_continue_": "_<FILL_CTRL>_<FILL_LABEL>",
+}
+
+
+def goto_flag_target(name: str) -> str | None:
+  """Return the CFG target encoded in a goto-flag name, or None."""
+  for prefix in GOTO_FLAG_MASK_TEMPLATE:
+    if name.startswith(prefix):
+      return name[len(prefix) :]
+  return None
+
+
+def goto_flag_mask(name: str) -> str | None:
+  """Return the mask token for a goto-flag name, or None."""
+  for prefix, template in GOTO_FLAG_MASK_TEMPLATE.items():
+    if name.startswith(prefix):
+      return template
+  return None
+
+
 # Operators masked as <FILL_OP>, by construct.  Within each tuple the order
 # matters: longer symbols must precede their prefixes (e.g. b"//" before
 # b"/") so the byte-slice search picks the intended span.
@@ -236,9 +267,10 @@ def collect_python_leaf_locals(leaf_node: ast.FunctionDef) -> set[str]:
 
 
 def mentions_go_flag(node: ast.AST) -> bool:
-  """True if the node references a ``_go_*`` structured-goto flag."""
+  """True if the node references a goto flag of any known spelling."""
   return any(
-    isinstance(n, ast.Name) and n.id.startswith("_go_") for n in ast.walk(node)
+    isinstance(n, ast.Name) and goto_flag_target(n.id) is not None
+    for n in ast.walk(node)
   )
 
 
@@ -265,19 +297,32 @@ def get_python_maskable_statements(
   decls_before_entry = []
   body_statements = []
 
-  # Top-level declarations/assignments before entry block.  Scratch variables
-  # stay visible, except ``_go_*`` goto flags, which are always maskable.
-  for stmt in leaf_node.body:
-    if stmt.lineno < entry_line:
-      if isinstance(stmt, ast.Assign):
+  # Pre-entry assigns. Scratch names stay visible, except goto flags.
+  # Inits nest inside the `try:` body since the `_frame` wrapper, so collect
+  # at any depth in source order. Skip nested defs and DUMP_TRACE guards.
+
+  def collect_decls(node):
+    for child in ast.iter_child_nodes(node):
+      if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        continue
+      if isinstance(child, ast.If) and any(
+        isinstance(n, ast.Constant) and n.value == "DUMP_TRACE"
+        for n in ast.walk(child.test)
+      ):
+        continue
+      if isinstance(child, ast.Assign) and child.lineno < entry_line:
         is_scratch = False
-        for target in stmt.targets:
+        for target in child.targets:
           if isinstance(target, ast.Name) and (
             target.id.startswith("_") or target.id.startswith("v__")
           ):
             is_scratch = True
-        if not is_scratch or mentions_go_flag(stmt):
-          decls_before_entry.append(stmt)
+        if not is_scratch or mentions_go_flag(child):
+          decls_before_entry.append(child)
+      collect_decls(child)
+
+  collect_decls(leaf_node)
+  decls_before_entry.sort(key=lambda s: (s.lineno, s.col_offset))
 
   def get_block_for_line(lineno):
     current_block = None
@@ -303,6 +348,11 @@ def get_python_maskable_statements(
       for n in ast.walk(node.test)
     ):
       return
+    # Flag setters/resets are maskable in any block: a revealed setter next
+    # to masked guards would answer the blank.
+    if isinstance(node, (ast.Assign, ast.Expr)) and mentions_go_flag(node):
+      body_statements.append(node)
+      return
     block = get_block_for_line(node.lineno)
     if isinstance(node, (ast.While, ast.For)):
       block = get_loop_header(node)
@@ -324,18 +374,35 @@ def get_python_maskable_statements(
           walk(child)
         return
     elif block is not None and isinstance(node, ast.If) and mentions_go_flag(node.test):
-      # A ``if (not) _go_X:`` guard outside body blocks is goto plumbing;
-      # expose its test for <FILL_LABEL> masking, then keep descending so
-      # nested statements retain their own block attribution.
+      # Goto plumbing outside body blocks: mask the test plus the keyword in
+      # its body (resets are caught by the walk's top branch).
       body_statements.append(node.test)
+      append_guard_keyword(node.body)
+      append_guard_keyword(node.orelse)
 
     for child in ast.iter_child_nodes(node):
       walk(child)
 
+  def append_guard_keyword(stmts):
+    """Append break/continue inside a goto-guard body."""
+    for stmt in stmts:
+      if isinstance(stmt, (ast.Break, ast.Continue)):
+        body_statements.append(stmt)
+      elif isinstance(stmt, (ast.If, ast.While)):
+        append_guard_keyword(stmt.body)
+        append_guard_keyword(getattr(stmt, "orelse", []))
+
   for stmt in leaf_node.body:
     walk(stmt)
 
-  return decls_before_entry + body_statements, entry_line, exit_line
+  # Guard and main walks can overlap: dedupe by identity, keep order.
+  ordered = []
+  seen = set()
+  for stmt in decls_before_entry + body_statements:
+    if id(stmt) not in seen:
+      seen.add(id(stmt))
+      ordered.append(stmt)
+  return ordered, entry_line, exit_line
 
 
 def collect_python_replacements(
@@ -367,9 +434,9 @@ def collect_python_replacements(
   entry/exit).  For let-initialisers (``is_body=False``) the sentinels ``0``
   and ``1`` are left visible.
 
-  Regardless of zone: every identifier of a ``_go_*`` structured-goto flag is
-  replaced by ``_go_<FILL_LABEL>`` (the solver must derive which CFG target
-  each flag jumps to from the CFG/EXEC_PATH markers).
+  Regardless of zone: every goto-flag identifier is replaced by its
+  kind's mask token (see GOTO_FLAG_MASK_TEMPLATE). The target must be derived
+  from the CFG/EXEC_PATH markers.
   """
   if not hasattr(node, "lineno"):
     return
@@ -379,10 +446,12 @@ def collect_python_replacements(
       src_bytes, n.lineno, n.col_offset, n.end_lineno, n.end_col_offset
     )
 
-  if isinstance(node, ast.Name) and node.id.startswith("_go_"):
-    start, end = get_node_offsets(node)
-    replacements.append((start, end, "_go_<FILL_LABEL>"))
-    return
+  if isinstance(node, ast.Name):
+    flag_mask = goto_flag_mask(node.id)
+    if flag_mask is not None:
+      start, end = get_node_offsets(node)
+      replacements.append((start, end, flag_mask))
+      return
 
   def get_py_leftmost_base(n):
     if isinstance(n, ast.Subscript):
