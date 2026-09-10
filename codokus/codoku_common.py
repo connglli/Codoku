@@ -395,13 +395,16 @@ def get_python_maskable_statements(
   for stmt in leaf_node.body:
     walk(stmt)
 
-  # Guard and main walks can overlap: dedupe by identity, keep order.
+  # Guard and main walks can overlap: dedupe by identity, then sort by
+  # source position. Creator flips, checker inference and remasking all
+  # index this list, so its order must not depend on traversal shape.
   ordered = []
   seen = set()
   for stmt in decls_before_entry + body_statements:
     if id(stmt) not in seen:
       seen.add(id(stmt))
       ordered.append(stmt)
+  ordered.sort(key=lambda s: (s.lineno, s.col_offset))
   return ordered, entry_line, exit_line
 
 
@@ -683,22 +686,32 @@ def collect_python_replacements(
 # ---------------------------------------------------------------------------
 
 
+def loop_header_label(comments, loop_node) -> str:
+  """First block comment in a loop range: what `continue` targets."""
+  for _, _, label, line in comments:
+    if loop_node.lineno <= line <= loop_node.end_lineno:
+      return label
+  return "exit"
+
+
+def exit_label_after(comments, node) -> str:
+  """First block comment past a node: what `break`/`return` targets."""
+  for _, _, label, line in comments:
+    if line > node.end_lineno:
+      return label
+  return "exit"
+
+
 def build_python_cfg(leaf_node: ast.FunctionDef, src: bytes) -> set[tuple[str, str]]:
   """Extract the CFG edges directly from the Python leaf function's AST."""
   comments = find_python_block_comments(src)
   comments = [c for c in comments if leaf_node.lineno <= c[3] <= leaf_node.end_lineno]
 
   def get_loop_header(loop_node):
-    for _, _, label, line in comments:
-      if loop_node.lineno <= line <= loop_node.end_lineno:
-        return label
-    return "exit"
+    return loop_header_label(comments, loop_node)
 
   def get_exit_label_after(node):
-    for _, _, label, line in comments:
-      if line > node.end_lineno:
-        return label
-    return "exit"
+    return exit_label_after(comments, node)
 
   edges = set()
   processed_comments = set()
@@ -797,3 +810,68 @@ def build_python_cfg(leaf_node: ast.FunctionDef, src: bytes) -> set[tuple[str, s
     if f and t and f != t:
       filtered_edges.add((f, t))
   return filtered_edges
+
+
+def iter_flag_dispatches(leaf_node: ast.FunctionDef, src: bytes):
+  """Yield (flag, encoded, structural, lineno) per dispatch guard transfer.
+
+  A dispatch guard tests one goto flag (`if F:` / `if not F:`) and moves
+  control with break/continue/return in the taken branch. The structural
+  destination uses the same loop model as build_python_cfg. Only `_brk_` /
+  `_cnt_` spellings are yielded: their dispatch performs the claimed
+  transfer in one hop. `_go_` flags unwind through multi-hop dispatch
+  chains (a guard's break lands mid-chain), so transfer equality does not
+  hold for them. Guards without a loop transfer yield nothing.
+  """
+  comments = find_python_block_comments(src)
+  comments = [c for c in comments if leaf_node.lineno <= c[3] <= leaf_node.end_lineno]
+  found = []
+
+  def find_keyword(node):
+    if isinstance(node, (ast.Break, ast.Continue, ast.Return)):
+      return node
+    if isinstance(
+      node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.While, ast.For)
+    ):
+      return None
+    for child in ast.iter_child_nodes(node):
+      hit = find_keyword(child)
+      if hit is not None:
+        return hit
+    return None
+
+  def walk(node, loop_stack):
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+      if node is not leaf_node:
+        return
+    if isinstance(node, ast.If):
+      test, branch = node.test, node.body
+      while isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        test, branch = test.operand, node.orelse if branch is node.body else node.body
+      if isinstance(test, ast.Name) and goto_flag_target(test.id) is not None:
+        if test.id.startswith(("_brk_", "_break_", "_cnt_", "_continue_")):
+          for stmt in branch:
+            keyword = find_keyword(stmt)
+            if keyword is None:
+              continue
+            if isinstance(keyword, ast.Break) and loop_stack:
+              dest = exit_label_after(comments, loop_stack[-1])
+            elif isinstance(keyword, ast.Continue) and loop_stack:
+              dest = loop_header_label(comments, loop_stack[-1])
+            elif isinstance(keyword, ast.Return):
+              dest = "exit"
+            else:
+              continue
+            found.append((test.id, goto_flag_target(test.id), dest, node.lineno))
+            break
+    if isinstance(node, (ast.While, ast.For)):
+      loop_stack.append(node)
+      for child in ast.iter_child_nodes(node):
+        walk(child, loop_stack)
+      loop_stack.pop()
+    else:
+      for child in ast.iter_child_nodes(node):
+        walk(child, loop_stack)
+
+  walk(leaf_node, [])
+  return found

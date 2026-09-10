@@ -38,6 +38,7 @@ from codoku_common import (
   get_byte_offsets,
   get_python_maskable_statements,
   goto_flag_target,
+  iter_flag_dispatches,
   strip_refractir_prefix,
 )
 
@@ -308,6 +309,17 @@ def check_cfg(func_node, src: bytes, cfg_edges: list[tuple[str, str]]) -> None:
         CheckResult.FAIL_CFG,
         f"Unknown goto target '{target}' in flag '{node.id}'. "
         f"Valid targets: {sorted(declared_nodes)}",
+      )
+
+  # Edge check: each dispatch guard must transfer to the block its flag
+  # names. Flag renames are behavior-neutral (remask/CFG/path cannot see
+  # them), so membership alone would accept a declared-but-wrong target.
+  for flag, encoded, structural, lineno in iter_flag_dispatches(func_node, src):
+    if encoded != structural:
+      fail(
+        CheckResult.FAIL_CFG,
+        f"Goto flag '{flag}' claims target '{encoded}' but line {lineno} "
+        f"transfers to '{structural}'.",
       )
 
 
