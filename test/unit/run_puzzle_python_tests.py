@@ -478,12 +478,24 @@ def main():
       check("found a masked statement to duplicate", False, "no candidate statement")
 
     # (6) FILL_CONST budget: changing a budgeted constant to an off-budget value is rejected
-    m = re.findall(r"(\b\d+\b)", base_gt_text)
+    # Only mutate a constant inside a masked position. Init/preamble constants
+    # before `# ^entry` (and fixed entry/exit blocks) are revealed verbatim, so
+    # perturbing them correctly yields FAIL_REMASKING, not a budget error.
+    # Heuristic (mirrors the C test's >=2-digit rule): pick the first
+    # multi-digit budgeted value whose standalone occurrence does NOT appear
+    # verbatim in the puzzle body — i.e. all its occurrences are masked as
+    # FILL_CONST in the puzzle.
+    m = re.findall(r"(\b\d{2,}\b)", base_gt_text)
+    _, body_puzzle = split_header_body(base_puzzle_text)
     budgeted_nums = []
     for num_str in m:
       val = int(num_str)
-      if f"#//@ FILL_CONST: {val} " in header:
-        budgeted_nums.append(num_str)
+      if f"#//@ FILL_CONST: {val} " not in header:
+        continue
+      if re.search(r"\b" + re.escape(num_str) + r"\b", body_puzzle):
+        continue  # also visible unmasked; perturbing would be structural
+      budgeted_nums.append(num_str)
+      break
 
     if budgeted_nums:
       target_num = budgeted_nums[0]

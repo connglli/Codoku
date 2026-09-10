@@ -168,6 +168,9 @@ PuzzleRequirements parsePuzzleRequirements(const std::string &puzzleText) {
 struct ExecResult {
   int exitCode = -1;                  // symiri process exit status (0 == success)
   std::vector<std::string> blockPath; // labels of basic blocks entered, in order
+  // Parallel to blockPath: owning function ("@main", "@leaf", ...) when the
+  // trace carries it. Empty string for legacy traces without a func prefix.
+  std::vector<std::string> funcPath;
 };
 
 /**
@@ -175,6 +178,11 @@ struct ExecResult {
  * and the executed basic-block trace. A single run gives us both the path
  * (for FAIL_PATH) and the correctness verdict (for FAIL_OUTPUT, via the
  * embedded check_chksum that aborts on mismatch).
+ *
+ * Trace format (see src/interp/interpreter.cpp):
+ *   - v0.2.2 and earlier: "^label:" (no function prefix).
+ *   - v0.2.3+: "@func ^label:" (function-qualified, per e198f20).
+ * Variable-update lines never end with ':' so they are ignored here.
  */
 ExecResult runSymiri(const std::string &symiriPath, const std::string &solutionPath) {
   std::string cmd = symiriPath + " --dump-trace " + solutionPath + " 2>/dev/null";
@@ -182,15 +190,45 @@ ExecResult runSymiri(const std::string &symiriPath, const std::string &solutionP
   if (!pipe) {
     throw std::runtime_error("Failed to run symiri --dump-trace");
   }
+  auto trim = [](const std::string &s) -> std::string {
+    size_t a = s.find_first_not_of(" \t\r\n");
+    if (a == std::string::npos)
+      return "";
+    size_t b = s.find_last_not_of(" \t\r\n");
+    return s.substr(a, b - a + 1);
+  };
   ExecResult r;
-  char buffer[512];
+  char buffer[4096];
   while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
     std::string ln(buffer);
-    if (ln.rfind("^", 0) == 0) {
-      size_t colon = ln.find(":");
-      if (colon != std::string::npos)
-        r.blockPath.push_back(ln.substr(1, colon - 1));
+    size_t caret = ln.find('^');
+    if (caret == std::string::npos)
+      continue;
+    size_t colon = ln.find(':', caret);
+    if (colon == std::string::npos)
+      continue;
+    // A block header ends the line with ':' (modulo whitespace); other lines
+    // carrying '^' (if any) do not.
+    bool onlyWsAfter = true;
+    for (size_t k = colon + 1; k < ln.size(); ++k) {
+      if (!std::isspace(static_cast<unsigned char>(ln[k]))) {
+        onlyWsAfter = false;
+        break;
+      }
     }
+    if (!onlyWsAfter)
+      continue;
+    std::string block = trim(ln.substr(caret + 1, colon - caret - 1));
+    if (block.empty())
+      continue;
+    std::string prefix = trim(ln.substr(0, caret));
+    std::string func;
+    if (!prefix.empty()) {
+      size_t ws = prefix.find_first_of(" \t");
+      func = (ws == std::string::npos) ? prefix : prefix.substr(0, ws);
+    }
+    r.blockPath.push_back(block);
+    r.funcPath.push_back(func);
   }
   int status = pclose(pipe);
   r.exitCode = (status == -1 || !WIFEXITED(status)) ? -1 : WEXITSTATUS(status);
@@ -439,14 +477,38 @@ int main(int argc, char **argv) {
     ExecResult exec = runSymiri(symiriPath, solutionPath);
 
     // --- Stage 6: path ---
-    const FunDecl *mainFn = findMainFunction(prog);
-    size_t mainBlocks = mainFn ? mainFn->blocks.size() : 1;
-    if (exec.blockPath.size() <= mainBlocks) {
-      return fail(
-          CheckResult::FAIL_PATH, "Solution trace is empty or too short to contain the leaf path."
-      );
+    // Prefer the function-qualified trace (v0.2.3+): the leaf path is exactly
+    // the entries owned by the leaf function. Fall back to the legacy
+    // positional skip (first mainBlocks entries are @main's) for traces
+    // without a func prefix.
+    std::vector<std::string> leafPath;
+    bool hasFuncInfo = false;
+    for (const auto &f: exec.funcPath) {
+      if (!f.empty()) {
+        hasFuncInfo = true;
+        break;
+      }
     }
-    std::vector<std::string> leafPath(exec.blockPath.begin() + mainBlocks, exec.blockPath.end());
+    if (hasFuncInfo) {
+      for (size_t i = 0; i < exec.blockPath.size(); ++i) {
+        if (exec.funcPath[i] == leaf->name.name)
+          leafPath.push_back(exec.blockPath[i]);
+      }
+      if (leafPath.empty()) {
+        return fail(
+            CheckResult::FAIL_PATH, "Solution trace is empty or too short to contain the leaf path."
+        );
+      }
+    } else {
+      const FunDecl *mainFn = findMainFunction(prog);
+      size_t mainBlocks = mainFn ? mainFn->blocks.size() : 1;
+      if (exec.blockPath.size() <= mainBlocks) {
+        return fail(
+            CheckResult::FAIL_PATH, "Solution trace is empty or too short to contain the leaf path."
+        );
+      }
+      leafPath.assign(exec.blockPath.begin() + mainBlocks, exec.blockPath.end());
+    }
 
     if (leafPath != reqs.expectedPath) {
       std::ostringstream msg;
