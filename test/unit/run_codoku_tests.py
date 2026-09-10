@@ -628,7 +628,59 @@ def goto_flag_unit_tests_pass(ccommon, chk_mod) -> bool:
   else:
     check("unit: exit-region setter masked", True)
 
-  # (d) The checker validates _brk_/_cnt_ targets against declared CFG nodes.
+  # (e) Dispatch transfer equality: a guard must land where its flag names.
+  transfer_src = (
+    "def func_d(x):\n"
+    "    # ^entry\n"
+    "    y = (x + 1)\n"
+    "    while True:\n"
+    "        # ^b0\n"
+    "        y = (y + x)\n"
+    "        if _brk_exit:\n"
+    "            _brk_exit = False\n"
+    "            break\n"
+    "        if not _cnt_b0:\n"
+    "            y = (y + 2)\n"
+    "        else:\n"
+    "            _cnt_b0 = False\n"
+    "            continue\n"
+    "        if _go_exit:\n"
+    "            break\n"
+    "    # ^exit\n"
+    "    return y\n"
+  ).encode("utf-8")
+  transfer_tree = ast.parse(transfer_src)
+  transfer_leaf, _ = ccommon.find_python_leaf_function(transfer_tree, transfer_src)
+  dispatches = ccommon.iter_flag_dispatches(transfer_leaf, transfer_src)
+  got = sorted((f, e, s) for f, e, s, _ in dispatches)
+  want = sorted([("_brk_exit", "exit", "exit"), ("_cnt_b0", "b0", "b0")])
+  if got != want:
+    check("unit: dispatch transfers follow the loop model", False, str(got))
+    ok = False
+  else:
+    check("unit: dispatch transfers follow the loop model", True)
+
+  # (e2) End to end: a mistargeted dispatch fails check_cfg with FAIL_CFG
+  # while the well-targeted original passes.
+  actual_edges = sorted(ccommon.build_python_cfg(transfer_leaf, transfer_src))
+  bad_transfer = transfer_src.replace(b"_brk_exit", b"_brk_b0")
+  for src, want_ok in ((transfer_src, True), (bad_transfer, False)):
+    t = ast.parse(src)
+    node = t.body[0]
+    label = "accepts true flag target" if want_ok else "rejects mistargeted flag"
+    try:
+      chk_mod.check_cfg(node, src, actual_edges)
+      passed = want_ok
+    except chk_mod.CheckFailure as exc:
+      passed = (not want_ok) and exc.result == chk_mod.CheckResult.FAIL_CFG
+      if not want_ok and "claims target" not in str(exc.message):
+        passed = False
+    except Exception as exc:  # noqa: BLE001 - any other error is a failure
+      check(f"unit: checker {label}", False, str(exc))
+      ok = False
+      continue
+    check(f"unit: checker {label}", passed)
+    ok = ok and passed
   good_src = (
     b"def func_t(x):\n"
     b"    # ^entry\n"
