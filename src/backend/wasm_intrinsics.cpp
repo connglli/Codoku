@@ -123,6 +123,12 @@ namespace refractir {
         out(backend) << "drop\n";
         return;
       }
+      trapIfTop(backend);
+    }
+
+    // Unconditional twin of unreachableIfTop for non-UB divergence
+    // (@check_chksum mismatch): --no-ub-guards must not elide this trap.
+    static void trapIfTop(WasmBackend &backend) {
       indent(backend);
       out(backend) << "if\n";
       incrIndent(backend);
@@ -1831,7 +1837,7 @@ namespace refractir {
         pushArg(backend, 1);
         indent(backend);
         out(backend) << "i32.ne\n";
-        unreachableIfTop(backend);
+        trapIfTop(backend);
         pushArg(backend, 1);
       }
     };

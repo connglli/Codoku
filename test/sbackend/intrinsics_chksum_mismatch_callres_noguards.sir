@@ -1,0 +1,23 @@
+// EXPECT: FAIL:UndefinedBehavior
+// COMPILER_ARGS: --no-ub-guards
+
+// @check_chksum over a call result must trap on mismatch even with
+// --no-ub-guards. This mirrors the reify @main wrapper, which asserts a
+// leaf return through @check_chksum(EXPECTED, %r).
+
+intrinsic @check_chksum(%expected: i32, %actual: i32) : i32;
+
+fun @leaf(): i32 {
+    let mut %v: i32 = 7;
+^entry:
+    ret %v;
+}
+
+fun @main(): i32 {
+    let mut %r: i32 = 0;
+    let mut %c: i32 = 0;
+^entry:
+    %r = call @leaf();
+    %c = call @check_chksum(8, %r);
+    ret %c;
+}

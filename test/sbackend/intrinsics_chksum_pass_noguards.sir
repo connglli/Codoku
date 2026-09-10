@@ -1,0 +1,15 @@
+// EXPECT: PASS
+// COMPILER_ARGS: --no-ub-guards
+
+// Happy path: equal operands return actual verbatim in every guard mode,
+// and the satisfied `require` stays silent.
+
+intrinsic @check_chksum(%expected: i32, %actual: i32) : i32;
+
+fun @main(): i32 {
+    let mut %r: i32 = 0;
+^entry:
+    %r = call @check_chksum(42, 42);
+    require %r == 42, "check_chksum returns actual on match";
+    ret %r;
+}

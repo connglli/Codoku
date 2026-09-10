@@ -24,7 +24,9 @@ namespace refractir {
     // Python source of the generic helper for one kind. Result
     // wrapping mirrors the interpreter's makeInt (mask + sign-extend
     // == _cast_int); explicit traps mirror its UndefinedBehaviorError
-    // checks. Predicates return the canonical i1 {0,-1}.
+    // checks, except @check_chksum's mismatch, which is a mandatory
+    // abort rather than UB and so raises RefractIRTrap directly.
+    // Predicates return the canonical i1 {0,-1}.
     const char *helperSource(IntrinsicKind k) {
       switch (k) {
         case IntrinsicKind::Abs:
@@ -370,7 +372,7 @@ def _in_crc32_update(state, val, vbits):
           return R"PY(
 def _in_check_chksum(expected, actual):
     if expected != actual:
-        _trap("@check_chksum mismatch")
+        raise RefractIRTrap("@check_chksum mismatch")
     return actual
 )PY";
         // Observability beacon — identity. Python has no forward-progress

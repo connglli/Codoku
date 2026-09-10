@@ -41,6 +41,7 @@ Spec: [docs/SPEC_v0.2.3.md](./docs/SPEC_v0.2.3.md), which doubles as the release
 - Symbolic floating-point inputs constrained finite by the solver, per the finite-only FP domain (spec §2.9).
 - Literal bit-width inference propagated, so UB overflow detection sees the resolved width.
 - C backend: inline `cmp`-atom masks and vector symbol initialization.
+- `symirc --no-ub-guards` no longer affects `@check_chksum` and `require`.
 
 ## [v0.2.2] - 2026-06-29
 

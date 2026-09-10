@@ -1,0 +1,14 @@
+// EXPECT: FAIL:UndefinedBehavior
+// COMPILER_ARGS: --no-ub-guards
+
+// @check_chksum mismatch must trap even with --no-ub-guards: the
+// divergence is a mandatory abort (C: fprintf+abort), not a UB guard.
+
+intrinsic @check_chksum(%expected: i32, %actual: i32) : i32;
+
+fun @main(): i32 {
+    let mut %r: i32 = 0;
+^entry:
+    %r = call @check_chksum(1, 2);
+    ret %r;
+}

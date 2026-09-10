@@ -150,6 +150,8 @@ def run_refractirc_test(refractirc_path, target="c", structured=False):
     # --structured-lowering so a fixture can demand structured emission
     # on every target run (e.g. asserting an irreducible CFG is rejected
     # regardless of target). Deduped against the --structured flag.
+    # --no-ub-guards lets a test pin the guard-free emission mode (e.g.
+    # asserting a non-UB trap such as @check_chksum still fires).
     compiler_args_pass = args.get("COMPILER_ARGS", [])
     i = 0
     while i < len(compiler_args_pass):
@@ -164,6 +166,10 @@ def run_refractirc_test(refractirc_path, target="c", structured=False):
       elif compiler_args_pass[i] == "--structured-lowering":
         if "--structured-lowering" not in cmd:
           cmd.append("--structured-lowering")
+        i += 1
+      elif compiler_args_pass[i] == "--no-ub-guards":
+        if "--no-ub-guards" not in cmd:
+          cmd.append("--no-ub-guards")
         i += 1
       else:
         i += 1

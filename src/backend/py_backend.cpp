@@ -281,9 +281,16 @@ def _pfield(p, foff, flen, slen):
     // etc.), so no _iadd/_sdiv/_shl/… helpers are needed here; only the
     // normalization primitives (_f32, _cast_int) and the pointer/memory
     // model survive, guard-free. `_trap` is kept as a no-op so any
-    // intrinsic-helper precondition (emitted unchanged) is inert.
+    // UB-precondition check (emitted unchanged) is inert. Non-UB failures
+    // (@check_chksum mismatch, `require` violations, calls to
+    // contract-form declarations) raise RefractIRTrap directly instead
+    // of going through `_trap`, so they still fire in this mode.
     const char *kPreambleNoGuards = R"PY(import math
 import struct
+
+
+class RefractIRTrap(Exception):
+    pass
 
 
 def _trap(msg):
@@ -485,7 +492,8 @@ def _pfield(p, foff, flen, slen):
         out_ << "\n\ndef " << mangleFun(d.name.name) << "(";
         for (std::size_t i = 0; i < d.params.size(); ++i)
           out_ << (i ? ", " : "") << "_p" << i;
-        out_ << "):\n    _trap(\"call to external declaration " << d.name.name << "\")\n";
+        out_ << "):\n    raise RefractIRTrap(\"call to external declaration " << d.name.name
+             << "\")\n";
       }
     }
     for (const auto &f: prog.funs) {
@@ -658,7 +666,11 @@ def _pfield(p, foff, flen, slen):
                 std::string msg = "require violation";
                 if (arg.message)
                   msg += ": " + escapePyString(*arg.message);
-                line("if not (" + condStr(arg.cond) + "): _trap(\"" + msg + "\")");
+                // Not a UB guard (`--no-require` governs this separately):
+                // raise directly so the violation still fires with
+                // --no-ub-guards, matching the C (assert) and WASM
+                // (unconditional unreachable) lowerings.
+                line("if not (" + condStr(arg.cond) + "): raise RefractIRTrap(\"" + msg + "\")");
               }
             } else {
               static_assert(std::is_same_v<T, StoreInstr>);

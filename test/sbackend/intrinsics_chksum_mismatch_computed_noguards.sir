@@ -1,0 +1,16 @@
+// EXPECT: FAIL:UndefinedBehavior
+// COMPILER_ARGS: --no-ub-guards
+
+// @check_chksum over computed (non-literal) operands must trap on
+// mismatch even with --no-ub-guards.
+
+intrinsic @check_chksum(%expected: i32, %actual: i32) : i32;
+
+fun @main(): i32 {
+    let mut %a: i32 = 0;
+    let mut %r: i32 = 0;
+^entry:
+    %a = 1 + 1;
+    %r = call @check_chksum(%a, 3);
+    ret %r;
+}

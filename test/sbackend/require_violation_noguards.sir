@@ -1,0 +1,12 @@
+// EXPECT: FAIL:RequireViolation
+// COMPILER_ARGS: --no-ub-guards
+
+// `require` is a property assertion governed by --no-require, orthogonal
+// to --no-ub-guards: a violation must trap in every guard mode.
+
+fun @main(): i32 {
+    let mut %r: i32 = 0;
+^entry:
+    require 1 == 2, "noguards require must still trap";
+    ret %r;
+}

@@ -1,0 +1,14 @@
+// EXPECT: FAIL:UndefinedBehavior
+// COMPILER_ARGS: --no-ub-guards
+
+// @check_chksum mismatch at the i32 extremes must trap even with
+// --no-ub-guards: the full-range comparison is not a UB guard.
+
+intrinsic @check_chksum(%expected: i32, %actual: i32) : i32;
+
+fun @main(): i32 {
+    let mut %r: i32 = 0;
+^entry:
+    %r = call @check_chksum(-2147483648, 2147483647);
+    ret %r;
+}

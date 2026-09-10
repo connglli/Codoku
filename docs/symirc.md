@@ -174,13 +174,15 @@ By default the C, WASM and Python backends emit dynamic guards that trap on Refr
 
 Value semantics are untouched: truncating division and remainder, logical-shift masking, per-operation `f32` rounding and integer-cast wrapping all survive. Only the traps go. The option is orthogonal to `--no-require`, which governs the separate `require` property assertions, and the two combine.
 
-Each target drops a little differently. C elides the pointer, FP and intrinsic traps, reverts integer division and remainder to plain `/` and `%`, and lowers `unreachable` to `__builtin_unreachable()` rather than `__builtin_trap()`. WASM elides the guard `unreachable` instructions while preserving the surrounding stack shape, and keeps the `unreachable` terminator, since WASM has no no-op hint form. Python lowers arithmetic to inline expressions instead of the checked helpers, and the preamble drops its trap guards.
+What `--no-ub-guards` never drops are the non-UB divergences. A `@check_chksum` mismatch traps in every guard mode on all three targets (C aborts unconditionally, Python raises `RefractIRTrap` directly, WASM keeps an unconditional `unreachable`), as do `require` violations (governed separately by `--no-require`) and calls to contract-form declarations.
+
+Each target drops a little differently. C elides the pointer, FP and intrinsic traps, reverts integer division and remainder to plain `/` and `%`, and lowers `unreachable` to `__builtin_unreachable()` rather than `__builtin_trap()`. WASM elides the guard `unreachable` instructions while preserving the surrounding stack shape, and keeps the `unreachable` terminator, since WASM has no no-op hint form. Python lowers arithmetic to inline expressions instead of the checked helpers, and the preamble's `_trap` becomes a no-op while non-UB failures keep raising `RefractIRTrap`.
 
 The reify tools set this automatically for their UB-free output, so it seldom needs passing by hand; see [reify.md](./reify.md).
 
 ## What lowers, and what does not
 
-Every scalar type (`i1` through `i64`, `f32`, `f64`), every aggregate, and pointers lower to all three targets, as do function calls, link-form `decl` resolution and the standard intrinsics. The one exception is the reify checksum intrinsics `@crc32_update` and `@check_chksum`, which lower to C and Python only; `--target wasm` rejects a program that declares them ([intrinsics.md](./intrinsics.md) §12.7).
+Every scalar type (`i1` through `i64`, `f32`, `f64`), every aggregate, and pointers lower to all three targets, as do function calls, link-form `decl` resolution and the standard intrinsics, including the reify checksum intrinsics `@crc32_update` and `@check_chksum` ([intrinsics.md](./intrinsics.md) §12.7).
 
 Pointers are native C pointers in C, 32-bit linear-memory addresses in WASM, and provenance-tracked `_Ptr` objects in Python. Pointer arithmetic and `ptr - ptr` element distance work on all three, with cross-object arithmetic remaining UB per spec §7.5. Heap allocation is out of scope everywhere: a pointer always refers to a stack-resident `let mut` local (spec §2.8).
 

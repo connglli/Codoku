@@ -613,7 +613,7 @@ fun @demo(%x: i32) : i32 {
 | `@fract` | `(fN) → fN` | — | `(-1, 1)` |
 | `@recip` | `(fN) → fN` | result non-finite (`x = ±0.0` or overflow) | finite `fN` |
 | `@crc32_update` | `(i32, iN) → i32`, `N ∈ {8, 16, 24, 32, 40, 48, 56, 64}` | — | full `i32` |
-| `@check_chksum` | `(i32, i32) → i32` | `expected != actual` (abort in C, UB in symiri) | `= actual` on match |
+| `@check_chksum` | `(i32, i32) → i32` | `expected != actual` (mandatory trap on every target, kept under `--no-ub-guards`; UB in symiri) | `= actual` on match |
 | `@observe` | `(T) → T` | — | `= x` (identity, any `iN`/`fN`; observable `volatile` write in C) |
 | `@reduce_add` | `(<N> T) → T`, `T ∈ iN, fN` | int: partial sum out of `iN` range; fp: non-finite intermediate; any `undef` lane | scalar `T` |
 | `@reduce_min` | `(<N> T) → T`, `T ∈ iN, fN` | any `undef` lane | scalar `T` |
