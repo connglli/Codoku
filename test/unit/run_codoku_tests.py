@@ -80,6 +80,19 @@ def import_codoku_checker(codoku_path):
   return mod
 
 
+def import_codoku_common(codoku_path):
+  """Import codoku_common as a module (for direct unit tests)."""
+  module_dir = os.path.dirname(os.path.realpath(codoku_path))
+  if module_dir not in sys.path:
+    sys.path.insert(0, module_dir)
+  cfile = os.path.join(module_dir, "codoku_common.py")
+  spec = importlib.util.spec_from_file_location("_codoku_common_mod", cfile)
+  mod = importlib.util.module_from_spec(spec)
+  sys.modules[spec.name] = mod
+  spec.loader.exec_module(mod)
+  return mod
+
+
 def import_codoku_complexity(codoku_path):
   """Import codoku_complexity as a module (for direct unit tests)."""
   module_dir = os.path.dirname(os.path.realpath(codoku_path))
@@ -383,6 +396,274 @@ def unit_tests_pass(mod) -> bool:
   return ok
 
 
+def goto_flag_unit_tests_pass(ccommon, chk_mod) -> bool:
+  """Structured-goto flags (_go_/_brk_/_cnt_) must all be masked by target-hiding."""
+  ok = True
+
+  # (a) Target decoding covers every flag kind and rejects ordinary names.
+  cases = {
+    "_go_exit": "exit",
+    "_go_b6": "b6",
+    "_brk_exit": "exit",
+    "_brk_b2": "b2",
+    "_break_exit": "exit",
+    "_cnt_b0": "b0",
+    "_continue_b0": "b0",
+    "acc": None,
+    "_brk": None,
+    "_cnt_": "",
+  }
+  ok_a = True
+  for name, want in cases.items():
+    got = ccommon.goto_flag_target(name)
+    if got != want:
+      check(f"unit: goto_flag_target({name})", False, f"got {got!r}, want {want!r}")
+      ok_a = False
+      ok = False
+  if ok_a:
+    check("unit: goto_flag_target decodes all flag kinds", True)
+
+  # (b) The maskable-statement predicate fires for every flag spelling.
+  mod_src = (
+    "def func_test(x):\n"
+    "    _brk_exit = False\n"
+    "    _cnt_b0 = False\n"
+    "    acc = 0\n"
+    "    # ^entry\n"
+    "    acc = (x + 1)\n"
+    "    while True:\n"
+    "        # ^b0\n"
+    "        acc = (acc + x)\n"
+    "        if (acc > 10):\n"
+    "            _brk_exit = True\n"
+    "            break\n"
+    "        _cnt_b0 = True\n"
+    "        break\n"
+    "    if _brk_exit:\n"
+    "        _brk_exit = False\n"
+    "        acc = (acc + 1)\n"
+    "    if _cnt_b0:\n"
+    "        _cnt_b0 = False\n"
+    "        acc = (acc + 2)\n"
+    "    # ^exit\n"
+    "    return acc\n"
+  )
+  mod_bytes = mod_src.encode("utf-8")
+  tree = ast.parse(mod_bytes)
+  leaf, _ = ccommon.find_python_leaf_function(tree, mod_bytes)
+  if leaf is None:
+    check("unit: flag fixture has a leaf function", False, "no leaf found")
+    return False
+  maskable, entry_line, _ = ccommon.get_python_maskable_statements(leaf, mod_bytes)
+  sees_brk = any(ccommon.mentions_go_flag(s) for s in maskable)
+  if not sees_brk:
+    check("unit: maskable scan sees _brk_/_cnt_ flags", False, "no flagged stmt")
+    ok = False
+  else:
+    check("unit: maskable scan sees _brk_/_cnt_ flags", True)
+  plain = ast.parse(b"def func_test(x):\n    y = (x + 1)\n    return y\n")
+  if ccommon.mentions_go_flag(plain):
+    check("unit: plain code has no goto flags", False, "false positive")
+    ok = False
+  else:
+    check("unit: plain code has no goto flags", True)
+
+  # (c) Masking hides every flag target; _brk_/_cnt_ also hide the kind.
+  local_names = ccommon.collect_python_leaf_locals(leaf)
+  defined_funcs = set()
+  repls: list = []
+  for stmt in maskable:
+    ccommon.collect_python_replacements(
+      stmt, mod_bytes, stmt.lineno > entry_line, repls, {}, local_names, defined_funcs
+    )
+  masked = ccommon.apply_replacements(mod_bytes, repls).decode("utf-8")
+  leaked = sorted(
+    set(re.findall(r"_(?:go|brk|cnt)_[A-Za-z0-9]+", masked))
+    - {"_go_<FILL_LABEL>", "_<FILL_CTRL>_<FILL_LABEL>"}
+  )
+  if leaked:
+    check("unit: no concrete flag target survives masking", False, str(leaked))
+    ok = False
+  else:
+    check("unit: no concrete flag target survives masking", True)
+  if "_<FILL_CTRL>_<FILL_LABEL>" not in masked:
+    check("unit: brk/cnt flags hide kind and target", False, "missing compound form")
+    ok = False
+  else:
+    check("unit: brk/cnt flags hide kind and target", True)
+
+  # (c1) Full-word spellings mask identically (the checker accepts both).
+  ok_words = True
+  for spelled in ("_break_exit", "_continue_b0"):
+    node = ast.parse(spelled, mode="eval").body
+    src_bytes = spelled.encode("utf-8")
+    word_repls: list = []
+    ccommon.collect_python_replacements(
+      node, src_bytes, True, word_repls, {}, set(), set()
+    )
+    word_masked = ccommon.apply_replacements(src_bytes, word_repls).decode("utf-8")
+    if word_masked != "_<FILL_CTRL>_<FILL_LABEL>":
+      check(f"unit: {spelled} masks to compound token", False, word_masked)
+      ok_words = False
+      ok = False
+  if ok_words:
+    check("unit: full-word flag spellings mask identically", True)
+
+  # (c2) _go_ keeps its kind prefix (a general goto pairs with no keyword).
+  go_src = (
+    "def func_g(x):\n"
+    "    _go_b1 = False\n"
+    "    # ^entry\n"
+    "    _go_b1 = True\n"
+    "    # ^b0\n"
+    "    y = (x + 1)\n"
+    "    # ^b1\n"
+    "    y = (y + 2)\n"
+    "    # ^exit\n"
+    "    return y\n"
+  ).encode("utf-8")
+  go_tree = ast.parse(go_src)
+  go_leaf, _ = ccommon.find_python_leaf_function(go_tree, go_src)
+  go_maskable, go_entry, _ = ccommon.get_python_maskable_statements(go_leaf, go_src)
+  go_locals = ccommon.collect_python_leaf_locals(go_leaf)
+  go_repls: list = []
+  for stmt in go_maskable:
+    ccommon.collect_python_replacements(
+      stmt, go_src, stmt.lineno > go_entry, go_repls, {}, go_locals, set()
+    )
+  go_masked = ccommon.apply_replacements(go_src, go_repls).decode("utf-8")
+  if "_go_<FILL_LABEL>" not in go_masked or "_<FILL_CTRL>_<FILL_LABEL>" in go_masked:
+    check("unit: go flags keep their kind prefix", False, go_masked)
+    ok = False
+  else:
+    check("unit: go flags keep their kind prefix", True)
+
+  # (c3) Exit-block plumbing: guard test, reset and keyword all maskable.
+  exit_src = (
+    "def func_e(x):\n"
+    "    # ^entry\n"
+    "    y = (x + 1)\n"
+    "    while True:\n"
+    "        # ^b0\n"
+    "        y = (y + x)\n"
+    "        if (y > 10):\n"
+    "            # ^exit\n"
+    "            y = (y + 1)\n"
+    "            return y\n"
+    "        if _cnt_b0:\n"
+    "            _cnt_b0 = False\n"
+    "            continue\n"
+    "    return y\n"
+  ).encode("utf-8")
+  exit_tree = ast.parse(exit_src)
+  exit_leaf, _ = ccommon.find_python_leaf_function(exit_tree, exit_src)
+  exit_maskable, exit_entry, _ = ccommon.get_python_maskable_statements(
+    exit_leaf, exit_src
+  )
+  exit_locals = ccommon.collect_python_leaf_locals(exit_leaf)
+  exit_repls: list = []
+  for stmt in exit_maskable:
+    ccommon.collect_python_replacements(
+      stmt, exit_src, stmt.lineno > exit_entry, exit_repls, {}, exit_locals, set()
+    )
+  exit_masked = ccommon.apply_replacements(exit_src, exit_repls).decode("utf-8")
+  exit_leaks = sorted(
+    set(re.findall(r"_(?:go|brk|cnt)_[A-Za-z0-9]+", exit_masked))
+    - {"_go_<FILL_LABEL>", "_<FILL_CTRL>_<FILL_LABEL>"}
+  )
+  if exit_leaks or exit_masked.count("_<FILL_CTRL>_<FILL_LABEL>") != 2:
+    check("unit: exit-guard reset masked with its guard", False, exit_masked)
+    ok = False
+  else:
+    check("unit: exit-guard reset masked with its guard", True)
+  if "<FILL_CTRL>" not in exit_masked:
+    check("unit: exit-guard keyword masked", False, exit_masked)
+    ok = False
+  else:
+    check("unit: exit-guard keyword masked", True)
+
+  # (c4) Flag setter in the exit region: an `else:` setter outside body
+  # blocks must mask too, or it answers the dispatch guard.
+  setter_src = (
+    "def func_s(x):\n"
+    "    # ^entry\n"
+    "    y = (x + 1)\n"
+    "    while True:\n"
+    "        # ^b0\n"
+    "        y = (y + x)\n"
+    "        if (y > 10):\n"
+    "            # ^exit\n"
+    "            y = (y + 1)\n"
+    "            return y\n"
+    "        else:\n"
+    "            _cnt_b0 = True\n"
+    "            break\n"
+    "    return y\n"
+  ).encode("utf-8")
+  setter_tree = ast.parse(setter_src)
+  setter_leaf, _ = ccommon.find_python_leaf_function(setter_tree, setter_src)
+  setter_maskable, setter_entry, _ = ccommon.get_python_maskable_statements(
+    setter_leaf, setter_src
+  )
+  setter_locals = ccommon.collect_python_leaf_locals(setter_leaf)
+  setter_repls: list = []
+  for stmt in setter_maskable:
+    ccommon.collect_python_replacements(
+      stmt,
+      setter_src,
+      stmt.lineno > setter_entry,
+      setter_repls,
+      {},
+      setter_locals,
+      set(),
+    )
+  setter_masked = ccommon.apply_replacements(setter_src, setter_repls).decode("utf-8")
+  setter_leaks = sorted(
+    set(re.findall(r"_(?:go|brk|cnt)_[A-Za-z0-9]+", setter_masked))
+    - {"_go_<FILL_LABEL>", "_<FILL_CTRL>_<FILL_LABEL>"}
+  )
+  if setter_leaks or "_<FILL_CTRL>_<FILL_LABEL>" not in setter_masked:
+    check("unit: exit-region setter masked", False, setter_masked)
+    ok = False
+  else:
+    check("unit: exit-region setter masked", True)
+
+  # (d) The checker validates _brk_/_cnt_ targets against declared CFG nodes.
+  good_src = (
+    b"def func_t(x):\n"
+    b"    # ^entry\n"
+    b"    _brk_exit = False\n"
+    b"    # ^b0\n"
+    b"    _cnt_b0 = True\n"
+    b"    # ^exit\n"
+    b"    return x\n"
+  )
+  good_edges = [("entry", "b0"), ("b0", "exit")]
+  bad_src = good_src.replace(b"_brk_exit", b"_brk_nope")
+  for src, edges, want_ok in (
+    (good_src, good_edges, True),
+    (bad_src, good_edges, False),
+  ):
+    t = ast.parse(src)
+    node = t.body[0]
+    label = (
+      "accepts declared flag targets" if want_ok else "rejects unknown flag target"
+    )
+    try:
+      chk_mod.check_cfg(node, src, edges)
+      passed = want_ok
+    except chk_mod.CheckFailure as exc:
+      passed = (not want_ok) and exc.result == chk_mod.CheckResult.FAIL_CFG
+    except Exception as exc:  # noqa: BLE001 - any other error is a failure
+      check(f"unit: checker {label}", False, str(exc))
+      ok = False
+      continue
+    check(f"unit: checker {label}", passed)
+    ok = ok and passed
+
+  return ok
+
+
 def checker_unit_tests_pass(chk_mod) -> bool:
   ok = True
 
@@ -416,8 +697,10 @@ def main():
   codoku_src, rysmith = sys.argv[1:3]
 
   mod = import_codoku(codoku_src)
+  chk_mod = import_codoku_checker(codoku_src)
   unit_tests_pass(mod)
-  checker_unit_tests_pass(import_codoku_checker(codoku_src))
+  checker_unit_tests_pass(chk_mod)
+  goto_flag_unit_tests_pass(import_codoku_common(codoku_src), chk_mod)
   complexity_unit_tests_pass(import_codoku_complexity(codoku_src))
 
   with tempfile.TemporaryDirectory(prefix="codoku_gen_") as workdir:

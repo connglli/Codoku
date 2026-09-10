@@ -485,7 +485,7 @@ def collect_fill_choices(
   - <FILL_OP>:    operator/keyword vocabulary masked as <FILL_OP>.
   - <FILL_FUNC>:  functions defined in the file except internal helpers.
   - <FILL_CTRL>:  break / continue.
-  - <FILL_LABEL>: CFG nodes, i.e., the possible destinations of a _go_ flag
+  - <FILL_LABEL>: CFG nodes, i.e., the possible destinations of a goto flag
                   (the concrete flag names are hidden behind the masks, so
                   the node count is the approximation).
   - <FILL_TYPE>/<FILL_FIELD>: unused by the Python target (0).

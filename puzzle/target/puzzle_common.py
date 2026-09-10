@@ -1042,18 +1042,33 @@ def get_python_maskable_statements(
   decls_before_entry = []
   body_statements = []
 
-  # Top-level declarations/assignments before entry block
-  for stmt in leaf_node.body:
-    if stmt.lineno < entry_line:
-      if isinstance(stmt, ast.Assign):
+  # Pre-entry assigns. Inits nest inside the `try:` body since the `_frame`
+  # wrapper, so collect at any depth in source order. Skip nested defs and
+  # DUMP_TRACE guards.
+  decls_before_entry = []
+
+  def collect_decls(node):
+    for child in ast.iter_child_nodes(node):
+      if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        continue
+      if isinstance(child, ast.If) and any(
+        isinstance(n, ast.Constant) and n.value == "DUMP_TRACE"
+        for n in ast.walk(child.test)
+      ):
+        continue
+      if isinstance(child, ast.Assign) and child.lineno < entry_line:
         is_scratch = False
-        for target in stmt.targets:
+        for target in child.targets:
           if isinstance(target, ast.Name) and (
             target.id.startswith("_") or target.id.startswith("v__")
           ):
             is_scratch = True
         if not is_scratch:
-          decls_before_entry.append(stmt)
+          decls_before_entry.append(child)
+      collect_decls(child)
+
+  collect_decls(leaf_node)
+  decls_before_entry.sort(key=lambda s: (s.lineno, s.col_offset))
 
   def get_block_for_line(lineno):
     current_block = None
