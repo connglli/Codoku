@@ -135,7 +135,10 @@ CONST_FILL_FREE = (
 BUDGET_RULE = (
   "- The `<FILL_CONST>` budget must be matched exactly: each value at its "
   "exact count, no extras, and with the same type (integer vs float - "
-  "`1` is not `1.0`)."
+  "`1` is not `1.0`).\n"
+  "- For variable declarations (the lines before `# ^entry`), never fill "
+  "`<FILL_CONST>` with `0`, `1`, `0.0`, or `1.0`. Those values stay visible "
+  "there and are never masked. Filling them fails re-masking (`FAIL_REMASKING`)."
 )
 BUDGET_TIP = (
   "- For each `<FILL_CONST>`, use the budget "
@@ -143,7 +146,10 @@ BUDGET_TIP = (
 )
 CHECK_ERR = (
   "- If the checker fails with a <FILL_CONST> budget error, you used the "
-  "wrong constant value, type, or count."
+  "wrong constant value, type, or count.\n"
+  "- If the checker fails with a `FAIL_REMASKING` error after filling "
+  "`0`, `1`, `0.0`, or `1.0` in variable declarations, replace them with "
+  "other budgeted values."
 )
 
 
@@ -200,6 +206,8 @@ PUZZLE_HEADER_TEMPLATE = """\
 # 2. You have access to all common command line tools and SMT solvers.
 # 3. Do NOT change any code except for the <FILL_XXX> marks.
 # 4. Do NOT introduce any new code, variables, or basic blocks.
+# 5. In variable declarations (before `# ^entry`), do NOT fill <FILL_CONST>
+# with `0`, `1`, `0.0`, or `1.0`; that fails with FAIL_REMASKING.
 #
 {{BUDGET_SECTION}}//
 """
@@ -215,7 +223,8 @@ BUDGET_SECTION_TEMPLATE = """\
 # other constant may appear in any <FILL_CONST> position. The value must match
 # exactly, including its type: `1` (integer) and `1.0` (float) are distinct.
 # Constants already shown in the fixed (entry/exit) code do not count toward
-# this budget.
+# this budget. `0`, `1`, `0.0`, and `1.0` are not allowed for variable
+# declarations (i.e., lines before `# ^entry`).
 #
 {{FILL_CONST}}//
 """
