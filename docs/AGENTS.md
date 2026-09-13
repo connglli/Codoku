@@ -1,6 +1,6 @@
 # The documentation standard
 
-How to write the prose that stays: the documents under `docs/`, the header comments that explain a design, the notes under [.agents/notes/](../.agents/notes/), and the commit messages that record a change. [AGENTS.md](../AGENTS.md) owns the engineering rules; this file owns the writing.
+How to write the prose that stays: the header comments that explain a design, the notes under [.agents/notes/](../.agents/notes/), and the commit messages that record a change. The documents we write are [README.md](../README.md) and [AGENTS.md](../AGENTS.md), the Codoku project; the documents under `docs/` belong to the RefractIR dependency and serve as reference material to read, not files to edit. [AGENTS.md](../AGENTS.md) owns the engineering rules; this file owns the writing.
 
 ## Where a fact belongs
 
@@ -10,9 +10,9 @@ How to write the prose that stays: the documents under `docs/`, the header comme
 * [intrinsics.md](./intrinsics.md) holds the intrinsic signatures, SMT encodings, UB conditions, and per-backend lowering rules.
 * [reducibility.md](./reducibility.md) holds the dominator, reducibility, loop, and control tree analyses behind structured lowering.
 * [symirc.md](./symirc.md), [symiri.md](./symiri.md), [symirsolve.md](./symirsolve.md), and [reify.md](./reify.md) hold the usage and behavior of each tool.
-* Earlier SPEC versions record their releases; [README.md](../README.md) indexes them.
+* Earlier SPEC versions record their releases.
 * [CHANGELOG.md](../CHANGELOG.md) holds the release history, newest first.
-* [README.md](../README.md) holds the project structure and the build and usage entry points.
+* [README.md](../README.md) holds the Codoku overview and the build and usage entry points.
 * [Makefile](../Makefile) holds the build and test targets.
 * [.agents/notes/](../.agents/notes/) holds ephemeral rationale and working records; its README owns the subdirectory meanings and file names.
 * Source files and tests hold the live implementation, type definitions, and invariants: code comments explain why rather than what, and test suites define executable contracts for components.
@@ -47,7 +47,7 @@ Use [natural writing](https://github.com/flutter/flutter/blob/fdf8a01bd014798113
 
 One physical line per paragraph. Use editor soft-wrap. Code blocks, tables, and list structure keep their formatting; code comments stay under the linter's column limit.
 
-Sentence case headers. Plain `*` bullets, no emoji (unless in the top-level README.md). Straight quotes and apostrophes. Em dashes sparingly, since two on a page is already many; commas and parentheses do the same work.
+Sentence case headers. Plain `*` bullets, no emoji (unless in the top-level README.md). Straight quotes and apostrophes. No em- or en-dashes anywhere; commas and parentheses do the same work.
 
 Code blocks carry SIR, C, WAT, or Python text, a shell invocation, or a pipeline sketch, and have to be true. An SIR snippet is something a reader can paste into `symiri` or `symirc`.
 

@@ -1,232 +1,105 @@
-# RefractIR: Agent Guideline
+# Codoku: Agent Guideline
 
-+ Knowledge Background: Optimizing Compilers, Program Analysis, Symbolic Execution, SMT (Bit-Vector Theory)
-+ Implementation Language: C++ 20
-+ Primary Source Directory: ./src
-
++ Knowledge Background: Program Analysis, Symbolic Execution, Optimizing Compilers
++ Implementation Language: Python 3 (`./codokus`)
++ Primary Source Directory: `./codokus`
 
 ## Project Overview
 
-RefractIR (internally called SymIR) is a **CFG-based symbolic intermediate representation** designed for:
+Codoku (short for *code sudoku*) offers renewable challenges for coding agents. A Codoku puzzle masks a generated Python function with **typed cells** (`<FILL_*>` marks): identifiers, function names, numeric constants, operators, control keywords, and CFG labels. A solution fills every cell subject to global semantic constraints:
 
-- **Program synthesis**
-- **Symbolic execution**
-- **Constraint generation for SMT solvers (Bit-Vector logic)**
+1. **Static**: the completion parses and compiles, matches the declared control-flow graph, and draws each constant from the constant table at exactly its listed multiplicity (`1` and `1.0` count as distinct).
+2. **Dynamic**: on the given input it follows the prescribed execution path block-for-block and returns the expected output.
 
-A RefractIR program is a **template**, not a fully concrete program. It may contain **symbols** (unknowns, marked with `?`) whose values are solved later by an SMT solver under constraints derived from:
-
-1. A **specific execution path** through the CFG
-2. Explicit **properties** (e.g., `require` and/or other user-provided properties) that must hold on that path
+Each choice can ripple through later statements, branches, loops, or the output, so locally valid fills may still invalidate the whole solution, while valid solutions are sparse in a large search space.
 
 The key design goals are:
 
-- SMT-friendliness (predictable BV constraints, minimal nonlinearity)
-- Clear semantics with **strict undefined behavior (UB)**
-- Explicit control-flow (CFG, no SSA, user-friendly)
-- Simplicity and analyzability over expressiveness
+- Any completion satisfying the constraints is *correct*: the checker accepts more than the witness, and the shipped witness guarantees one valid filling exists.
+- Fresh puzzles mint from scratch by semantic reification, so a sample corpus renews after model training instead of going stale.
+- Every validation stage is a property of the solution's text or behavior alone: the checker needs nothing but Python 3.
 
-RefractIR deliberately restricts expressions (flat, left-to-right, no parentheses) and uses **LLVM-style syntax** (`@`, `%`, `br`, basic blocks) while remaining language-agnostic.
+## Scope: the Codoku Center and the RefractIR Dependency
 
-The normative specification is **[./docs/SPEC_v0.2.3.md](./docs/SPEC_v0.2.3.md)**, which doubles as the release roadmap and marks each feature **[Shipped]** or **[Planned]**. Earlier specs are kept as they shipped; [./README.md](./README.md) indexes them, and [./CHANGELOG.md](./CHANGELOG.md) records what each release added.
+Like [README.md](./README.md), this project centers on Codoku. The RefractIR part is a dependency and must not be edited:
 
-## Language at a Glance
++ `src/`, `include/`, `docs/`, and `puzzle/` are RefractIR. They supply the intermediate representation, the shared frontend pipeline, the backends, and the sibling `.sir` puzzle tools (`rypuzmk` / `rypuzchk`). Understand them; do not patch them, because change requests belong upstream.
++ [docs/](./docs) holds the dependency's documentation and serves as reference material: [docs/SPEC_v0.2.3.md](./docs/SPEC_v0.2.3.md) defines the language, [docs/puzzle.md](./docs/puzzle.md) states the sibling puzzle tools' contract (mirrored by [codokus/codoku_common.py](./codokus/codoku_common.py)), and [docs/AGENTS.md](./docs/AGENTS.md) owns the writing standard.
++ Repo-side edits live in `codokus/`, the Codoku suite in [test/unit/run_codoku_tests.py](./test/unit/run_codoku_tests.py), `codokus/Dockerfile`, `README.md`, and this file.
 
-Key characteristics:
+## Puzzle at a Glance
 
-- **Non-SSA**, mutable locals via `let mut`
-- **Symbols**: solver-chosen unknowns (`@?x`, `%?y`)
-- **CFG-based**: explicit basic blocks (`^label`)
-- **Expressions**:
-  - Flat, left-to-right
-  - `+`, `-` at expression level
-  - `*`, `/`, `%` at atom level
-- **Division/modulo**: round toward 0 (C / SMT `bvsdiv`, `bvsrem`)
-- **select** expression:
-  - Lazy (only selected arm evaluated)
-  - Expression-level conditional; mask-based `select <N> i1` for per-lane blends (v0.2.1)
-- **Floating-point**:
-  - `f32` (IEEE 754 single) and `f64` (IEEE 754 double)
-  - Finite-only domain: ±∞ and NaN are UB
-  - `%` is C's `fmod` (truncated-quotient remainder)
-  - All operations use RNE rounding
-- **Pointers (v0.2.0)**:
-  - `ptr T` type, scalar/pointer pointees
-  - `addr lv` produces `ptr T` (requires `let mut` root)
-  - `load p`, `store p, v` for read/write through pointers
-  - `null` literal (typed by context)
-  - Pointer arithmetic: `ptr T ± iN → ptr T`, `ptr T - ptr T → i64` (element distance)
-  - No `sym` of pointer or aggregate (array/struct) type; no pointer/integer casts
-- **Aggregate pointers (v0.2.1)**:
-  - `ptr [N] T` / `ptr @S` — pointers to arrays and structs
-  - `ptrindex <ptr [N] T>, <idx>` → `ptr T` (navigate array element)
-  - `ptrfield <ptr @S>, <field>` → `ptr FieldType` (navigate struct field)
-  - Packed `sizeof(@S) = Σ sizeof(field_i)`; no padding
-  - No aggregate `load`/`store`; navigate to scalar/pointer leaves first
-- **Vector types (v0.2.1)**:
-  - `<N> T` — fixed-width SIMD vector of scalar elements
-  - Lane-wise arithmetic: all scalar operators lift to vectors
-  - `cmp <relop> lhs, rhs` — reified comparison → `i1` (scalar) or `<N> i1` (vector mask)
-  - Lane access via subscript: `%v[%i]` reads/writes lane `i`
-  - Whole-vector copy: `%v = %w;`
-  - Not addressable: no `ptr <N> T`, no `addr` on vector locals
-  - `sym` of vector type allowed (per-lane independent symbols)
-- **Strict UB**:
-  - Division/modulo by zero
-  - Out-of-bounds array access
-  - Reading `undef`
-  - Null/uninitialised/out-of-bounds pointer dereference, cross-object pointer arithmetic or relational comparison
-  - FP overflow/NaN, float-to-integer out-of-range
-  - Vector lane-wise UB, out-of-bounds lane access (v0.2.1)
++ A puzzle is a generated leaf: a random Python function from `rysmith --target python`, wrapped in a fixed `@main` harness that checks the checksum, and carry the guarded memory model from [codokus/codoku_preamble.py](./codokus/codoku_preamble.py).
++ Cells: masking is a lossy, token-level rewrite; each cell stands for a *kind* of element, not a specific one:
+
+| Cell | What it hides |
+| :--- | :--- |
+| `<FILL_VAR>` | a local variable or parameter name (possibly with `[idx]`) |
+| `<FILL_CONST>` | a numeric literal (budgeted from the constant table, or free) |
+| `<FILL_OP>` | an operator or operator-like keyword |
+| `<FILL_CTRL>` | a control keyword (`break`, `continue`) |
+| `<FILL_LABEL>` | the destination of a general goto flag (`_go_<FILL_LABEL>`) |
+| `_<FILL_CTRL>_<FILL_LABEL>` | a break/continue flag kind and destination together |
+| `<FILL_FUNC>` | a non-internal callee defined in the same file |
+| `<FILL_TYPE>`, `<FILL_FIELD>` | unused by the Python target |
+
++ Machine-readable markers are the authoritative interface between the producer (creation) and the consumer (checking); the surrounding prose may change freely:
+
+```text
+//@ EXEC_PATH: entry -> b0 -> ... -> exit
+//@ CFG_EDGE: A -> B
+//@ <FILL_CONST>: <value> <count>
+//@ DISABLED_MASKS: <FILL_OP> <FILL_FUNC>
+```
+
++ `DISABLED_MASKS` lists the kinds a profile disabled; their constructs stay visible in the puzzle. `DISABLEABLE_MASKS` in [codokus/codoku_complexity.py](./codokus/codoku_complexity.py) carries the disableable kinds; goto-flag compound tokens and control keywords cannot be disabled, so every flag target remains hidden.
 
 ## Toolchain Overview
 
 | Tool | Role |
 |------|------|
-| `symirc` | Translate `.sir` to C / WebAssembly / Python |
-| `symiri` | Interpret `.sir` programs |
-| `symirsolve` | Concretize symbolic programs using SMT |
-| `rysmith` | Generate random RefractIR leaf functions (reify) |
-| `rylink` | Compose leaf functions into whole programs (reify) |
-| `rytwin` | Transform a generated program into a semantically-equivalent variant (reify) |
-| `rypuzmk` / `rypuzchk` | Make / check fill-in-the-blanks puzzles (see [./docs/puzzle.md](./docs/puzzle.md)) |
+| `codoku` | CLI over [codokus/codoku.py](./codokus/codoku.py): `create`, `check`, `analyze` |
+| [codokus/codoku_creator.py](./codokus/codoku_creator.py) | puzzle creation: profiles, rysmith invocation, preamble swap, masking, acceptance, installation |
+| [codokus/codoku_checker.py](./codokus/codoku_checker.py) | solution validation: ordered stages from basics to the constant budget |
+| [codokus/codoku_common.py](./codokus/codoku_common.py) | masking locators, maskable-statement scan, CFG extraction (vendored from the sibling puzzle target) |
+| [codokus/codoku_complexity.py](./codokus/codoku_complexity.py) | realized `PuzzleMetrics`, the disableable-kinds vocabulary, the solution-space and complexity estimate |
+| [codokus/codoku_preamble.py](./codokus/codoku_preamble.py) | guarded memory model spliced into every puzzle |
+| `codokus/Dockerfile` | self-contained image with the generator and the modules |
 
-Documentation of each tool: [./docs/](./docs).
+## Development Pipeline
 
-Remember: The interpreter, solver, and compiler backends are shared foundational for **all** RefractIR tooling. They should be kept **clean, correct, and well-tested**. They should also be kept **independent of any specific downstream tools**, with mentioning none in their implementation.
+### Generation (per accepted candidate)
 
-### Puzzle tooling (`rypuzmk` / `rypuzchk`)
-
-The puzzle tools live in [`./puzzle/`](./puzzle) and share
-[`puzzle/puzzle_common.hpp`](./puzzle/puzzle_common.hpp) (the masking printer,
-the `MaskedConstantCollector`, and helpers). `rypuzmk` masks a rysmith-generated
-leaf into `FILL_XXX` blanks with a machine-readable banner; `rypuzchk` validates
-a solution (correctness via the embedded `check_chksum`, plus path, FILL_CONST
-budget, intrinsic usage, and a re-mask structural check). The puzzle/checker
-contract and its intended degrees of freedom are documented in
-[./docs/puzzle.md](./docs/puzzle.md) — read it before changing the masking model
-or either tool, because the producer and consumer must stay in lockstep.
-
-## Compilation / Analysis Pipeline
-
-### Shared Frontend Pipeline
-
-```
-Source (.sir)
+```text
+master seed
   ↓
-Lexer
+sample profile config (ranges over rysmith knobs, disabled mask kinds)
   ↓
-Parser → AST
+rysmith --target python
   ↓
-CFG Builder
+swap_preamble (guarded memory model) + strip refractir_ prefix
   ↓
-TypeChecker (BV-aware)
+mask_puzzle: mask_set ← profile p_mask up to forced goto-flag statements
+  → collect replacements → filter_disabled_masks
   ↓
-Semantic Checker
+self_check: ground truth re-masks byte-for-byte to the puzzle
+  ↓
+analyze_puzzle → profile_accepts (inclusive metric bounds)
+  ↓
+install: puzzle.py + INSTRUCTION.md + oracle/
 ```
 
-### Tool-Specific Pipelines
+### Validation (strict order, from easiest to hardest to reason about)
 
-`symirc`:
-```
-Checked AST + CFG
-  ↓
-Lowering (+ reducibility check & control-tree structuring for Python and C --structured-lowering)
-  ↓
-C / WASM / Python Code Generation
+```text
+basics (markers, unfilled cells) → parse → re-mask skeleton match → compile
+  → CFG topology vs declared edges → timed run → path trace → checksum output
+  → constant budget multiset
 ```
 
-`symiri`:
-```
-Checked AST + CFG
-  ↓
-Symbol Binding (--sym)
-  ↓
-Interpreter Execution
-```
++ The checker infers the masked cells from the puzzle itself and re-masks the solution with the vocabulary it parses from the banner, so producer and consumer cannot drift (`filter_disabled_masks` is the shared mechanism).
 
-`symirsolve`:
-```
-Checked AST + CFG
-  ↓
-Path-based Symbolic Execution
-  ↓
-SMT Solving
-  ↓
-Concrete .sir
-```
-
-### 1. Lexer
-- Converts source text into tokens
-- Handles identifiers with sigils (`@`, `%`, `@?`, `%?`, `^`)
-- Handles comments and string literals
-- No semantic knowledge
-
-### 2. Parser
-- Recursive-descent parser
-- Builds a **typed, structured AST**
-- Preserves source spans for diagnostics
-- AST is analysis-oriented (not syntax-oriented)
-
-### 3. CFG Builder
-- Indexes basic blocks by label
-- Builds successor and predecessor lists
-- Validates `br` targets
-- Computes traversal orders (e.g., reverse postorder)
-- Forms the backbone for all dataflow analyses
-
-### 4. TypeChecker (BV-aware)
-- Maps RefractIR integer types to **SMT bit-vectors**
-  - `i32` → `(_ BitVec 32)`
-  - `i64` → `(_ BitVec 64)`
-  - `iN`  → `(_ BitVec N)`
-- Ensures:
-  - Type correctness of expressions
-  - Bitwidth compatibility
-  - Correct typing of `select`
-  - Assignment compatibility
-  - Function return correctness
-- Produces **typed annotations** for AST nodes
-- Boolean conditions are treated separately from BV integers
-
-### 5. Semantic Checker
-Ensures program well-formedness beyond typing:
-
-- Variables and symbols are declared before use
-- No duplicate declarations
-- Assignment only to `let mut` locals
-- Parameters and symbols are immutable
-- Definite initialization:
-  - Parameters are initialized
-  - `undef` is uninitialized
-  - Reads before initialization are errors
-- CFG consistency checks
-
-### 6. Symbolic Execution / Constraint Generation
-
-- Executes along a **user-selected path** (in `symirsolve` / SMT solver backend)
-- Collects:
-  - Path conditions from branches
-  - Assumptions (`assume`)
-  - Required properties (`require`)
-- Applies **strict UB pruning**
-- Produces BV and FP constraints suitable for SMT solvers (Bitwuzla/Z3)
-
-### 7. Language Lower / Translator
-- Translate a symbolic or concrete program into an existing language
-- First-class support are C, WebAssembly, and Python.
-- The Python target accepts only **reducible** CFGs and reconstructs genuine `while`/`if` control flow (dominator tree → reducibility check → loop forest → control tree → structured lowering; see [./docs/reducibility.md](./docs/reducibility.md)). The C backend emits labels+goto by default and offers the same structured reconstruction (`while`/`do-while`/`if`) behind `--structured-lowering`; the WASM backend emits a `$__pc`/`br_table` dispatch loop by default and, under `--structured-lowering`, reconstructs `block`/`loop`/`if` from the *unlowered* control tree using WASM's native multi-level `br`.
-- For symbolic program translation, use external function declarations to indicate symbols.
-  - C: `extern int func_name_symbol_name(...);`
-  - WASM: `import func_name symbol_name (func func_name_symbol_name (....))`
-  - Python: `func_name__symbol_name()` provider calls injected into module globals by the embedding
-
-
-## Project Structure
-
-Goto [./README.md](./README.md)
-
-
-## Testing – TDD Approach (MANDATORY)
+## Testing: TDD Approach (MANDATORY)
 
 ALWAYS follow a strict Test-Driven Development discipline.
 
@@ -247,37 +120,36 @@ ALWAYS follow a strict Test-Driven Development discipline.
 
 ### How to Run Tests
 
-The test suite is managed via the `Makefile` targets:
+The Codoku suite is its own target:
 
-- `make test`: Runs the entire test suite sequentially.
-- `make test-unit`: Runs unit tests for command-line arguments and reification pipelines.
-- `make test-frontend`: Runs frontend validation tests (lexer, parser, type checker, semantic checker) using `symiri --check`, and CFG reducibility tests (dominator trees, loops, control trees) against `.sir.expected` files.
-- `make test-interp`: Runs reference interpreter execution tests without checking mode.
-- `make test-backends`: Runs compiler backend compilation and execution tests for C (goto and --structured-lowering modes), WASM, and Python targets.
-- `make cross-validation`: Cross-validates interpreter execution outputs and UB behavior against compiled C binaries, in both goto and structured-lowering emission modes.
-- `make test-solver`: Runs symbolic execution and SMT constraint solver tests.
-- `make test-reify`: Runs differential random generation testing for rysmith and rylink.
++ Codoku directly: `python3 -m test.unit.run_codoku_tests codokus/codoku.py build/bin/rysmith` (generation needs the `rysmith` binary from the dependency build).
++ `make test-codoku` builds the generator first and runs the suite.
+
+Every other `make test-*` target is RefractIR's tests: they exercise the dependency surface, so we never run them and assume they always pass. A Codoku change is gated by the Codoku suite alone.
 
 ## Dependency Management
 
-### C++
-- Dependencies are managed **manually**
-- Prefer header-only or standard-library-only solutions
-- When introducing a new dependency:
-  - Update `README.md`
-  - Clearly document installation steps and versions
++ Codoku modules are standard-library-only: every import in `codokus/` is Python's own, so puzzles, the checker, and any embedding carry no third-party dependency.
++ Generation additionally needs the `rysmith` binary (C++20 + Bitwuzla); build it from the dependency sources or pull the Docker image.
+
+### C++ (dependency side)
++ Dependencies are managed **manually**
++ Prefer header-only or standard-library-only solutions
++ When introducing a new dependency:
+  + Update `README.md`
+  + Clearly document installation steps and versions
 
 ### Python (if used for tooling)
-- Virtual environment: `./venv`
-- Activate with:
++ Virtual environment: `./venv`
++ Activate with:
   ```bash
   source venv/bin/activate
   ````
 
-* Dependencies:
-  * `requirements.txt` – runtime
-  * `requirements.dev.txt` – development
-* Always pin exact versions
++ Dependencies:
+  + `requirements.txt`: runtime
+  + `requirements.dev.txt`: development
++ Always pin exact versions
 
 ## Principles and Best Practices
 
@@ -285,7 +157,7 @@ Always follow good practices:
 
 1. Use git frequently and meaningfully
 2. Follow **Conventional Commits**
-3. Keep `README.md`, the current `docs/SPEC_v*.md`, and this file up to date
+3. Keep `README.md` and this file up to date with shipped behavior
 4. Fix **all compiler warnings**
 5. Keep a clean, layered project structure
 6. Write high-quality comments that explain *why*, not *what*
@@ -307,17 +179,6 @@ Always keep in mind the following principles to make it elegant before designing
 4. YAGNI: You Ain't Gonna Need It. Do we really need this feature now, or is it speculative?
 5. SOLID: Single Responsibility, Open/Closed, Liskov Substitution, Interface Segregation, Dependency Inversion. Does this design adhere to these principles?
 
-## Floating-point serialization invariant (MANDATORY)
-
-RefractIR carries `f32`/`f64` values bit-exactly across **every** text boundary. One canonical format, one canonical parser, used everywhere RefractIR text crosses a process or file boundary:
-
-- **`refractir::formatDouble(double)`** to emit.
-- **`refractir::parseFloatLiteral(std::string)`** to parse. **Never `std::stod`**: libstdc++ throws `out_of_range` on any `ERANGE`, valid subnormals included, so a representable denormal would abort the interpreter.
-
-Before writing `std::stod`, `std::stof`, `std::atof`, `std::to_string(double)`, `std::cout << double_value`, an `std::ostringstream` with `precision(17)`, or `printf("%f"/"%g", …)` anywhere in RefractIR, stop and use the canonical pair.
-
-[./docs/float.md](./docs/float.md) §9 owns this invariant: which sites it covers, where the backends intentionally diverge (C and WAT float grammar), why `printf("%a", …)` is the one accepted exception, and how it extends to the SMT boundary.
-
 ## Before Starting Work
 
 1. Review recent history:
@@ -336,7 +197,7 @@ Before writing `std::stod`, `std::stof`, `std::atof`, `std::to_string(double)`, 
 ALWAYS:
 
 1. Clear all compiler warnings
-2. Format code with `clang-format`
+2. Format code (the pre-commit hooks run `ruff check` / `ruff format` for Python and `clang-format` for C++)
 3. Ensure all tests pass (timeouts excepted)
 4. Check changes with `git status`
 5. Split work into small, reviewable commits
@@ -355,5 +216,5 @@ ALWAYS:
 * Body explains intent and design impact
 
 **Remember:**
-RefractIR prioritizes *clarity, analyzability, and solver-friendliness* over surface-level convenience.
+Codoku prioritizes *renewable, semantically-grounded challenges* over surface-level convenience.
 Preserve these properties in every change.
