@@ -23,8 +23,8 @@ The key design goals are:
 
 Like [README.md](./README.md), this project centers on Codoku. The RefractIR part is a dependency and must not be edited:
 
-+ `src/`, `include/`, `docs/`, and `puzzle/` are RefractIR. They supply the intermediate representation, the shared frontend pipeline, the backends, and the sibling `.sir` puzzle tools (`rypuzmk` / `rypuzchk`). Understand them; do not patch them, because change requests belong upstream.
-+ [docs/](./docs) holds the dependency's documentation and serves as reference material: [docs/SPEC_v0.2.3.md](./docs/SPEC_v0.2.3.md) defines the language, [docs/puzzle.md](./docs/puzzle.md) states the sibling puzzle tools' contract (mirrored by [codokus/codoku_common.py](./codokus/codoku_common.py)), and [docs/AGENTS.md](./docs/AGENTS.md) owns the writing standard.
++ `src/`, `include/`, and `docs/` are RefractIR. They supply the intermediate representation, the shared frontend pipeline, and the backends. Understand them; do not patch them, because change requests belong upstream.
++ [docs/](./docs) holds the dependency's documentation and serves as reference material: [docs/SPEC_v0.2.3.md](./docs/SPEC_v0.2.3.md) defines the language, [docs/puzzle.md](./docs/puzzle.md) states the puzzle contract codoku mirrors, and [docs/AGENTS.md](./docs/AGENTS.md) owns the writing standard.
 + Repo-side edits live in `codokus/`, the Codoku suite in [test/unit/run_codoku_tests.py](./test/unit/run_codoku_tests.py), `codokus/Dockerfile`, `README.md`, and this file.
 
 ## Puzzle at a Glance
@@ -61,7 +61,7 @@ Like [README.md](./README.md), this project centers on Codoku. The RefractIR par
 | `codoku` | CLI over [codokus/codoku.py](./codokus/codoku.py): `create`, `check`, `analyze` |
 | [codokus/codoku_creator.py](./codokus/codoku_creator.py) | puzzle creation: profiles, rysmith invocation, preamble swap, masking, acceptance, installation |
 | [codokus/codoku_checker.py](./codokus/codoku_checker.py) | solution validation: ordered stages from basics to the constant budget |
-| [codokus/codoku_common.py](./codokus/codoku_common.py) | masking locators, maskable-statement scan, CFG extraction (vendored from the sibling puzzle target) |
+| [codokus/codoku_common.py](./codokus/codoku_common.py) | masking locators, maskable-statement scan, CFG extraction |
 | [codokus/codoku_complexity.py](./codokus/codoku_complexity.py) | realized `PuzzleMetrics`, the disableable-kinds vocabulary, the solution-space and complexity estimate |
 | [codokus/codoku_preamble.py](./codokus/codoku_preamble.py) | guarded memory model spliced into every puzzle |
 | `codokus/Dockerfile` | self-contained image with the generator and the modules |

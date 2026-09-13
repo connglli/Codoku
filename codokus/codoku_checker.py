@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """codoku_checker.py - validates a solution against a Python codoku puzzle.
 
-Vendored from puzzle/target/rypuzchk.py, reduced to the Python target and
-adapted to the angle-bracketed <FILL_XXX> mask tokens.  Validation is exposed
-programmatically via check() (raises CheckFailure on failure) and via the CLI.
+Python-specific: the solution surface is the angle-bracketed <FILL_XXX> mask
+tokens.  Validation is exposed programmatically via check() (raises
+CheckFailure on failure) and via the CLI.
 
 Checks performed in strict order from easiest to hardest to reason about:
 

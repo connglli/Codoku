@@ -1,7 +1,7 @@
 """codoku_common.py - Python-only masking and analysis helpers for codoku.
 
-Vendored from puzzle/target/puzzle_common.py, reduced to the Python
-target's needs: mask tokens are the angle-bracketed <FILL_XXX> forms.
+Python-only: mask tokens are the angle-bracketed <FILL_XXX> forms, and the
+helpers cover only the Python target's masking and CFG needs.
 """
 
 import ast

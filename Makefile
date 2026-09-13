@@ -144,12 +144,6 @@ TARGET_SOLVER = symirsolve
 TARGET_RYSMITH = rysmith
 TARGET_RYLINK = rylink
 TARGET_RYTWIN = rytwin
-TARGET_RYPUZMK = rypuzmk
-TARGET_RYPUZCHK = rypuzchk
-TARGET_RYPUZMK_SIR = rypuzmk-sir
-TARGET_RYPUZCHK_SIR = rypuzchk-sir
-TARGET_RYPUZMK_TGT = rypuzmk-tgt
-TARGET_RYPUZCHK_TGT = rypuzchk-tgt
 TARGET_CODOKU = codoku
 
 BUILD_DIR = build
@@ -204,9 +198,9 @@ DEPS = $(COMMON_OBJS:.o=.d) $(TEST_OBJS:.o=.d) $(INTERP_OBJS:.o=.d) \
        $(RYLINK_OBJS:.o=.d) $(RYTWIN_OBJS:.o=.d)
 -include $(DEPS)
 
-.PHONY: all clean test test-unit test-codoku test-frontend test-analysis test-interp test-backends test-cross-validation test-solver test-reify test-puzzle-sir test-puzzle-c cross-validation build install
+.PHONY: all clean test test-unit test-codoku test-frontend test-analysis test-interp test-backends test-cross-validation test-solver test-reify cross-validation build install
 
-all: $(TARGET_INTERP) $(TARGET_COMPILER) $(TARGET_SOLVER) $(TARGET_RYSMITH) $(TARGET_RYLINK) $(TARGET_RYTWIN) $(TARGET_RYPUZMK) $(TARGET_RYPUZCHK) $(TARGET_RYPUZMK_TGT) $(TARGET_RYPUZCHK_TGT) $(TARGET_RYPUZMK_SIR) $(TARGET_RYPUZCHK_SIR) $(TARGET_CODOKU)
+all: $(TARGET_INTERP) $(TARGET_COMPILER) $(TARGET_SOLVER) $(TARGET_RYSMITH) $(TARGET_RYLINK) $(TARGET_RYTWIN) $(TARGET_CODOKU)
 
 $(TARGET_INTERP): $(COMMON_OBJS) $(INTERP_OBJS)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
@@ -219,28 +213,6 @@ $(TARGET_SOLVER): $(COMMON_OBJS) $(SOLVER_OBJS)
 
 $(TARGET_RYSMITH): $(COMMON_OBJS) $(RYSMITH_OBJS)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
-
-$(TARGET_RYPUZMK_SIR): puzzle/sir/rypuzmk.o $(COMMON_OBJS)
-	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
-
-$(TARGET_RYPUZCHK_SIR): puzzle/sir/rypuzchk.o $(COMMON_OBJS)
-	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
-
-$(TARGET_RYPUZMK_TGT): puzzle/target/rypuzmk.py
-	ln -sf puzzle/target/rypuzmk.py $(TARGET_RYPUZMK_TGT)
-	chmod +x $(TARGET_RYPUZMK_TGT)
-
-$(TARGET_RYPUZCHK_TGT): puzzle/target/rypuzchk.py
-	ln -sf puzzle/target/rypuzchk.py $(TARGET_RYPUZCHK_TGT)
-	chmod +x $(TARGET_RYPUZCHK_TGT)
-
-$(TARGET_RYPUZMK): puzzle/bin/rypuzmk
-	ln -sf puzzle/bin/rypuzmk $(TARGET_RYPUZMK)
-	chmod +x $(TARGET_RYPUZMK)
-
-$(TARGET_RYPUZCHK): puzzle/bin/rypuzchk
-	ln -sf puzzle/bin/rypuzchk $(TARGET_RYPUZCHK)
-	chmod +x $(TARGET_RYPUZCHK)
 
 $(TARGET_CODOKU): codokus/codoku.py
 	ln -sf codokus/codoku.py $(TARGET_CODOKU)
@@ -261,12 +233,7 @@ $(TARGET_RYTWIN): $(COMMON_OBJS) $(RYTWIN_OBJS)
 
 build: all $(LIB_DIR)/$(LIB_NAME)
 	mkdir -p $(BIN_DIR) $(INC_DIR)
-	cp -f $(TARGET_INTERP) $(TARGET_COMPILER) $(TARGET_SOLVER) $(TARGET_RYSMITH) $(TARGET_RYLINK) $(TARGET_RYPUZMK_SIR) $(TARGET_RYPUZCHK_SIR) $(TARGET_RYPUZMK) $(TARGET_RYPUZCHK) $(BIN_DIR)/
-	cp -f puzzle/target/rypuzmk.py $(BIN_DIR)/$(TARGET_RYPUZMK_TGT)
-	chmod +x $(BIN_DIR)/$(TARGET_RYPUZMK_TGT)
-	cp -f puzzle/target/rypuzchk.py $(BIN_DIR)/$(TARGET_RYPUZCHK_TGT)
-	chmod +x $(BIN_DIR)/$(TARGET_RYPUZCHK_TGT)
-	cp -f puzzle/target/puzzle_common.py $(BIN_DIR)/puzzle_common.py
+	cp -f $(TARGET_INTERP) $(TARGET_COMPILER) $(TARGET_SOLVER) $(TARGET_RYSMITH) $(TARGET_RYLINK) $(BIN_DIR)/
 	cp -f codokus/codoku.py $(BIN_DIR)/$(TARGET_CODOKU)
 	chmod +x $(BIN_DIR)/$(TARGET_CODOKU)
 	cp -f codokus/codoku_creator.py $(BIN_DIR)/codoku_creator.py
@@ -289,7 +256,7 @@ $(LIB_DIR)/$(LIB_NAME): $(LIBRARY_OBJS)
 	$(AR) $(ARFLAGS) $@ $^
 
 clean:
-	rm -f $(COMMON_OBJS) $(TEST_OBJS) $(INTERP_OBJS) $(COMPILER_OBJS) $(SOLVER_OBJS) $(RYSMITH_OBJS) $(RYLINK_OBJS) $(RYTWIN_OBJS) puzzle/sir/rypuzmk.o puzzle/sir/rypuzchk.o $(TARGET_INTERP) $(TARGET_COMPILER) $(TARGET_SOLVER) $(TARGET_RYSMITH) $(TARGET_RYLINK) $(TARGET_RYTWIN) $(TARGET_RYPUZMK) $(TARGET_RYPUZCHK) $(TARGET_RYPUZMK_TGT) $(TARGET_RYPUZCHK_TGT) $(TARGET_RYPUZMK_SIR) $(TARGET_RYPUZCHK_SIR) $(TARGET_CODOKU)
+	rm -f $(COMMON_OBJS) $(TEST_OBJS) $(INTERP_OBJS) $(COMPILER_OBJS) $(SOLVER_OBJS) $(RYSMITH_OBJS) $(RYLINK_OBJS) $(RYTWIN_OBJS) $(TARGET_INTERP) $(TARGET_COMPILER) $(TARGET_SOLVER) $(TARGET_RYSMITH) $(TARGET_RYLINK) $(TARGET_RYTWIN) $(TARGET_CODOKU)
 	rm -rf $(BUILD_DIR)
 	find src alivesmt -name "*.d" -delete
 	find . -name "*.gcno" -delete
@@ -301,16 +268,13 @@ clean:
 # split-by-source output, etc.). They don't go through the `.sir`
 # test runner in test/lib because they need to assert on the binary's
 # stdout / sidecar files / output directory layout.
-test-unit: $(TARGET_INTERP) $(TARGET_COMPILER) $(TARGET_SOLVER) $(TARGET_RYSMITH) $(TARGET_RYLINK) $(TARGET_RYTWIN) $(TARGET_RYPUZMK) $(TARGET_RYPUZCHK) $(TARGET_RYPUZMK_TGT) $(TARGET_RYPUZCHK_TGT)
+test-unit: $(TARGET_INTERP) $(TARGET_COMPILER) $(TARGET_SOLVER) $(TARGET_RYSMITH) $(TARGET_RYLINK) $(TARGET_RYTWIN)
 	$(PY) -m test.unit.run_param_features_tests ./$(TARGET_INTERP) ./$(TARGET_COMPILER) ./$(TARGET_SOLVER)
 	$(PY) -m test.unit.run_structured_c_tests ./$(TARGET_COMPILER)
 	$(PY) -m test.unit.run_structured_wasm_tests ./$(TARGET_COMPILER)
 	$(PY) -m test.unit.run_rysmith_tests ./$(TARGET_RYSMITH) ./$(TARGET_INTERP) ./$(TARGET_COMPILER)
 	$(PY) -m test.unit.run_rylink_tests ./$(TARGET_RYLINK) ./$(TARGET_RYSMITH) ./$(TARGET_INTERP)
 	$(PY) -m test.unit.run_rytwin_tests ./$(TARGET_RYTWIN) ./$(TARGET_RYSMITH) ./$(TARGET_INTERP)
-	$(PY) -m test.unit.run_puzzle_sir_tests ./$(TARGET_RYPUZMK_SIR) ./$(TARGET_RYPUZCHK_SIR) ./$(TARGET_RYSMITH) ./$(TARGET_INTERP)
-	$(PY) -m test.unit.run_puzzle_c_tests ./$(TARGET_RYPUZMK_TGT) ./$(TARGET_RYPUZCHK_TGT) ./$(TARGET_RYSMITH)
-	$(PY) -m test.unit.run_puzzle_python_tests ./$(TARGET_RYPUZMK_TGT) ./$(TARGET_RYPUZCHK_TGT) ./$(TARGET_RYSMITH)
 
 # Codoku suite: the generator + the vendored modules end-to-end; separate from
 # test-unit so a Codoku change is gated by its own target alone.
@@ -380,13 +344,6 @@ test-reify: $(TARGET_RYSMITH) $(TARGET_RYLINK) $(TARGET_INTERP) $(TARGET_COMPILE
 	JOBS=$${JOBS:-1}; \
 	$(PY) -m test.lib.run_reify_diff_tests --rysmith ./$(TARGET_RYSMITH) --symiri ./$(TARGET_INTERP) --symirc ./$(TARGET_COMPILER) --rylink ./$(TARGET_RYLINK) -n 100 --seed 1234 -j $$JOBS
 
-# Puzzle tooling: rypuzmk (maker) + rypuzchk (checker). Two suites:
-test-puzzle-sir: $(TARGET_RYPUZMK) $(TARGET_RYPUZCHK) $(TARGET_RYSMITH) $(TARGET_INTERP)
-	$(PY) -m test.lib.run_puzzle_sir_test test/puzzle-sir ./$(TARGET_RYPUZCHK_SIR) ./$(TARGET_INTERP)
-
-test-puzzle-c: $(TARGET_RYPUZMK_TGT) $(TARGET_RYPUZCHK_TGT) $(TARGET_RYSMITH)
-	$(PY) -m test.lib.run_puzzle_c_test test/puzzle-c ./$(TARGET_RYPUZCHK_TGT)
-
 # Aggregator. Recursive $(MAKE) calls keep per-component logs separated and
 # let CI selectively re-run a single group on retry.
 test: $(TARGET_INTERP) $(TARGET_COMPILER) $(TARGET_SOLVER) $(TARGET_RYSMITH) $(TARGET_RYLINK)
@@ -398,5 +355,3 @@ test: $(TARGET_INTERP) $(TARGET_COMPILER) $(TARGET_SOLVER) $(TARGET_RYSMITH) $(T
 	$(MAKE) cross-validation
 	$(MAKE) test-solver
 	$(MAKE) test-reify
-	$(MAKE) test-puzzle-sir
-	$(MAKE) test-puzzle-c

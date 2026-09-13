@@ -1,7 +1,7 @@
 """codoku_creator.py - rysmith-based Python codoku puzzle creation.
 
-Python-specific and rypuz-free: generation drives ``rysmith --target python``
-directly.  Masking and analysis reuse codoku_common.py with the angle-bracketed
+Python-specific: generation drives ``rysmith --target python`` directly.
+Masking and analysis reuse codoku_common.py with the angle-bracketed
 <FILL_XXX> mask tokens.
 
 Generation profiles control generator inputs; reported complexity values are
@@ -174,8 +174,8 @@ def write_instruction(path: Path, has_budget: bool) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Banner templates (mirror puzzle/target/rypuzmk.py, Python-adapted:
-# `//` comment lines become `#`, machine markers become `#//@`).
+# Banner templates (Python-adapted: `//` comment lines become `#`,
+# machine markers become `#//@`).
 # ---------------------------------------------------------------------------
 
 PUZZLE_HEADER_TEMPLATE = """\
