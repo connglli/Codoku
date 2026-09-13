@@ -5,6 +5,7 @@ target's needs: mask tokens are the angle-bracketed <FILL_XXX> forms.
 """
 
 import ast
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Masking vocabularies
@@ -15,34 +16,37 @@ import ast
 # locates them inside byte slices; helper/function names are text.
 # ---------------------------------------------------------------------------
 
-# Preamble helper calls masked as <FILL_FUNC>.
-RETAINED_HELPER_FUNCS: tuple[str, ...] = (
-  "_cast_int",
-  "_padd",
-  "_pdiff",
-  "_peq",
-  "_prel",
-  "_load",
-  "_store",
-  "_pidx",
-  "_pfield",
-)
-
-# File-internal functions never masked as <FILL_FUNC>.
+# File-internal functions never masked as <FILL_FUNC>. The pointer/memory
+# model helpers and ``_cast_int`` are excluded on purpose: a masked puzzle
+# is a module a third party fills in, so their calls stay visible and the
+# provenance/value machinery cannot be swapped out by a fill; their
+# arguments are masked independently.
 INTERNAL_HELPER_FUNCS: frozenset[str] = frozenset(
   {
     "_crc32_update_i32",
     "_check_chksum_i32",
     "_in_check_chksum",
     "_trap",
-    "_ichk",
-    "_fin",
     "_f32",
-    "_f64",
+    "_cast_int",
     "_Ptr",
     "_rd",
     "_vrd",
     "_idx",
+    "_padd",
+    "_pdiff",
+    "_peq",
+    "_prel",
+    "_load",
+    "_store",
+    "_pidx",
+    "_pfield",
+    "_need_int",
+    "_chk_geom",
+    "_live",
+    "_chk_ptr",
+    "_chk_deref",
+    "_derive",
   }
 )
 
@@ -130,6 +134,155 @@ def strip_refractir_prefix(src_bytes: bytes) -> bytes:
   src = src_bytes.replace(b"_refractir_", b"_")
   src = src.replace(b"refractir_", b"")
   return src
+
+
+# ---------------------------------------------------------------------------
+# Emission preamble swap
+#
+# rysmith emits its leaf modules guard-free: every arithmetic operator is
+# inlined as a plain Python expression, so none of the guarded emission's
+# arithmetic helpers (``_ichk``, ``_iadd``, ``_sdiv``, ...) is referenced
+# and none is emitted. The guard-free pointer/memory model drops the
+# provenance checks with them: a pointer is plain list indexing, so an
+# invalid pointer access silently reads or overwrites a flat leaf slot it
+# cannot name. A masked puzzle is a module a third party fills in, so the
+# swap replaces the emitted preamble with the guarded one before masking:
+# the generated program is UB-free and never trips a guard, and a fill
+# whose invalid pointer access would otherwise smuggle values through
+# the leaf-slot list traps instead. The guarded preamble's ``_trap``
+# raises, so a fill that executes unreachable code or trips an intrinsic
+# UB precondition (an inert no-op in the replaced emission) traps too.
+# ---------------------------------------------------------------------------
+
+# Names of the emitted emission-preamble statements, by top-level kind.
+# Imports carry their module names; classes/functions their names;
+# sentinels ``_NULL``/``_UNDEF``/``_PAD`` their assignment targets.
+GUARD_FREE_PREAMBLE_NAMES: frozenset[str] = frozenset(
+  {
+    "math",
+    "struct",
+    "RefractIRTrap",
+    "_trap",
+    "_cast_int",
+    "_f32",
+    "_need_int",
+    "_chk_geom",
+    "_Ptr",
+    "_NULL",
+    "_UNDEF",
+    "_PAD",
+    "_live",
+    "_rd",
+    "_idx",
+    "_vrd",
+    "_chk_ptr",
+    "_chk_deref",
+    "_derive",
+    "_padd",
+    "_pdiff",
+    "_peq",
+    "_prel",
+    "_load",
+    "_store",
+    "_pidx",
+    "_pfield",
+  }
+)
+
+# The subset the leaf function and the intrinsic helpers reference. The
+# emitted preamble is a fixed text with all of them present; one missing
+# name means the emission shape drifted, which must fail loudly rather
+# than replace only part of a preamble a call site still references.
+REQUIRED_PREAMBLE_NAMES: frozenset[str] = GUARD_FREE_PREAMBLE_NAMES - {
+  "_need_int",
+  "_chk_geom",
+  "_live",
+  "_chk_ptr",
+  "_chk_deref",
+  "_derive",
+}
+
+# The guarded memory model lives in codoku_preamble.py, next to
+# kPreamble in py_backend.cpp; that file owns the consistency contract.
+
+_PREAMBLE_MODULE_NAME = "codoku_preamble.py"
+
+
+def _guarded_preamble_bytes() -> bytes:
+  """The splice text: the preamble module from its first import on.
+
+  The docstring stays out of the splice, so puzzles carry the preamble
+  code only.
+  """
+  path = Path(__file__).resolve().parent / _PREAMBLE_MODULE_NAME
+  try:
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    start = next(i for i, line in enumerate(lines) if line.startswith("import "))
+  except (OSError, StopIteration) as e:
+    raise RuntimeError(f"{_PREAMBLE_MODULE_NAME} is missing or malformed") from e
+  # The file's final newline stays out of the splice (the ast span
+  # excludes the last statement's line terminator), so re-swapping an
+  # already-swapped module is byte-idempotent.
+  return "".join(lines[start:]).rstrip("\n").encode("utf-8")
+
+
+def _preamble_stmt_names(node):
+  """Names a top-level statement contributes to the emission preamble."""
+  if isinstance(node, ast.Import):
+    return {alias.name for alias in node.names}
+  if isinstance(node, ast.ImportFrom):
+    return {alias.name for alias in node.names}
+  if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+    return {node.name}
+  if (
+    isinstance(node, ast.Assign)
+    and len(node.targets) == 1
+    and isinstance(node.targets[0], ast.Name)
+  ):
+    return {node.targets[0].id}
+  return None
+
+
+def swap_preamble(src_bytes: bytes) -> bytes:
+  """Replace the guard-free emission preamble with the guarded one.
+
+  The swap is by top-level names, not by bytes: the emitted preamble's
+  comment text has no contract, and the guarded preamble reuses the
+  emitted one's names, so re-swapping an already-swapped module is a
+  no-op. Definitions after the preamble (vec-lowering strategy classes,
+  intrinsic helpers, the main wrapper and the leaf) are kept.
+  """
+  try:
+    tree = ast.parse(src_bytes)
+  except SyntaxError as e:
+    raise RuntimeError(f"rysmith output is not valid Python: {e}") from e
+
+  preamble: list[ast.stmt] = []
+  for stmt in tree.body:
+    names = _preamble_stmt_names(stmt)
+    if names is None or not names <= GUARD_FREE_PREAMBLE_NAMES:
+      break
+    preamble.append(stmt)
+
+  present: set[str] = set()
+  for stmt in preamble:
+    present |= _preamble_stmt_names(stmt)
+  missing = REQUIRED_PREAMBLE_NAMES - present
+  if missing:
+    raise RuntimeError(
+      "rysmith output preamble is unrecognizable (missing: "
+      + ", ".join(sorted(missing))
+      + ")"
+    )
+
+  start, end = get_byte_offsets(
+    src_bytes,
+    preamble[0].lineno,
+    preamble[0].col_offset,
+    preamble[-1].end_lineno,
+    preamble[-1].end_col_offset,
+  )
+  return src_bytes[:start] + _guarded_preamble_bytes() + src_bytes[end:]
 
 
 # ---------------------------------------------------------------------------
@@ -423,11 +576,10 @@ def collect_python_replacements(
   - lvalues whose base is in *local_names* → ``<FILL_VAR>``
   - number literals → ``<FILL_CONST>`` (counted in *budget_counts*)
   - break/continue → ``<FILL_CTRL>``
-  - function calls:
-      * Retained preamble helpers (_cast_int, _padd, _pdiff, _peq, _prel,
-        _load, _store, _pidx, _pfield) → ``<FILL_OP>``
-      * Calls to functions defined in the same file (*defined_funcs*)
-        → ``<FILL_FUNC>`` (excluding internal helpers like _trap, _f32, …)
+  - function calls to functions defined in the same file
+    (*defined_funcs*) → ``<FILL_FUNC>`` (excluding internal helpers like
+    _trap, _f32, _cast_int, and the pointer/memory model, whose calls
+    stay visible while their arguments are masked independently)
   - binary operators in BinOp → ``<FILL_OP>``
   - comparison operators → ``<FILL_OP>``
   - unary operators → ``<FILL_OP>``
@@ -510,9 +662,7 @@ def collect_python_replacements(
   if isinstance(node, ast.Call):
     if isinstance(node.func, ast.Name):
       func_name = node.func.id
-      if func_name in RETAINED_HELPER_FUNCS or (
-        func_name in defined_funcs and func_name not in INTERNAL_HELPER_FUNCS
-      ):
+      if func_name in defined_funcs and func_name not in INTERNAL_HELPER_FUNCS:
         start, end = get_node_offsets(node.func)
         replacements.append((start, end, "<FILL_FUNC>"))
     for arg in node.args:

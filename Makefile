@@ -272,6 +272,7 @@ build: all $(LIB_DIR)/$(LIB_NAME)
 	cp -f codokus/codoku_creator.py $(BIN_DIR)/codoku_creator.py
 	cp -f codokus/codoku_checker.py $(BIN_DIR)/codoku_checker.py
 	cp -f codokus/codoku_common.py $(BIN_DIR)/codoku_common.py
+	cp -f codokus/codoku_preamble.py $(BIN_DIR)/codoku_preamble.py
 	cp -f codokus/codoku_complexity.py $(BIN_DIR)/codoku_complexity.py
 	cp -r include/* $(INC_DIR)/
 

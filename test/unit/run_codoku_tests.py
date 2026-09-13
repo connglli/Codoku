@@ -763,6 +763,7 @@ def main():
       "codoku_creator.py",
       "codoku_checker.py",
       "codoku_common.py",
+      "codoku_preamble.py",
       "codoku_complexity.py",
     ):
       shutil.copy(os.path.join(src_dir, f), os.path.join(workdir, f))
@@ -821,6 +822,7 @@ def main():
       "codoku_creator.py",
       "codoku_checker.py",
       "codoku_common.py",
+      "codoku_preamble.py",
       "codoku_complexity.py",
     ):
       shutil.copy(os.path.join(workdir, f), os.path.join(r2_dir, f))

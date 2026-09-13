@@ -35,6 +35,7 @@ from codoku_common import (
   get_python_maskable_statements,
   mentions_go_flag,
   strip_refractir_prefix,
+  swap_preamble,
 )
 from codoku_complexity import (
   ComplexityEstimate,
@@ -77,7 +78,7 @@ That also said, avoid generating the solution file before you solve the puzzle s
 - `<FILL_CTRL>` → a control keyword (`break` or `continue`)
 - `<FILL_LABEL>` → the destination of a goto flag (`_go_<FILL_LABEL>` such as `_go_b3`)
 - `_<FILL_CTRL>_<FILL_LABEL>` → a break/continue flag: the kind and the destination are both hidden, so fill in both (e.g. `_break_exit`, `_continue_b4`)
-- `<FILL_FUNC>` → a function call name (e.g., `_cast_int`, `_padd`, `_pdiff`, `_peq`, `_prel`, `_load`, `_store`, `_pidx`, `_pfield`, or any function defined in the file)
+- `<FILL_FUNC>` → a function call name (e.g., an intrinsic helper like `_in_abs`, or any non-internal function defined in the file)
 - `<FILL_FIELD>` → not used
 - `<FILL_TYPE>` → not used (Python is dynamically typed)
 
@@ -817,7 +818,7 @@ def generate_candidate(
   py_path, sir_path = pair
 
   src_raw = py_path.read_bytes()
-  src = strip_refractir_prefix(src_raw)
+  src = strip_refractir_prefix(swap_preamble(src_raw))
   try:
     tree = ast.parse(src)
   except Exception as e:
