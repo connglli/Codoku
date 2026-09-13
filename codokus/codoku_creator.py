@@ -366,6 +366,7 @@ class GenerationProfile:
 
 
 PROFILES: dict[str, GenerationProfile] = {
+  # ---- by size ----
   # A small function with a short path, where part of the code stays visible and constants need no maching.
   "small": GenerationProfile(
     n_bbls=IntRange(2, 4),
@@ -432,6 +433,146 @@ PROFILES: dict[str, GenerationProfile] = {
       "total_masks": (150, 2147483647),
       "mask_<fill_ctrl>": (0, 2147483647),
       "cyclomatic": (3, 2147483647),
+    },
+  ),
+  # ---- by types ----
+  "dataflow_reconstruction": GenerationProfile(
+    n_bbls=IntRange(6, 10),
+    n_stmts=IntRange(3, 5),
+    min_loop_iter=IntRange(1, 2),
+    p_mask=FloatRange(1.0, 1.0),
+    max_ptr_depth=IntRange(1, 1),
+    p_backedge=FloatRange(0.20, 0.40),
+    p_branch=FloatRange(0.50, 0.70),
+    n_vars=IntRange(10, 14),
+    n_params=IntRange(3, 5),
+    lift_consts=True,
+    # We consider constants, variables, and control flows.
+    disabled_masks=frozenset({"<FILL_OP>", "<FILL_FUNC>"}),
+    features=(),
+    acceptance={
+      "exec_path_length": (10, 30),
+      "unique_path_blocks": (6, 12),
+      "repeated_block_visits": (2, 20),
+      "n_loops": (1, 2147483647),
+      "cyclomatic": (4, 14),
+      "total_masks": (1, 2147483647),
+    },
+  ),
+  "arithmetic_reconstruction": GenerationProfile(
+    n_bbls=IntRange(6, 10),
+    n_stmts=IntRange(3, 5),
+    min_loop_iter=IntRange(1, 2),
+    p_mask=FloatRange(1.0, 1.0),
+    max_ptr_depth=IntRange(1, 1),
+    p_backedge=FloatRange(0.20, 0.40),
+    p_branch=FloatRange(0.50, 0.70),
+    n_vars=IntRange(10, 14),
+    n_params=IntRange(3, 5),
+    lift_consts=True,
+    # We consider constants, operators, and control flows.
+    disabled_masks=frozenset({"<FILL_VAR>"}),
+    features=(),
+    acceptance={
+      "exec_path_length": (10, 30),
+      "unique_path_blocks": (6, 12),
+      "repeated_block_visits": (2, 20),
+      "n_loops": (1, 2147483647),
+      "cyclomatic": (4, 14),
+      "total_masks": (1, 2147483647),
+    },
+  ),
+  "operation_routing": GenerationProfile(
+    n_bbls=IntRange(6, 10),
+    n_stmts=IntRange(3, 5),
+    min_loop_iter=IntRange(1, 2),
+    p_mask=FloatRange(1.0, 1.0),
+    max_ptr_depth=IntRange(1, 1),
+    p_backedge=FloatRange(0.20, 0.40),
+    p_branch=FloatRange(0.50, 0.70),
+    n_vars=IntRange(10, 14),
+    n_params=IntRange(3, 5),
+    # We consider variables, operators, and control flows.
+    disabled_masks=frozenset({"<FILL_CONST>"}),
+    lift_consts=True,
+    features=(),
+    acceptance={
+      "exec_path_length": (10, 30),
+      "unique_path_blocks": (6, 12),
+      "repeated_block_visits": (2, 20),
+      "n_loops": (1, 2147483647),
+      "cyclomatic": (4, 14),
+      "total_masks": (1, 2147483647),
+    },
+  ),
+  # ---- by style ----
+  # Visible arithmetic anchors + exact constant allocation.
+  # Retain enough fixed computation to restrict alternative completions.
+  "anchored": GenerationProfile(
+    n_bbls=IntRange(5, 8),
+    n_stmts=IntRange(3, 5),
+    min_loop_iter=IntRange(1, 2),
+    p_mask=FloatRange(0.60, 0.75),
+    max_ptr_depth=IntRange(0, 0),
+    p_backedge=FloatRange(0.20, 0.35),
+    p_branch=FloatRange(0.40, 0.60),
+    n_vars=IntRange(6, 10),
+    n_params=IntRange(3, 4),
+    lift_consts=False,
+    features=(
+      "--no-fp",
+      "--no-vec",
+      "--no-ptrarith",
+      "--no-intrinsics",
+    ),
+    acceptance={
+      "exec_path_length": (8, 20),
+      "total_masks": (50, 250),
+      "cyclomatic": (3, 10),
+    },
+  ),
+  # Repeated state updates, with some visible statements preserved.
+  # The supplied 21-block-visit example is a useful target.
+  "recurrent": GenerationProfile(
+    n_bbls=IntRange(5, 8),
+    n_stmts=IntRange(3, 5),
+    min_loop_iter=IntRange(2, 3),
+    p_mask=FloatRange(0.65, 0.85),
+    max_ptr_depth=IntRange(0, 0),
+    p_backedge=FloatRange(0.30, 0.45),
+    p_branch=FloatRange(0.40, 0.60),
+    n_vars=IntRange(6, 10),
+    n_params=IntRange(3, 4),
+    lift_consts=False,
+    features=(
+      "--no-vec",
+      "--no-ptrarith",
+    ),
+    acceptance={
+      "exec_path_length": (12, 26),
+      "total_masks": (70, 350),
+      "cyclomatic": (3, 12),
+    },
+  ),
+  # Short execution with mixed features and argument-level memory puzzles.
+  # Assumes pointer/memory operation names remain visible.
+  # Avoid full masking and deeper pointer chains for now.
+  "saturated": GenerationProfile(
+    n_bbls=IntRange(6, 10),
+    n_stmts=IntRange(3, 5),
+    min_loop_iter=IntRange(1, 2),
+    p_mask=FloatRange(0.70, 0.90),
+    max_ptr_depth=IntRange(1, 1),
+    p_backedge=FloatRange(0.20, 0.40),
+    p_branch=FloatRange(0.50, 0.70),
+    n_vars=IntRange(8, 12),
+    n_params=IntRange(3, 4),
+    lift_consts=False,
+    features=(),
+    acceptance={
+      "exec_path_length": (10, 24),
+      "total_masks": (100, 500),
+      "cyclomatic": (4, 14),
     },
   ),
 }
