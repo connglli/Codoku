@@ -204,7 +204,7 @@ DEPS = $(COMMON_OBJS:.o=.d) $(TEST_OBJS:.o=.d) $(INTERP_OBJS:.o=.d) \
        $(RYLINK_OBJS:.o=.d) $(RYTWIN_OBJS:.o=.d)
 -include $(DEPS)
 
-.PHONY: all clean test test-unit test-frontend test-analysis test-interp test-backends test-cross-validation test-solver test-reify test-puzzle-sir test-puzzle-c cross-validation build install
+.PHONY: all clean test test-unit test-codoku test-frontend test-analysis test-interp test-backends test-cross-validation test-solver test-reify test-puzzle-sir test-puzzle-c cross-validation build install
 
 all: $(TARGET_INTERP) $(TARGET_COMPILER) $(TARGET_SOLVER) $(TARGET_RYSMITH) $(TARGET_RYLINK) $(TARGET_RYTWIN) $(TARGET_RYPUZMK) $(TARGET_RYPUZCHK) $(TARGET_RYPUZMK_TGT) $(TARGET_RYPUZCHK_TGT) $(TARGET_RYPUZMK_SIR) $(TARGET_RYPUZCHK_SIR) $(TARGET_CODOKU)
 
@@ -301,7 +301,7 @@ clean:
 # split-by-source output, etc.). They don't go through the `.sir`
 # test runner in test/lib because they need to assert on the binary's
 # stdout / sidecar files / output directory layout.
-test-unit: $(TARGET_INTERP) $(TARGET_COMPILER) $(TARGET_SOLVER) $(TARGET_RYSMITH) $(TARGET_RYLINK) $(TARGET_RYTWIN) $(TARGET_RYPUZMK) $(TARGET_RYPUZCHK) $(TARGET_RYPUZMK_TGT) $(TARGET_RYPUZCHK_TGT) $(TARGET_CODOKU)
+test-unit: $(TARGET_INTERP) $(TARGET_COMPILER) $(TARGET_SOLVER) $(TARGET_RYSMITH) $(TARGET_RYLINK) $(TARGET_RYTWIN) $(TARGET_RYPUZMK) $(TARGET_RYPUZCHK) $(TARGET_RYPUZMK_TGT) $(TARGET_RYPUZCHK_TGT)
 	$(PY) -m test.unit.run_param_features_tests ./$(TARGET_INTERP) ./$(TARGET_COMPILER) ./$(TARGET_SOLVER)
 	$(PY) -m test.unit.run_structured_c_tests ./$(TARGET_COMPILER)
 	$(PY) -m test.unit.run_structured_wasm_tests ./$(TARGET_COMPILER)
@@ -311,6 +311,10 @@ test-unit: $(TARGET_INTERP) $(TARGET_COMPILER) $(TARGET_SOLVER) $(TARGET_RYSMITH
 	$(PY) -m test.unit.run_puzzle_sir_tests ./$(TARGET_RYPUZMK_SIR) ./$(TARGET_RYPUZCHK_SIR) ./$(TARGET_RYSMITH) ./$(TARGET_INTERP)
 	$(PY) -m test.unit.run_puzzle_c_tests ./$(TARGET_RYPUZMK_TGT) ./$(TARGET_RYPUZCHK_TGT) ./$(TARGET_RYSMITH)
 	$(PY) -m test.unit.run_puzzle_python_tests ./$(TARGET_RYPUZMK_TGT) ./$(TARGET_RYPUZCHK_TGT) ./$(TARGET_RYSMITH)
+
+# Codoku suite: the generator + the vendored modules end-to-end; separate from
+# test-unit so a Codoku change is gated by its own target alone.
+test-codoku: $(TARGET_CODOKU) $(TARGET_RYSMITH)
 	$(PY) -m test.unit.run_codoku_tests ./$(TARGET_CODOKU) ./$(TARGET_RYSMITH)
 
 # Integration tests, grouped by the component under test. Each component
@@ -387,6 +391,7 @@ test-puzzle-c: $(TARGET_RYPUZMK_TGT) $(TARGET_RYPUZCHK_TGT) $(TARGET_RYSMITH)
 # let CI selectively re-run a single group on retry.
 test: $(TARGET_INTERP) $(TARGET_COMPILER) $(TARGET_SOLVER) $(TARGET_RYSMITH) $(TARGET_RYLINK)
 	$(MAKE) test-unit
+	$(MAKE) test-codoku
 	$(MAKE) test-frontend
 	$(MAKE) test-interp
 	$(MAKE) test-backends
