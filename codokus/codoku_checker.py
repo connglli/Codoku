@@ -41,6 +41,7 @@ from codoku_common import (
   run_dumps_trace,
   strip_refractir_prefix,
 )
+from codoku_complexity import DISABLEABLE_MASKS, filter_disabled_masks
 
 # ---------------------------------------------------------------------------
 # Check result - ordered from easiest to hardest to satisfy.
@@ -145,11 +146,12 @@ def strip_comments_and_whitespace(text: str) -> str:
 
 def parse_puzzle_requirements(
   puzzle_text: str,
-) -> tuple[list[str], dict[str, int], list[tuple[str, str]]]:
+) -> tuple[list[str], dict[str, int], list[tuple[str, str]], frozenset[str]]:
   """Parse markers from the puzzle banner."""
   expected_path: list[str] = []
   const_counts: dict[str, int] = {}
   cfg_edges: list[tuple[str, str]] = []
+  disabled_masks: set[str] = set()
 
   for line in puzzle_text.splitlines():
     if "//@ EXEC_PATH:" in line:
@@ -186,8 +188,23 @@ def parse_puzzle_requirements(
           f"Malformed //@ CFG_EDGE marker: empty node name in '{line}'",
         )
       cfg_edges.append((from_node, to_node))
+    elif "//@ DISABLED_MASKS:" in line:
+      tokens = line.split("//@ DISABLED_MASKS:", 1)[1].split()
+      if not tokens:
+        fail(
+          CheckResult.FAIL_PARSE,
+          "Malformed //@ DISABLED_MASKS marker: expected mask kinds.",
+        )
+      for token in tokens:
+        if token not in DISABLEABLE_MASKS:
+          fail(
+            CheckResult.FAIL_PARSE,
+            f"Malformed //@ DISABLED_MASKS marker: mask kind '{token}' "
+            "cannot be disabled.",
+          )
+      disabled_masks.update(tokens)
 
-  return expected_path, const_counts, cfg_edges
+  return expected_path, const_counts, cfg_edges, frozenset(disabled_masks)
 
 
 # ---------------------------------------------------------------------------
@@ -200,6 +217,7 @@ def infer_mask_set_from_puzzle(
   sol_src: bytes,
   puzzle_text: str,
   defined_funcs: set[str],
+  disabled_masks: frozenset[str] = frozenset(),
 ) -> set[int] | None:
   """Infer which statement indices were masked in the puzzle by comparing renders.
 
@@ -223,15 +241,17 @@ def infer_mask_set_from_puzzle(
     full_repls.append(sentinel)
     plain_repls.append(sentinel)
     is_body = stmt.lineno > entry_line
+    stmt_repls: list = []
     collect_python_replacements(
       stmt,
       sol_src,
       is_body,
-      full_repls,
+      stmt_repls,
       dummy_budget,
       local_names,
       defined_funcs,
     )
+    full_repls.extend(filter_disabled_masks(stmt_repls, disabled_masks))
 
   full_rendered = apply_replacements(sol_src, full_repls).decode("utf-8")
   plain_rendered = apply_replacements(sol_src, plain_repls).decode("utf-8")
@@ -373,6 +393,7 @@ def check_remasking(
   puzzle_text: str,
   mask_set: set[int],
   defined_funcs: set[str],
+  disabled_masks: frozenset[str] = frozenset(),
 ) -> dict[str, int]:
   """Re-mask the solution at *mask_set* and verify it matches the puzzle skeleton."""
   maskable, entry_line, exit_line = get_python_maskable_statements(sol_leaf, sol_src)
@@ -384,15 +405,17 @@ def check_remasking(
   for idx, stmt in enumerate(maskable):
     if idx in mask_set:
       is_body = stmt.lineno > entry_line
+      stmt_repls: list = []
       collect_python_replacements(
         stmt,
         sol_src,
         is_body,
-        remasked_repls,
+        stmt_repls,
         actual_counts,
         local_names,
         defined_funcs,
       )
+      remasked_repls.extend(filter_disabled_masks(stmt_repls, disabled_masks))
 
   remasked_text = apply_replacements(sol_src, remasked_repls).decode("utf-8")
   if strip_comments_and_whitespace(remasked_text) != strip_comments_and_whitespace(
@@ -458,7 +481,9 @@ def check(puzzle: str, solution: str) -> None:
   except (OSError, UnicodeError) as e:
     fail(CheckResult.FAIL_BASICS, f"Puzzle file '{puzzle}' cannot be read: {e}")
 
-  expected_path, const_counts, cfg_edges = parse_puzzle_requirements(puzzle_text)
+  expected_path, const_counts, cfg_edges, disabled_masks = parse_puzzle_requirements(
+    puzzle_text
+  )
   if not expected_path:
     fail(
       CheckResult.FAIL_BASICS,
@@ -531,6 +556,7 @@ def check(puzzle: str, solution: str) -> None:
     sol_src,
     puzzle_text,
     defined_funcs,
+    disabled_masks,
   )
   if mask_set is None:
     fail(
@@ -546,6 +572,7 @@ def check(puzzle: str, solution: str) -> None:
     puzzle_text,
     mask_set,
     defined_funcs,
+    disabled_masks,
   )
 
   # -------------------------------------------------------------------------

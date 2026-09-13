@@ -418,16 +418,39 @@ EXEC_PATH_RE = re.compile(r"#//@\s*EXEC_PATH\s*:\s*(.+)")
 CONST_BUDGET_RE = re.compile(r"#//@\s*<FILL_CONST>\s*:\s*(.+?)\s+(\d+)\s*$")
 BLOCK_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*|\d+")
 MASK_TOKEN_RE = re.compile(r"<FILL_[A-Z_]+>")
-KNOWN_MASKS = (
-  "<FILL_VAR>",
-  "<FILL_CONST>",
-  "<FILL_OP>",
-  "<FILL_TYPE>",
-  "<FILL_LABEL>",
-  "<FILL_FUNC>",
-  "<FILL_FIELD>",
-  "<FILL_CTRL>",
+DISABLEABLE_MASKS = frozenset(
+  {
+    "<FILL_VAR>",  # variables
+    "<FILL_CONST>",  # constants
+    "<FILL_OP>",  # operators (+, -, ...)
+    "<FILL_FUNC>",  # operators (intrinsics)
+  }
 )
+NONDISABLEABLE_MASKS = frozenset(
+  {
+    "<FILL_TYPE>",
+    "<FILL_LABEL>",
+    "<FILL_CTRL>",
+    "<FILL_FIELD>",
+  }
+)
+KNOWN_MASKS = DISABLEABLE_MASKS | NONDISABLEABLE_MASKS
+
+
+def filter_disabled_masks(repls: list, disabled: frozenset[str]) -> list:
+  """Drop replacements whose mask text is in *disabled*.
+
+  Masking locates each blank as a ``(start, end, mask_text)`` span; a
+  profile that disables kinds keeps those constructs visible by dropping
+  their spans before the puzzle is rendered.  Exact-token filtering is
+  why goto flags survive: ``_go_<FILL_LABEL>`` and
+  ``_<FILL_CTRL>_<FILL_LABEL>`` are compound tokens, not known kinds, so
+  disabling any kind leaves every flag target hidden.
+  """
+  if not disabled:
+    return repls
+  return [repl for repl in repls if repl[2] not in disabled]
+
 
 # ---------------------------------------------------------------------------
 # Solution-space estimation

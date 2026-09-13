@@ -1079,6 +1079,170 @@ def checker_unit_tests_pass(chk_mod) -> bool:
   return ok
 
 
+def disabled_masks_unit_tests(ccommon, mod) -> bool:
+  """Test that disabled_masks filters specific mask kinds from puzzle output.
+
+  Goto-flag compound tokens (_go_<FILL_LABEL>, _<FILL_CTRL>_<FILL_LABEL>)
+  never match a known mask kind, so disabling any kind preserves them.
+  """
+  ok = True
+
+  src = (
+    "def func_d(x):\n"
+    "    # ^entry\n"
+    "    y = (x + 1)\n"
+    "    while True:\n"
+    "        # ^b0\n"
+    "        y = helper(y, 2)\n"
+    "        if (y > 10):\n"
+    "            # ^exit\n"
+    "            return y\n"
+    "        if _go_exit:\n"
+    "            _go_exit = False\n"
+    "            break\n"
+    "        if _brk_b0:\n"
+    "            _brk_b0 = False\n"
+    "            break\n"
+    "        if _cnt_b0:\n"
+    "            _cnt_b0 = False\n"
+    "            continue\n"
+    "    return y\n"
+  ).encode("utf-8")
+  tree = ast.parse(src)
+  leaf, _ = ccommon.find_python_leaf_function(tree, src)
+  if leaf is None:
+    check("disabled_masks: fixture has a leaf function", False, "no leaf found")
+    return False
+  maskable, entry_line, _ = ccommon.get_python_maskable_statements(leaf, src)
+  local_names = ccommon.collect_python_leaf_locals(leaf)
+  defined_funcs = {"helper"}
+
+  all_repls: list = []
+  all_budget: dict = {}
+  for stmt in maskable:
+    ccommon.collect_python_replacements(
+      stmt,
+      src,
+      stmt.lineno > entry_line,
+      all_repls,
+      all_budget,
+      local_names,
+      defined_funcs,
+    )
+  all_masked = ccommon.apply_replacements(src, all_repls).decode("utf-8")
+
+  baseline_ok = (
+    "<FILL_VAR>" in all_masked
+    and "<FILL_CONST>" in all_masked
+    and "<FILL_OP>" in all_masked
+    and "<FILL_FUNC>" in all_masked
+    and "<FILL_CTRL>" in all_masked
+    and "_<FILL_CTRL>_<FILL_LABEL>" in all_masked
+    and "_go_<FILL_LABEL>" in all_masked
+  )
+  check("disabled_masks: baseline has all mask kinds", baseline_ok, all_masked)
+  ok = ok and baseline_ok
+
+  def masked_with(disabled: frozenset[str]) -> str:
+    repls: list = []
+    for stmt in maskable:
+      stmt_repls: list = []
+      ccommon.collect_python_replacements(
+        stmt,
+        src,
+        stmt.lineno > entry_line,
+        stmt_repls,
+        {},
+        local_names,
+        defined_funcs,
+      )
+      stmt_repls = mod.filter_disabled_masks(stmt_repls, disabled)
+      repls.extend(stmt_repls)
+    return ccommon.apply_replacements(src, repls).decode("utf-8")
+
+  # Test 1: Disable <FILL_VAR>.
+  m = masked_with(frozenset({"<FILL_VAR>"}))
+  t1 = "<FILL_VAR>" not in m and "<FILL_CONST>" in m and "<FILL_OP>" in m
+  check("disabled_masks: <FILL_VAR> suppressed", t1, m)
+  ok = ok and t1
+
+  # Test 2: Disable <FILL_CONST>.
+  m = masked_with(frozenset({"<FILL_CONST>"}))
+  t2 = "<FILL_CONST>" not in m and "<FILL_VAR>" in m and "<FILL_OP>" in m
+  check("disabled_masks: <FILL_CONST> suppressed", t2, m)
+  ok = ok and t2
+
+  # Test 3: Disable <FILL_CTRL> -- standalone suppressed, compound preserved.
+  m = masked_with(frozenset({"<FILL_CTRL>"}))
+  standalone = m.replace("_<FILL_CTRL>_<FILL_LABEL>", "")
+  t3 = (
+    "<FILL_CTRL>" not in standalone
+    and "_<FILL_CTRL>_<FILL_LABEL>" in m
+    and "<FILL_VAR>" in m
+  )
+  check("disabled_masks: <FILL_CTRL> suppressed, compound preserved", t3, m)
+  ok = ok and t3
+
+  # Test 4: Disable <FILL_OP>.
+  m = masked_with(frozenset({"<FILL_OP>"}))
+  t4 = "<FILL_OP>" not in m and "<FILL_VAR>" in m and "<FILL_CONST>" in m
+  check("disabled_masks: <FILL_OP> suppressed", t4, m)
+  ok = ok and t4
+
+  # Test 5: Disable all five normal kinds -- only goto-flag compounds survive.
+  all_five = frozenset(
+    {"<FILL_VAR>", "<FILL_CONST>", "<FILL_OP>", "<FILL_FUNC>", "<FILL_CTRL>"}
+  )
+  m = masked_with(all_five)
+  t5 = (
+    "<FILL_VAR>" not in m
+    and "<FILL_CONST>" not in m
+    and "<FILL_OP>" not in m
+    and "<FILL_FUNC>" not in m
+    and "<FILL_CTRL>" not in m.replace("_<FILL_CTRL>_<FILL_LABEL>", "")
+    and "_<FILL_CTRL>_<FILL_LABEL>" in m
+    and "_go_<FILL_LABEL>" in m
+  )
+  check("disabled_masks: all five suppressed, goto flags survive", t5, m)
+  ok = ok and t5
+
+  # Test 6 (edge case): Profile validation rejects unknown and
+  # non-disableable mask kinds: kind names are pinned so the vocabulary
+  # cannot silently change.
+  for kind in (
+    "<FILL_BOGUS>",
+    "<FILL_TYPE>",
+    "<FILL_LABEL>",
+    "<FILL_CTRL>",
+    "<FILL_FIELD>",
+  ):
+    try:
+      bad = mod.GenerationProfile(
+        n_bbls=mod.IntRange(2, 4),
+        n_stmts=mod.IntRange(2, 3),
+        min_loop_iter=mod.IntRange(0, 1),
+        p_mask=mod.FloatRange(0.5, 0.7),
+        max_ptr_depth=mod.IntRange(0, 0),
+        p_backedge=mod.FloatRange(0.1, 0.3),
+        p_branch=mod.FloatRange(0.3, 0.5),
+        n_vars=mod.IntRange(6, 10),
+        n_params=mod.IntRange(2, 3),
+        lift_consts=False,
+        features=("--no-fp", "--no-vec", "--no-ptrarith", "--no-intrinsics"),
+        disabled_masks=frozenset({kind}),
+      )
+      bad.validate("bad")
+      check(f"disabled_masks: {kind} rejected", False, "no ValueError")
+      ok = False
+    except ValueError:
+      check(f"disabled_masks: {kind} rejected", True)
+    except Exception as exc:
+      check(f"disabled_masks: {kind} rejected", False, str(exc))
+      ok = False
+
+  return ok
+
+
 def main():
   if len(sys.argv) < 3:
     print("usage: run_codoku_tests.py <codoku.py> <rysmith>")
@@ -1089,9 +1253,11 @@ def main():
   chk_mod = import_codoku_checker(codoku_src)
   unit_tests_pass(mod)
   checker_unit_tests_pass(chk_mod)
-  goto_flag_unit_tests_pass(import_codoku_common(codoku_src), chk_mod)
-  sir_extractor_tests_pass(import_codoku_common(codoku_src), chk_mod)
+  ccommon = import_codoku_common(codoku_src)
+  goto_flag_unit_tests_pass(ccommon, chk_mod)
+  sir_extractor_tests_pass(ccommon, chk_mod)
   complexity_unit_tests_pass(import_codoku_complexity(codoku_src))
+  disabled_masks_unit_tests(ccommon, mod)
 
   with tempfile.TemporaryDirectory(prefix="codoku_gen_") as workdir:
     # Mirror the image layout: codoku + vendored modules + rysmith in one dir.
@@ -1238,7 +1404,7 @@ def main():
         sir_path_str = mod.extract_path_from_sir(sirs[-1])
 
         ptext = (cand_dir / "puzzle.py").read_text()
-        exp_path, _, declared = chk_mod.parse_puzzle_requirements(ptext)
+        exp_path, _, declared, _ = chk_mod.parse_puzzle_requirements(ptext)
         path_blocks = [b.strip() for b in sir_path_str.split("->") if b.strip()]
         try:
           gt_path = cand_dir / "puzzle.gt.py"

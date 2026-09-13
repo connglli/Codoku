@@ -38,10 +38,12 @@ from codoku_common import (
   swap_preamble,
 )
 from codoku_complexity import (
+  DISABLEABLE_MASKS,
   ComplexityEstimate,
   PuzzleMetrics,
   analyze_puzzle,
   estimate_complexity,
+  filter_disabled_masks,
 )
 
 DEFAULT_MAX_ATTEMPTS = 20
@@ -190,7 +192,7 @@ PUZZLE_HEADER_TEMPLATE = """\
 # following the below execution path:
 #
 #//@ EXEC_PATH: {{PATH}}
-#
+{{DISABLED_MASKS}}#
 # ------------------------------------------------
 # Validation
 # ------------------------------------------------
@@ -281,6 +283,7 @@ class GeneratorConfig:
   n_params: int
   lift_consts: bool
   features: tuple[str, ...] = ()
+  disabled_masks: frozenset[str] = frozenset()
 
   def validate(self) -> None:
     if self.n_bbls < 1:
@@ -322,6 +325,7 @@ class GenerationProfile:
   n_params: IntRange
   lift_consts: bool
   features: tuple[str, ...] = ()
+  disabled_masks: frozenset[str] = frozenset()
   acceptance: Mapping[str, tuple[float, float]] = field(default_factory=dict)
 
   def validate(self, name: str) -> None:
@@ -348,6 +352,11 @@ class GenerationProfile:
       raise ValueError(f"{name}.p_branch maximum must be in [0, 1]")
     if self.max_ptr_depth.minimum < 0:
       raise ValueError(f"{name}.max_ptr_depth minimum must be at least 0")
+    unknown_masks = set(self.disabled_masks) - DISABLEABLE_MASKS
+    if unknown_masks:
+      raise ValueError(
+        f"{name}.disabled_masks: mask kinds cannot be disabled {sorted(unknown_masks)}"
+      )
     for metric, bounds in self.acceptance.items():
       low, high = bounds
       if low > high:
@@ -591,11 +600,13 @@ def mask_puzzle(
   defined_funcs: set[str],
   p_mask: float,
   seed: int | None,
+  disabled_masks: frozenset[str] = frozenset(),
 ) -> tuple[str, str, set[int], dict[str, int]]:
   """Return (puzzle_body, gt_body, mask_set, budget_counts).
 
   puzzle_body has both the DUMP_TRACE instrumentation and the <FILL_XXX> masks;
-  gt_body has only the instrumentation.
+  gt_body has only the instrumentation.  Kinds in *disabled_masks* stay
+  visible; their constructs are never masked.
   """
   mask_seed = seed if seed is not None else random.randint(0, 2**31 - 1)
   rng = random.Random(mask_seed)
@@ -621,12 +632,21 @@ def mask_puzzle(
   trace_repls = build_trace_replacements(leaf_node, src)
   budget_counts: dict[str, int] = {}
   mask_repls: list = []
+  const_disabled = "<FILL_CONST>" in disabled_masks
   for idx, stmt in enumerate(maskable):
     if idx in mask_set:
       is_body = stmt.lineno > entry_line
+      stmt_repls: list = []
+      stmt_budget: dict[str, int] = {}
       collect_python_replacements(
-        stmt, src, is_body, mask_repls, budget_counts, local_names, defined_funcs
+        stmt, src, is_body, stmt_repls, stmt_budget, local_names, defined_funcs
       )
+      # Disabled kinds stay visible: drop their spans so only enabled
+      # kinds are masked (goto-flag spans never match a known kind).
+      mask_repls.extend(filter_disabled_masks(stmt_repls, disabled_masks))
+      if not const_disabled:
+        for val, cnt in stmt_budget.items():
+          budget_counts[val] = budget_counts.get(val, 0) + cnt
 
   puzzle_body = apply_replacements(src, trace_repls + mask_repls).decode("utf-8")
   gt_body = apply_replacements(src, trace_repls).decode("utf-8")
@@ -634,23 +654,40 @@ def mask_puzzle(
 
 
 def render_header(
-  leaf_name: str, cfg_edges: list, path_str: str, budget_counts: dict, lift_consts: bool
+  leaf_name: str,
+  cfg_edges: list,
+  path_str: str,
+  budget_counts: dict,
+  lift_consts: bool,
+  disabled_masks: frozenset[str] = frozenset(),
 ) -> str:
   fill_const_lines = "".join(
     f"#//@ <FILL_CONST>: {val} {cnt}\n"
     for val in sorted(budget_counts)
     for cnt in [budget_counts[val]]
   )
-  if lift_consts:
+  # No <FILL_CONST> marks when constants are disabled, so the budget section
+  # (a prose banner over an empty list) is suppressed like lift_consts.
+  if lift_consts or "<FILL_CONST>" in disabled_masks:
     budget_section = ""
   else:
     budget_section = BUDGET_SECTION_TEMPLATE.replace("{{FILL_CONST}}", fill_const_lines)
+
+  # The disabled kinds ride in the banner so the checker re-masks with the
+  # same vocabulary: without it the checker would mask kinds the puzzle left
+  # visible and fail the structural comparison.
+  disabled_masks_str = (
+    f"#\n# In this task, the following masks are disabled:\n#\n#//@ DISABLED_MASKS: {' '.join(sorted(disabled_masks))}\n"
+    if disabled_masks
+    else ""
+  )
 
   cfg_edges_str = "".join(f"#//@ CFG_EDGE: {f} -> {t}\n" for f, t in sorted(cfg_edges))
   header = (
     PUZZLE_HEADER_TEMPLATE.replace("{{LEAF_NAME}}", leaf_name)
     .replace("{{CFG}}", cfg_edges_str if cfg_edges_str else "#   [unknown CFG]\n")
     .replace("{{PATH}}", path_str if path_str else "[unknown]")
+    .replace("{{DISABLED_MASKS}}", disabled_masks_str)
     .replace("{{BUDGET_SECTION}}", budget_section)
   )
   lines = []
@@ -670,6 +707,7 @@ def self_check(
   mask_set: set[int],
   defined_funcs: set[str],
   cfg_edges: list,
+  disabled_masks: frozenset[str] = frozenset(),
 ) -> bool:
   """Re-mask the ground truth and verify it reproduces the puzzle exactly."""
   import difflib
@@ -702,9 +740,11 @@ def self_check(
   for idx, stmt in enumerate(gt_maskable):
     if idx in mask_set:
       is_body = stmt.lineno > entry_line
+      stmt_repls: list = []
       collect_python_replacements(
-        stmt, gt_bytes, is_body, remasked_repls, gt_budget, local_names, defined_funcs
+        stmt, gt_bytes, is_body, stmt_repls, gt_budget, local_names, defined_funcs
       )
+      remasked_repls.extend(filter_disabled_masks(stmt_repls, disabled_masks))
   remasked = apply_replacements(gt_bytes, remasked_repls).decode("utf-8")
   if remasked != puzzle_body:
     print(
@@ -751,6 +791,7 @@ def sample_config(profile: GenerationProfile, rng: random.Random) -> GeneratorCo
     n_params=profile.n_params.sample(rng),
     lift_consts=profile.lift_consts,
     features=profile.features,
+    disabled_masks=profile.disabled_masks,
   )
   config.validate()
   return config
@@ -795,13 +836,15 @@ def install_candidate(
 
   metrics_data = asdict(candidate.metrics)
   metrics_data["masks_by_kind"] = dict(candidate.metrics.masks_by_kind)
+  config_data = asdict(candidate.config)
+  config_data["disabled_masks"] = sorted(candidate.config.disabled_masks)
   manifest = {
     "target": "python",
     "profile": profile_name,
     "master_seed": master_seed,
     "generator_seed": candidate.generator_seed,
     "accepted_attempt": accepted_attempt,
-    "generator_config": asdict(candidate.config),
+    "generator_config": config_data,
     "realized_metrics": metrics_data,
     "complexity_estimate": asdict(candidate.complexity),
   }
@@ -871,13 +914,21 @@ def generate_candidate(
     defined_funcs,
     config.p_mask,
     used_seed,
+    config.disabled_masks,
   )
 
-  if not self_check(gt_body, puzzle_body, mask_set, defined_funcs, cfg_edges):
+  if not self_check(
+    gt_body, puzzle_body, mask_set, defined_funcs, cfg_edges, config.disabled_masks
+  ):
     raise RuntimeError("self-check failed")
 
   header = render_header(
-    leaf_name, cfg_edges, path_str, budget_counts, config.lift_consts
+    leaf_name,
+    cfg_edges,
+    path_str,
+    budget_counts,
+    config.lift_consts,
+    config.disabled_masks,
   )
   (candidate_dir / "puzzle.py").write_text(header + puzzle_body)
   (candidate_dir / "puzzle.gt.py").write_text(gt_body)
