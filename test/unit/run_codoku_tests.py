@@ -393,6 +393,33 @@ def unit_tests_pass(mod) -> bool:
   else:
     check("unit: easy uses reduced feature set", True)
 
+  # Banner extraction is fail-closed: a .sir missing the trusted
+  # comments raises instead of degrading the puzzle banner to [unknown],
+  # and a present `// CFG:` header with no edges is legitimate.
+  from pathlib import Path
+
+  with tempfile.TemporaryDirectory(prefix="codoku_banner_") as banner_dir:
+    bfd = Path(banner_dir)
+    cfg_only = bfd / "cfg_only.sir"
+    cfg_only.write_text("// CFG:\n//   entry -> exit\n")
+    bare = bfd / "bare.sir"
+    bare.write_text("def func_t():\n    return 0\n")
+
+    def raises(fn, arg):
+      try:
+        fn(arg)
+      except RuntimeError:
+        return True
+      return False
+
+    closed = (
+      raises(mod.extract_path_from_sir, cfg_only)
+      and raises(mod.extract_path_from_sir, bare)
+      and raises(mod.extract_cfg_from_sir, bare)
+      and mod.extract_cfg_from_sir(cfg_only) == [("entry", "exit")]
+    )
+    check("unit: banner extraction is fail-closed", closed)
+
   return ok
 
 
@@ -653,7 +680,13 @@ def goto_flag_unit_tests_pass(ccommon, chk_mod) -> bool:
   transfer_leaf, _ = ccommon.find_python_leaf_function(transfer_tree, transfer_src)
   dispatches = ccommon.iter_flag_dispatches(transfer_leaf, transfer_src)
   got = sorted((f, e, s) for f, e, s, _ in dispatches)
-  want = sorted([("_brk_exit", "exit", "exit"), ("_cnt_b0", "b0", "b0")])
+  want = sorted(
+    [
+      ("_brk_exit", "exit", "exit"),
+      ("_cnt_b0", "b0", "b0"),
+      ("_go_exit", "exit", "exit"),
+    ]
+  )
   if got != want:
     check("unit: dispatch transfers follow the loop model", False, str(got))
     ok = False
@@ -661,15 +694,24 @@ def goto_flag_unit_tests_pass(ccommon, chk_mod) -> bool:
     check("unit: dispatch transfers follow the loop model", True)
 
   # (e2) End to end: a mistargeted dispatch fails check_cfg with FAIL_CFG
-  # while the well-targeted original passes.
-  actual_edges = sorted(ccommon.build_python_cfg(transfer_leaf, transfer_src))
-  bad_transfer = transfer_src.replace(b"_brk_exit", b"_brk_b0")
-  for src, want_ok in ((transfer_src, True), (bad_transfer, False)):
+  # while the well-targeted original passes. The fixtures below are real
+  # lowered shapes (see MULTI_LEVEL_SRC / SELF_LOOP_SRC), so their flag
+  # targets are declared by the SIR-projected edges.
+  multi_src = MULTI_LEVEL_SRC.encode("utf-8")
+  multi_leaf, _ = ccommon.find_python_leaf_function(ast.parse(multi_src), multi_src)
+  actual_edges = sorted(ccommon.build_python_cfg(multi_leaf, multi_src))
+  bad_transfer = MULTI_LEVEL_SRC.replace("_brk_exit", "_brk_b0").encode("utf-8")
+  bad_leaf, _ = ccommon.find_python_leaf_function(ast.parse(bad_transfer), bad_transfer)
+  bad_edges = sorted(ccommon.build_python_cfg(bad_leaf, bad_transfer))
+  for src, edges, want_ok in (
+    (multi_src, actual_edges, True),
+    (bad_transfer, bad_edges, False),
+  ):
     t = ast.parse(src)
     node = t.body[0]
     label = "accepts true flag target" if want_ok else "rejects mistargeted flag"
     try:
-      chk_mod.check_cfg(node, src, actual_edges)
+      chk_mod.check_cfg(node, src, edges)
       passed = want_ok
     except chk_mod.CheckFailure as exc:
       passed = (not want_ok) and exc.result == chk_mod.CheckResult.FAIL_CFG
@@ -681,17 +723,9 @@ def goto_flag_unit_tests_pass(ccommon, chk_mod) -> bool:
       continue
     check(f"unit: checker {label}", passed)
     ok = ok and passed
-  good_src = (
-    b"def func_t(x):\n"
-    b"    # ^entry\n"
-    b"    _brk_exit = False\n"
-    b"    # ^b0\n"
-    b"    _cnt_b0 = True\n"
-    b"    # ^exit\n"
-    b"    return x\n"
-  )
-  good_edges = [("entry", "b0"), ("b0", "exit")]
-  bad_src = good_src.replace(b"_brk_exit", b"_brk_nope")
+  self_src = SELF_LOOP_SRC.encode("utf-8")
+  good_src, good_edges = self_src, SELF_LOOP_EDGES
+  bad_src = SELF_LOOP_SRC.replace("_brk_exit", "_brk_nope").encode("utf-8")
   for src, edges, want_ok in (
     (good_src, good_edges, True),
     (bad_src, good_edges, False),
@@ -712,6 +746,285 @@ def goto_flag_unit_tests_pass(ccommon, chk_mod) -> bool:
       continue
     check(f"unit: checker {label}", passed)
     ok = ok and passed
+
+  return ok
+
+
+MULTI_LEVEL_SRC = """\
+def func_493ad2_0(pa0, pa1):
+    _brk_exit = False
+    _cnt_entry = False
+    v0 = 16325
+    v1 = 9223372036854775807
+    v2 = 2147483646
+    v__chk = 0
+    while True:
+        # ^entry
+        v2 = (-1310722 + _cast_int(pa0, 32))
+        v2 = ((536608768 - 536915912) + _cast_int(v0, 32))
+        if (((_cast_int(536870912, 64) - 1) - (0 if (v0) <= (0) else 1073741829))) < ((_cast_int(1610612715, 64) + (-2147483639 // v1 if (-2147483639 < 0) == (v1 < 0) else -(--2147483639 // v1)))):
+            while True:
+                # ^b0
+                v2 = (-1300407837 if (pa0) == (0) else 1301556872)
+                v1 = ((_cast_int(1073747998, 64) - -1073747999) + _cast_int(v0, 64))
+                # ^b1
+                v2 = ((_cast_int(v0, 32) + _cast_int(pa1, 32)) - _cast_int(v1, 32))
+                v1 = (_cast_int(16326, 64) - _cast_int(v0, 64))
+                if (((pa0 - (-524286 // pa0 if (-524286 < 0) == (pa0 < 0) else -(--524286 // pa0))) - (0 * pa1))) >= (((_cast_int(524287, 20) - (-1 & pa0)) - (-524287 ^ pa0))):
+                    # ^b2
+                    v2 = ((_cast_int(pa1, 32) - -551647243) - -264371443)
+                    v0 = (((_cast_int(v2, 16) - -15143) - -32566) + -9771)
+                    v1 = (_cast_int(pa0, 64) - 4517238977076481430)
+                    v2 = (((((_cast_int(pa0, 32) + -2084803915) + 1569701865) + 302539934) - -774380226) + -1630638020)
+                    if ((((v2 + (1714810848 << v2)) + -213193905) + (85069559 * v2))) >= (((v2 - v2) - (1277168334 if (pa0) >= (227482) else v2))):
+                        # ^b3
+                        v0 = (_cast_int(v2, 16) - 19976)
+                        v2 = (((((_cast_int(pa0, 32) - -1906059922) - 1312907534) - -1141817475) - 1738823502) + 2011160631)
+                        v0 = ((_cast_int(pa0, 16) - -16435) - 261)
+                        v1 = ((((_cast_int(v0, 64) + 5885115908715253784) - 5825851685144504661) + 549766622887299018) - 5896690118441534040)
+                        if (((((v1 - -8567497505432704657) + 6840167212111924233) + v1) - -7955833527755308626)) != ((((v1 + (-1109064034639631911 ^ v1)) + (-2819723110373104754 & v1)) - (v1 * v1))):
+                            # ^b4
+                            v1 = (((((_cast_int(pa0, 64) - 4621200110528184748) + 1466042252710198724) + -5731660007434343443) + -3189424937736278487) + 5184697247205444140)
+                            v2 = (((_cast_int(pa1, 32) - 2042850073) + 1657856511) + -1301767476)
+                            v0 = (_cast_int(pa1, 16) + -31966)
+                            v2 = (((_cast_int(v0, 32) - -425826940) - -758129501) - 1849844542)
+                            _brk_exit = True
+                            break
+                        else:
+                            _brk_exit = True
+                            break
+                else:
+                    _cnt_entry = True
+                    break
+            if _brk_exit:
+                _brk_exit = False
+                break
+            if _brk_exit:
+                _brk_exit = False
+                break
+            if _cnt_entry:
+                _cnt_entry = False
+                continue
+        else:
+            break
+    # ^exit
+    v__chk = 0
+    v__chk = (_cast_int(v0, 32) + v__chk)
+    v__chk = (_cast_int(v1, 32) + v__chk)
+    v__chk = (v__chk + v2)
+    v__chk = (_cast_int(pa0, 32) + v__chk)
+    v__chk = (_cast_int(pa1, 32) + v__chk)
+    return v__chk
+
+"""
+MULTI_LEVEL_EDGES = [
+  ("b0", "b1"),
+  ("b1", "b2"),
+  ("b1", "entry"),
+  ("b2", "b0"),
+  ("b2", "b3"),
+  ("b3", "b4"),
+  ("b3", "exit"),
+  ("b4", "exit"),
+  ("entry", "b0"),
+  ("entry", "exit"),
+]
+
+GO_CHAIN_SRC = """\
+def func_277737_0(pa0, pa1):
+    _go_b4 = False
+    v0 = 1390183470
+    v1 = -3376710
+    a0 = [25, _PAD, _PAD, _PAD, _PAD, _PAD, _PAD, _PAD]
+    v__chk = 0
+    while True:
+        # ^entry
+        a0[0] = (_cast_int(2147483647, 64) - _cast_int(v0, 64))
+        v0 = _cast_int(pa1, 32)
+        if (((_cast_int(-1048575, 24) + 4194304) - (~v1))) >= ((_cast_int(-230978, 24) + (3376709 ^ v1))):
+            # ^b0
+            v0 = ((-1074790383 + 1083178992) + _cast_int(v1, 32))
+            v1 = (_cast_int(4194303, 24) - (7832113 if (pa1) == (0) else -64))
+            if (((_cast_int(-1, 16) + 0) - (-1 * pa0))) == (((pa0 - (~pa0)) + 32766)):
+                # ^b1
+                v0 = ((_cast_int(pa1, 32) - -1000007290) - 180518944)
+                a0[0] = (_cast_int(pa0, 64) + 4779544505478012505)
+                a0[0] = (((_cast_int(v0, 64) + 5899122092922097481) - -1804417916858868272) + -6012549381708219711)
+                a0[0] = (((((_cast_int(pa0, 64) + -4271742685527139969) + -5479604327715065043) - -5494721611445278071) + -8742055666264067646) + -3668418034450071883)
+                if not (((((pa0 - 16650) - -10913) - (pa0 * pa0))) >= ((((((pa0 - (32658 if (pa0) < (27043) else 12537)) - (-29464 | pa0)) - -8312) + (30364 * pa0)) - 5588))):
+                    _go_b4 = True
+            else:
+                _go_b4 = True
+        if not _go_b4 and not _go_b4:
+            # ^b2
+            a0[0] = ((_cast_int(-1, 64) + _cast_int(pa1, 64)) + _cast_int(pa1, 64))
+            a0[0] = ((_cast_int(0, 64) - -1688389) + _cast_int(v1, 64))
+            # ^b3
+            v1 = ((_cast_int(-3145728, 24) - _cast_int(pa0, 24)) + -5242880)
+            v0 = (8388608 + _cast_int(v1, 32))
+        _go_b4 = False
+        _go_b4 = False
+        # ^b4
+        v1 = ((_cast_int(-4194306, 24) + 0) - (-1 if (pa1) >= (0) else -1))
+        a0[0] = (_cast_int(4194304, 64) - _cast_int(v0, 64))
+        if (((~v0) - (-2 * v0))) < (((-2145386496 | v0) + (2141192193 ^ v0))):
+            # ^exit
+            v__chk = 0
+            v__chk = (v__chk + v0)
+            v__chk = (_cast_int(v1, 32) + v__chk)
+            v__chk = (_cast_int(_rd(a0, 0), 32) + v__chk)
+            v__chk = (_cast_int(pa0, 32) + v__chk)
+            v__chk = (_cast_int(pa1, 32) + v__chk)
+            return v__chk
+
+"""
+GO_CHAIN_EDGES = [
+  ("b0", "b1"),
+  ("b0", "b4"),
+  ("b1", "b2"),
+  ("b1", "b4"),
+  ("b2", "b3"),
+  ("b3", "b4"),
+  ("b4", "entry"),
+  ("b4", "exit"),
+  ("entry", "b0"),
+  ("entry", "b2"),
+]
+
+ROTATE_CONDLOOP_SRC = """\
+def func_493ad2_0(pa0, pa1):
+    v0 = -115
+    v1 = -6162980551422932163
+    v2 = -623431742
+    v__chk = 0
+    # ^entry
+    v2 = (-1572864 + _cast_int(pa0, 32))
+    v2 = ((-134217615 - 0) + _cast_int(v0, 32))
+    while (((_cast_int(8, 64) - -1073741823) - (2147483645 if (v0) <= (0) else 0))) < ((_cast_int(-1073741813, 64) + (-2147483631 // v1 if (-2147483631 < 0) == (v1 < 0) else -(--2147483631 // v1)))):
+        # ^b0
+        v2 = (-1300407837 if (pa0) == (0) else 1301556872)
+        v1 = ((_cast_int(1073741825, 64) - 1073741708) + _cast_int(v0, 64))
+        if ((pa1 + (0 * pa0))) == (((pa1 + 262028) - (-109 ^ pa1))):
+            # ^b1
+            v1 = (((((_cast_int(v0, 64) - 3618436768347745732) + -1063236922891631481) + -118010701503943815) - -6025136141538511466) + 8406188734100277877)
+            v2 = (((_cast_int(v0, 32) - 1756591453) - 1611936888) - -551647243)
+            v0 = (((_cast_int(v2, 16) - -15143) - -32566) + -9771)
+            v1 = (_cast_int(pa0, 64) - 4517238977076481430)
+            # ^b2
+            v2 = (((((_cast_int(pa0, 32) + -2084803915) + 1569701865) + 302539934) - -774380226) + -1630638020)
+            v1 = (((_cast_int(pa0, 64) + 8822109915019866080) + -8223997732859483313) + -2176851898327607292)
+            v1 = (((_cast_int(pa0, 64) - 7796409652611158611) - 9103323340232698618) + -4386925660137850002)
+            v0 = (((_cast_int(pa0, 16) - -24711) + -16731) - 635)
+            # ^b3
+            v1 = (((((_cast_int(v0, 64) + -4309271748649342592) - 530665322524323784) - 7945833385774970504) - 5878441208365549374) - 8623276992307221721)
+            v2 = (((_cast_int(pa0, 32) - -1743428950) - -2131161064) + 1356436797)
+            v0 = ((((_cast_int(pa1, 16) - -18197) - 20067) + 18539) - 32348)
+            v2 = ((((_cast_int(pa1, 32) + 926130707) - -1707575981) - -214359569) + -96858234)
+            break
+        # ^entry
+        v2 = (-1572864 + _cast_int(pa0, 32))
+        v2 = ((-134217615 - 0) + _cast_int(v0, 32))
+    # ^exit
+    v__chk = 0
+    v__chk = (_cast_int(v0, 32) + v__chk)
+    v__chk = (_cast_int(v1, 32) + v__chk)
+    v__chk = (v__chk + v2)
+    v__chk = (_cast_int(pa0, 32) + v__chk)
+    v__chk = (_cast_int(pa1, 32) + v__chk)
+    return v__chk
+
+"""
+ROTATE_CONDLOOP_EDGES = [
+  ("b0", "b1"),
+  ("b0", "entry"),
+  ("b1", "b2"),
+  ("b2", "b3"),
+  ("b3", "exit"),
+  ("entry", "b0"),
+  ("entry", "exit"),
+]
+
+
+# SIR-projected CFG edges for each lowered shape above: what the fixed
+# flag-aware extractor must reconstruct (multi-level continue, jump-join
+# chain, rotated/condition loop).
+
+SELF_LOOP_SRC = (
+  "def func_t(pa):\n"
+  "    _brk_exit = False\n"
+  "    _cnt_entry = False\n"
+  "    # ^entry\n"
+  "    v = (pa + 1)\n"
+  "    while True:\n"
+  "        # ^b0\n"
+  "        v = (v + 2)\n"
+  "        if (v > 100):\n"
+  "            # ^exit\n"
+  "            v = (v + 3)\n"
+  "            return v\n"
+  "        _cnt_entry = False\n"
+)
+SELF_LOOP_EDGES = [("entry", "b0"), ("b0", "exit"), ("b0", "b0")]
+
+
+def sir_extractor_tests_pass(ccommon, chk_mod) -> bool:
+  """CFG_EDGE/EXEC_PATH are SIR-projected: the extractor (used at puzzle
+  time as an exact-equality gate and by the checker) must reconstruct the
+  lowered shapes' true SIR edges - never the mechanical break edges."""
+  ok = True
+
+  cases = [
+    ("multi-level continue out two levels", MULTI_LEVEL_SRC, MULTI_LEVEL_EDGES),
+    ("jump-join chain", GO_CHAIN_SRC, GO_CHAIN_EDGES),
+    ("rotated/condition loop", ROTATE_CONDLOOP_SRC, ROTATE_CONDLOOP_EDGES),
+    ("self-loop edge kept", SELF_LOOP_SRC, SELF_LOOP_EDGES),
+  ]
+  for name, src_text, want_edges in cases:
+    src = src_text.encode("utf-8")
+    tree = ast.parse(src)
+    leaf, _ = ccommon.find_python_leaf_function(tree, src)
+    got = sorted(ccommon.build_python_cfg(leaf, src))
+    good = set(got) == set(want_edges)
+    if not good:
+      missing = sorted(set(want_edges) - set(got))
+      extra = sorted(set(got) - set(want_edges))
+      check(
+        f"unit: extractor reconstructs {name}",
+        False,
+        f"missing={missing} extra={extra}",
+      )
+      ok = False
+    else:
+      check(f"unit: extractor reconstructs {name}", True)
+
+  # A fill whose flag target renames into a *declared* but wrong block
+  # must fail FAIL_CFG: the extracted CFG re-derives every flag's edge
+  # from its SetFlag site per solution.
+  declared = MULTI_LEVEL_EDGES
+  mutated = MULTI_LEVEL_SRC.replace("_cnt_entry", "_cnt_b0")
+  go_mutated = GO_CHAIN_SRC.replace("_go_b4", "_go_b3")
+  for name, src_text in (
+    ("unrenamed", MULTI_LEVEL_SRC),
+    ("_cnt_ target renamed into a declared block", mutated),
+    ("_go_ target renamed into a declared block", go_mutated),
+  ):
+    src = src_text.encode("utf-8")
+    leaf, _ = ccommon.find_python_leaf_function(ast.parse(src), src)
+    try:
+      chk_mod.check_cfg(leaf, src, declared)
+      check(
+        f"unit: check_cfg {name}",
+        name == "unrenamed",
+        "" if name == "unrenamed" else "no CFG failure raised",
+      )
+      ok = ok and name == "unrenamed"
+    except chk_mod.CheckFailure as exc:
+      wrong = name == "unrenamed" or exc.result != chk_mod.CheckResult.FAIL_CFG
+      check(f"unit: check_cfg {name}", not wrong, str(exc.result))
+      ok = ok and not wrong
+    except Exception as exc:  # noqa: BLE001
+      check(f"unit: check_cfg {name}", False, str(exc))
+      ok = False
 
   return ok
 
@@ -739,6 +1052,30 @@ def checker_unit_tests_pass(chk_mod) -> bool:
   finally:
     shutil.rmtree(hang_dir, ignore_errors=True)
 
+  # Flag validation runs even when no CFG edges are declared: a puzzle
+  # with no declared edges holds no goto flags, so any flag is unknown.
+  flag_src = (
+    "def func_t(pa):\n"
+    "    _brk_exit = False\n"
+    "    # ^entry\n"
+    "    _brk_exit = True\n"
+    "    return pa\n"
+  ).encode("utf-8")
+  flag_leaf = ast.parse(flag_src).body[0]
+  flag_rejected = False
+  flag_cause = None
+  try:
+    chk_mod.check_cfg(flag_leaf, flag_src, [])
+  except chk_mod.CheckFailure as exc:
+    flag_rejected = exc.result == chk_mod.CheckResult.FAIL_CFG
+    flag_cause = exc.message
+  check(
+    "unit: flag rejected with empty declared set",
+    flag_rejected,
+    flag_cause or "no CFG failure raised",
+  )
+  ok = ok and flag_rejected
+
   return ok
 
 
@@ -753,6 +1090,7 @@ def main():
   unit_tests_pass(mod)
   checker_unit_tests_pass(chk_mod)
   goto_flag_unit_tests_pass(import_codoku_common(codoku_src), chk_mod)
+  sir_extractor_tests_pass(import_codoku_common(codoku_src), chk_mod)
   complexity_unit_tests_pass(import_codoku_complexity(codoku_src))
 
   with tempfile.TemporaryDirectory(prefix="codoku_gen_") as workdir:
@@ -857,6 +1195,73 @@ def main():
     # (6) Invalid profile is rejected.
     r = run_codoku(codoku_bin, ["create", "--profile", "bogus"], workdir)
     check("invalid profile rejected", r.returncode == 2, r.stdout + r.stderr)
+
+    # (7) Creation gates: a candidate whose shape makes the extractor
+    # diverge from the SIR CFG (or whose ground-truth trace diverges from
+    # the SIR PATH) must be rejected, never emitted as a puzzle.
+    from pathlib import Path
+
+    cfg = mod.GeneratorConfig(
+      n_bbls=5,
+      n_stmts=2,
+      min_loop_iter=1,
+      p_mask=1.0,
+      max_ptr_depth=0,
+      p_backedge=0.4,
+      p_branch=0.5,
+      n_vars=6,
+      n_params=2,
+      lift_consts=False,
+      features=("--no-fp", "--no-vec", "--no-ptrarith", "--no-intrinsics"),
+    )
+    gate_dir = tempfile.mkdtemp(prefix="codoku_gates_")
+    try:
+      candidate = None
+      error = None
+      cand_dir = Path(gate_dir) / "cand"
+      cand_dir.mkdir(parents=True, exist_ok=True)
+      try:
+        candidate = mod.generate_candidate(
+          cand_dir, cfg, 31, rysmith_path=Path(rysmith).resolve()
+        )
+      except Exception as exc:  # noqa: BLE001
+        error = exc
+      if candidate is None:
+        check("creation: seed-shape candidate created", False, str(error))
+      else:
+        check("creation: seed-shape candidate created", True)
+
+        # The banner must reconstruct the trusted companion .sir banner:
+        # CFG edges == the .sir CFG, and the path == the `// PATH:` walk.
+        sirs = sorted(cand_dir.glob("func_*.sir"))
+        sir_cfg = mod.extract_cfg_from_sir(sirs[-1])
+        sir_path_str = mod.extract_path_from_sir(sirs[-1])
+
+        ptext = (cand_dir / "puzzle.py").read_text()
+        exp_path, _, declared = chk_mod.parse_puzzle_requirements(ptext)
+        path_blocks = [b.strip() for b in sir_path_str.split("->") if b.strip()]
+        try:
+          gt_path = cand_dir / "puzzle.gt.py"
+          trace, rc = chk_mod.run_dumps_trace(gt_path, timeout=60)
+          trace_ok = rc == 0 and trace == path_blocks
+        except RuntimeError:
+          trace_ok = False
+
+        good = (
+          set(declared) == set(sir_cfg)
+          and exp_path == path_blocks
+          and all(e in set(sir_cfg) for e in zip(path_blocks, path_blocks[1:]))
+          and trace_ok
+        )
+        check(
+          "creation marks carry the SIR CFG + PATH trace",
+          good,
+          f"cfg_mismatch={set(declared) != set(sir_cfg)} "
+          f"path_mismatch={exp_path != path_blocks} "
+          f"trace_mismatch={not trace_ok}",
+        )
+    finally:
+      shutil.rmtree(gate_dir, ignore_errors=True)
 
   n_fail = sum(1 for _, ok, _ in results if not ok)
   print(f"\n{len(results) - n_fail}/{len(results)} codoku tests passed")

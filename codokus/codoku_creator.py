@@ -539,7 +539,30 @@ def extract_path_from_sir(sir_path: Path) -> str:
   for line in sir_path.read_text().splitlines():
     if line.startswith("// PATH:"):
       return line.split("PATH:", 1)[1].strip()
-  return ""
+  raise RuntimeError("rysmith banner is missing its '// PATH:' comment")
+
+
+def extract_cfg_from_sir(sir_path: Path) -> list[tuple[str, str]]:
+  """Read the `// CFG:` adjacency comments from the rysmith .sir output."""
+  edges: list[tuple[str, str]] = []
+  in_cfg = False
+  for line in sir_path.read_text().splitlines():
+    if line.startswith("// CFG:"):
+      in_cfg = True
+      continue
+    if not in_cfg:
+      continue
+    if not line.startswith("//   "):
+      break
+    body = line[5:].strip()
+    if "->" not in body:
+      continue
+    lhs, rhs = body.split("->", 1)
+    for dst in rhs.split():
+      edges.append((lhs.strip(), dst))
+  if not in_cfg:
+    raise RuntimeError("rysmith banner is missing its '// CFG:' comment")
+  return edges
 
 
 # ---------------------------------------------------------------------------
@@ -702,7 +725,7 @@ def self_check(
     actual_edges = build_python_cfg(gt_leaf, gt_bytes)
     if set(cfg_edges) != actual_edges:
       print(
-        f"Error: self-check failed: declared CFG edges do not match ground truth.\n"
+        "Error: self-check failed: declared CFG edges do not match ground truth.\n"
         f"  Declared: {set(cfg_edges)}\n  Actual:   {actual_edges}",
         file=sys.stderr,
       )
@@ -834,7 +857,9 @@ def generate_candidate(
   local_names = collect_python_leaf_locals(leaf_node)
   defined_funcs = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
 
-  cfg_edges = sorted(build_python_cfg(leaf_node, src))
+  # rysmith's generated banner is trusted as written: the puzzle banner
+  # embeds the adjacency and PATH comments verbatim.
+  cfg_edges = extract_cfg_from_sir(sir_path)
   path_str = extract_path_from_sir(sir_path)
 
   puzzle_body, gt_body, mask_set, budget_counts = mask_puzzle(

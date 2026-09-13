@@ -5,6 +5,9 @@ target's needs: mask tokens are the angle-bracketed <FILL_XXX> forms.
 """
 
 import ast
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -357,6 +360,47 @@ def find_python_block_comments(src: bytes) -> list[tuple[int, int, str, int]]:
   return comments
 
 
+def block_label_for_line(comments, lineno: int) -> str | None:
+  """Label of the last 'block comment' at or before *lineno*, or None.
+
+  One block comment is emitted per block that carries instructions, so a
+  statement's block is the last comment at or above its line. A labelless
+  prefix (before the first block comment) yields None.
+  """
+  current = None
+  for _, _, label, line in comments:
+    if line <= lineno:
+      current = label
+    else:
+      break
+  return current
+
+
+def run_dumps_trace(py_path: str | Path, timeout: float) -> tuple[list[str], int]:
+  """Run a Python module with DUMP_TRACE=1 and collect its block-entry trace.
+
+  The run is capped at *timeout* seconds; a timeout raises RuntimeError.
+  The trace labels match the block comments the leaf prints, and the
+  caller interprets the exit code.
+  """
+  env = dict(os.environ)
+  env["DUMP_TRACE"] = "1"
+  try:
+    r_run = subprocess.run(
+      [sys.executable, str(py_path)],
+      capture_output=True,
+      text=True,
+      timeout=timeout,
+      env=env,
+    )
+  except subprocess.TimeoutExpired:
+    raise RuntimeError(f"exceeded the {timeout:g}s execution cap")
+  trace = [
+    line[1:].rstrip(":") for line in r_run.stdout.splitlines() if line.startswith("^")
+  ]
+  return trace, r_run.returncode
+
+
 def get_line_indent(src_bytes: bytes, start_byte: int) -> str:
   """Get the whitespace indentation of the line containing start_byte."""
   line_start = src_bytes.rfind(b"\n", 0, start_byte)
@@ -458,10 +502,7 @@ def get_python_maskable_statements(
     for child in ast.iter_child_nodes(node):
       if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
         continue
-      if isinstance(child, ast.If) and any(
-        isinstance(n, ast.Constant) and n.value == "DUMP_TRACE"
-        for n in ast.walk(child.test)
-      ):
+      if _is_dump_trace_guard(child):
         continue
       if isinstance(child, ast.Assign) and child.lineno < entry_line:
         is_scratch = False
@@ -478,13 +519,7 @@ def get_python_maskable_statements(
   decls_before_entry.sort(key=lambda s: (s.lineno, s.col_offset))
 
   def get_block_for_line(lineno):
-    current_block = None
-    for _, _, label, line in comments:
-      if line <= lineno:
-        current_block = label
-      else:
-        break
-    return current_block
+    return block_label_for_line(comments, lineno)
 
   def get_loop_header(loop_node):
     for _, _, label, line in comments:
@@ -496,10 +531,7 @@ def get_python_maskable_statements(
     if not hasattr(node, "lineno"):
       return
     # Skip trace blocks
-    if isinstance(node, ast.If) and any(
-      isinstance(n, ast.Constant) and n.value == "DUMP_TRACE"
-      for n in ast.walk(node.test)
-    ):
+    if _is_dump_trace_guard(node):
       return
     # Flag setters/resets are maskable in any block: a revealed setter next
     # to masked guards would answer the blank.
@@ -852,8 +884,97 @@ def exit_label_after(comments, node) -> str:
   return "exit"
 
 
+def _is_dump_trace_guard(node) -> bool:
+  """True for a ``DUMP_TRACE`` instrumentation guard (never program code)."""
+  return isinstance(node, ast.If) and any(
+    isinstance(n, ast.Constant) and n.value == "DUMP_TRACE" for n in ast.walk(node.test)
+  )
+
+
+def _is_flag_set(node) -> bool:
+  """True for a ``flag = True`` statement (a SetFlag emission site).
+
+  ``flag = False`` is a reset (it unmasks a flag for later dispatches) and
+  is deliberately not a set: resets are fall-through plumbing.
+  """
+  if not (
+    isinstance(node, ast.Assign)
+    and len(node.targets) == 1
+    and isinstance(node.targets[0], ast.Name)
+  ):
+    return False
+  name = node.targets[0].id
+  return (
+    goto_flag_target(name) is not None
+    and isinstance(node.value, ast.Constant)
+    and bool(node.value.value)
+  )
+
+
+def _is_flag_dispatch_test(test) -> bool:
+  """True for a dispatch guard's test: a positive test of one or more flags.
+
+  The Python backend emits in-flight transfer dispatches as ``if flag:`` /
+  ``if flag and flag2 ...:``; a negated test (``if not flags:``) is a
+  Guarded body wrapping the normal path instead.
+  """
+  if isinstance(test, ast.Name):
+    return goto_flag_target(test.id) is not None
+  if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And):
+    return all(
+      isinstance(v, ast.Name) and goto_flag_target(v.id) is not None
+      for v in test.values
+    )
+  return False
+
+
+def _is_guarded_test(test) -> bool:
+  """True for a Guarded body's test: ``not flag`` / ``not f1 and not f2``.
+
+  A Guarded body wraps a normal-path item against in-flight join flags;
+  the flag-in-flight path is unreachable here (it bypassed the guard at
+  each set site), so the walk treats the body as fall-through-only.
+  """
+  if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+    operand = test.operand
+    return isinstance(operand, ast.Name) and goto_flag_target(operand.id) is not None
+  if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And):
+    return all(
+      isinstance(v, ast.UnaryOp)
+      and isinstance(v.op, ast.Not)
+      and isinstance(v.operand, ast.Name)
+      and goto_flag_target(v.operand.id) is not None
+      for v in test.values
+    )
+  return False
+
+
 def build_python_cfg(leaf_node: ast.FunctionDef, src: bytes) -> set[tuple[str, str]]:
-  """Extract the CFG edges directly from the Python leaf function's AST."""
+  """Extract the CFG edges from the Python leaf function's AST.
+
+  The Python backend lowers multi-level transfers into flag state and
+  peepholes the loop structure, so a purely structural walk misreports
+  the SIR CFG in three ways: the ``break`` paired with a ``flag = True``
+  site is the mechanical inner-loop unwind (its structural target is not
+  the SIR edge), dispatch guards re-enter a chain that bypasses the
+  structural targets, and self-edge filtering drops a legitimate
+  self-loop. The walk is flag-aware:
+
+  - a prepass turns each ``flag = True`` site into its true edge
+    (source block -> the flag's encoded target) and marks the breaks in
+    the set's straight-line run as mechanical (suppressed);
+  - ``if flag:`` dispatch guards are fall-through-only: their taken
+    branch re-enters a chain already recorded at the set site;
+  - ``if not flags:`` guarded bodies wrap the normal path only;
+  - ``DUMP_TRACE`` instrumentation guards are scaffolding, never edges;
+  - loop bodies whose tail pendings re-anchor at a header comment carry
+    the implicit backedge, self-loops included;
+  - a ``while <cond>:`` loop's condition-false side exits to the loop's
+    successor: the post-loop pendings anchor at the exit edge's source.
+  The backend's ``try:`` is the ``_frame`` provenance wrapper: its body
+  is the leaf's code; ``finally:``, ``orelse``, and ``handlers`` are
+  mechanical or off-path plumbing without SIR edges.
+  """
   comments = find_python_block_comments(src)
   comments = [c for c in comments if leaf_node.lineno <= c[3] <= leaf_node.end_lineno]
 
@@ -864,10 +985,71 @@ def build_python_cfg(leaf_node: ast.FunctionDef, src: bytes) -> set[tuple[str, s
     return exit_label_after(comments, node)
 
   edges = set()
+  suppressed = set()
   processed_comments = set()
+
+  # --- Prepass: SetFlag sites and the mechanical breaks they pair with. ---
+  # Each statement list anchors its own comment region: the first arm of
+  # an `if`/`while` runs from the keyword's line (a comment right after
+  # belongs to that arm), a second arm from just above its first
+  # statement. A set site's source block is the arm's last comment before
+  # it, falling back to the block that branches into the arm.
+
+  def scan(stmts, floor, node):
+    """Collect set-site edges into *edges* and mark mechanical breaks."""
+    arm_set = False
+    for stmt in stmts:
+      if _is_dump_trace_guard(stmt):
+        continue
+      if _is_flag_set(stmt):
+        arm_comments = [
+          lbl for _, _, lbl, line in comments if floor <= line <= stmt.lineno
+        ]
+        source = (
+          arm_comments[-1]
+          if arm_comments
+          else block_label_for_line(comments, node.lineno)
+        )
+        if source is not None:
+          edges.add((source, goto_flag_target(stmt.targets[0].id)))
+        arm_set = True
+        continue
+      if isinstance(stmt, ast.Break):
+        # A `break` inside a set's straight-line run is the mechanical
+        # dispatch-chain unwind; the real transfer is the flag's edge.
+        # The run marker survives plain statements, so an unwind stays
+        # mechanical even if the backend reorders around it.
+        if arm_set:
+          suppressed.add(stmt.lineno)
+        arm_set = False
+        continue
+      if isinstance(stmt, ast.If) and _is_flag_dispatch_test(stmt.test):
+        arm_set = False
+        continue
+      if isinstance(stmt, ast.If):
+        arm_set = False
+        scan(stmt.body, stmt.lineno, stmt)
+        if stmt.orelse:
+          scan(stmt.orelse, stmt.orelse[0].lineno - 1, stmt)
+      elif isinstance(stmt, ast.While):
+        arm_set = False
+        scan(stmt.body, stmt.lineno, stmt)
+        if stmt.orelse:
+          scan(stmt.orelse, stmt.orelse[0].lineno - 1, stmt)
+      elif isinstance(stmt, ast.Try):
+        arm_set = False
+        scan(stmt.body, stmt.lineno + 1, stmt)
+      elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        continue
+
+  scan(leaf_node.body, leaf_node.lineno, leaf_node)
+
+  # --- Structural walk (flag-aware). ---
 
   def walk(node, pending, loop_stack):
     if not hasattr(node, "lineno"):
+      return pending
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
       return pending
 
     # Process any comments that occur before or at this node's line
@@ -879,7 +1061,16 @@ def build_python_cfg(leaf_node: ast.FunctionDef, src: bytes) -> set[tuple[str, s
             edges.add((p, label))
         pending = [label]
 
+    if _is_dump_trace_guard(node):
+      return pending
+    if _is_flag_set(node):
+      # The arm's flow terminates at the flag's target (the set site is
+      # always the last flow item of its arm, next to the suppressed
+      # unwind or nothing at all for a jump-join).
+      return []
     if isinstance(node, ast.Break):
+      if node.lineno in suppressed:
+        return []
       if loop_stack:
         innermost_loop = loop_stack[-1]
         loop_exit = get_exit_label_after(innermost_loop)
@@ -894,10 +1085,25 @@ def build_python_cfg(leaf_node: ast.FunctionDef, src: bytes) -> set[tuple[str, s
           edges.add((p, loop_header))
       return []
     elif isinstance(node, ast.Return):
+      # A `ret` terminates its own block, never jumps into it: when the
+      # return sits in the exit block's code, its pendings re-anchor at
+      # the `# ^exit` comment and adding (exit, exit) is spurious.
       for p in pending:
-        edges.add((p, "exit"))
+        if p != "exit":
+          edges.add((p, "exit"))
       return []
     elif isinstance(node, ast.If):
+      if _is_flag_dispatch_test(node.test):
+        # Dispatch plumbing: the taken branch re-enters a chain already
+        # recorded at its set site.
+        return pending
+      if _is_guarded_test(node.test):
+        # Guarded bodies wrap the normal path only: the flag-in-flight
+        # path is unreachable here, so the walk is fall-through-only.
+        pending = walk(node.test, pending, loop_stack)
+        for child in node.body:
+          pending = walk(child, pending, loop_stack)
+        return pending
       pending = walk(node.test, pending, loop_stack)
 
       then_pending = pending
@@ -909,7 +1115,7 @@ def build_python_cfg(leaf_node: ast.FunctionDef, src: bytes) -> set[tuple[str, s
         else_pending = walk(child, else_pending, loop_stack)
 
       return then_pending + else_pending
-    elif isinstance(node, (ast.While, ast.For)):
+    elif isinstance(node, ast.While):
       loop_stack.append(node)
       loop_header = get_loop_header(node)
       loop_exit = get_exit_label_after(node)
@@ -922,29 +1128,36 @@ def build_python_cfg(leaf_node: ast.FunctionDef, src: bytes) -> set[tuple[str, s
       for child in node.body:
         body_pending = walk(child, body_pending, loop_stack)
 
+      # Body-tail pendings repeat the loop: an implicit backedge, and a
+      # legitimate self-loop when the body's first block is the loop head.
       for bp in body_pending:
-        if bp != loop_header:
-          edges.add((bp, loop_header))
+        edges.add((bp, loop_header))
 
       loop_stack.pop()
 
-      if isinstance(node, ast.While):
-        # A constant-truthy test (rysmith emits `while True:` for
-        # unconditional Loop nodes) never exits via its condition: the
-        # condition-false edges are spurious, and there is no fall-through
-        # (break edges already target loop_exit directly).
-        is_infinite = isinstance(node.test, ast.Constant) and bool(node.test.value)
-        if not is_infinite:
-          for p in pending:
-            edges.add((p, loop_exit))
-          edges.add((loop_header, loop_exit))
-          return [loop_header]
-        return []
-      else:
-        # rysmith's Python backend never emits for loops (see
-        # get_python_maskable_statements), so this branch is kept in
-        # lockstep with puzzle_common.py's for(;;) model: no fall-through.
-        return []
+      # A constant-truthy test (rysmith emits `while True:` for an
+      # unconditional Loop node) never exits via its condition; every
+      # escape is an explicit transfer recorded at its own site.
+      is_infinite = isinstance(node.test, ast.Constant) and bool(node.test.value)
+      if not is_infinite:
+        # `while <cond>:`: the loop's condition-false side is a real
+        # SIR edge from the loop header to the successor block. When
+        # the header was rotated (its body tail duplicates the
+        # pre-loop code) the pre-loop block is that header; the
+        # pendings after the loop anchor there.
+        header_label = block_label_for_line(comments, node.lineno)
+        if header_label is not None:
+          edges.add((header_label, loop_exit))
+          return [header_label]
+      return []
+
+    elif isinstance(node, ast.Try):
+      # The backend's `try:` is the `_frame` provenance wrapper: its body
+      # is the leaf's code; `finally:`, `orelse`, and `handlers` are
+      # mechanical or off-path plumbing without SIR edges.
+      for child in node.body:
+        pending = walk(child, pending, loop_stack)
+      return pending
 
     cb = pending
     for child in ast.iter_child_nodes(node):
@@ -955,11 +1168,7 @@ def build_python_cfg(leaf_node: ast.FunctionDef, src: bytes) -> set[tuple[str, s
   for stmt in leaf_node.body:
     cb = walk(stmt, cb, [])
 
-  filtered_edges = set()
-  for f, t in edges:
-    if f and t and f != t:
-      filtered_edges.add((f, t))
-  return filtered_edges
+  return edges
 
 
 def iter_flag_dispatches(leaf_node: ast.FunctionDef, src: bytes):
@@ -967,11 +1176,14 @@ def iter_flag_dispatches(leaf_node: ast.FunctionDef, src: bytes):
 
   A dispatch guard tests one goto flag (`if F:` / `if not F:`) and moves
   control with break/continue/return in the taken branch. The structural
-  destination uses the same loop model as build_python_cfg. Only `_brk_` /
-  `_cnt_` spellings are yielded: their dispatch performs the claimed
-  transfer in one hop. `_go_` flags unwind through multi-hop dispatch
-  chains (a guard's break lands mid-chain), so transfer equality does not
-  hold for them. Guards without a loop transfer yield nothing.
+  destination uses the same loop model as build_python_cfg. All spellings
+  (`_go_`, `_brk_` / `_cnt_` and their full-word forms) are yielded; the
+  checker applies transfer equality where it is meaningful - the one-hop
+  `_brk_` / `_cnt_` casts - while `_go_` flags unwind through multi-hop
+  chains (a guard's break lands mid-chain), so their equality does not
+  hold and their target is validated by topology instead. DUMP_TRACE
+  instrumentation guards are scaffolding and yield nothing. Guards
+  without a loop transfer yield nothing.
   """
   comments = find_python_block_comments(src)
   comments = [c for c in comments if leaf_node.lineno <= c[3] <= leaf_node.end_lineno]
@@ -981,7 +1193,7 @@ def iter_flag_dispatches(leaf_node: ast.FunctionDef, src: bytes):
     if isinstance(node, (ast.Break, ast.Continue, ast.Return)):
       return node
     if isinstance(
-      node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.While, ast.For)
+      node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.While)
     ):
       return None
     for child in ast.iter_child_nodes(node):
@@ -991,6 +1203,8 @@ def iter_flag_dispatches(leaf_node: ast.FunctionDef, src: bytes):
     return None
 
   def walk(node, loop_stack):
+    if _is_dump_trace_guard(node):
+      return
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
       if node is not leaf_node:
         return
@@ -999,22 +1213,21 @@ def iter_flag_dispatches(leaf_node: ast.FunctionDef, src: bytes):
       while isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
         test, branch = test.operand, node.orelse if branch is node.body else node.body
       if isinstance(test, ast.Name) and goto_flag_target(test.id) is not None:
-        if test.id.startswith(("_brk_", "_break_", "_cnt_", "_continue_")):
-          for stmt in branch:
-            keyword = find_keyword(stmt)
-            if keyword is None:
-              continue
-            if isinstance(keyword, ast.Break) and loop_stack:
-              dest = exit_label_after(comments, loop_stack[-1])
-            elif isinstance(keyword, ast.Continue) and loop_stack:
-              dest = loop_header_label(comments, loop_stack[-1])
-            elif isinstance(keyword, ast.Return):
-              dest = "exit"
-            else:
-              continue
-            found.append((test.id, goto_flag_target(test.id), dest, node.lineno))
-            break
-    if isinstance(node, (ast.While, ast.For)):
+        for stmt in branch:
+          keyword = find_keyword(stmt)
+          if keyword is None:
+            continue
+          if isinstance(keyword, ast.Break) and loop_stack:
+            dest = exit_label_after(comments, loop_stack[-1])
+          elif isinstance(keyword, ast.Continue) and loop_stack:
+            dest = loop_header_label(comments, loop_stack[-1])
+          elif isinstance(keyword, ast.Return):
+            dest = "exit"
+          else:
+            continue
+          found.append((test.id, goto_flag_target(test.id), dest, node.lineno))
+          break
+    if isinstance(node, ast.While):
       loop_stack.append(node)
       for child in ast.iter_child_nodes(node):
         walk(child, loop_stack)

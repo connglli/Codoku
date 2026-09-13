@@ -24,7 +24,6 @@ stages are skipped, making it unambiguous *why* a solution is wrong.
 import argparse
 import ast
 import os
-import subprocess
 import sys
 import tempfile
 from enum import Enum
@@ -39,6 +38,7 @@ from codoku_common import (
   get_python_maskable_statements,
   goto_flag_target,
   iter_flag_dispatches,
+  run_dumps_trace,
   strip_refractir_prefix,
 )
 
@@ -277,25 +277,19 @@ def infer_mask_set_from_puzzle(
 
 
 def check_cfg(func_node, src: bytes, cfg_edges: list[tuple[str, str]]) -> None:
-  """Verify the solution's CFG matches the declared edges exactly.
-
-  Also verify every goto flag references a declared CFG node (the name
-  encodes its target, so an unknown target is a structural error).
-  """
-  if not cfg_edges:
-    return
-
-  actual_edges = build_python_cfg(func_node, src)
-  declared_edges = set(cfg_edges)
-  if declared_edges != actual_edges:
-    unexpected = actual_edges - declared_edges
-    missing = declared_edges - actual_edges
-    msg_parts = ["CFG topology mismatch."]
-    for f, t in sorted(unexpected):
-      msg_parts.append(f"  unexpected edge: {f} -> {t}")
-    for f, t in sorted(missing):
-      msg_parts.append(f"  missing edge:    {f} -> {t}")
-    fail(CheckResult.FAIL_CFG, "\n".join(msg_parts))
+  """Verify the solution's CFG matches the declared edges exactly."""
+  if cfg_edges:
+    actual_edges = build_python_cfg(func_node, src)
+    declared_edges = set(cfg_edges)
+    if declared_edges != actual_edges:
+      unexpected = actual_edges - declared_edges
+      missing = declared_edges - actual_edges
+      msg_parts = ["CFG topology mismatch."]
+      for f, t in sorted(unexpected):
+        msg_parts.append(f"  unexpected edge: {f} -> {t}")
+      for f, t in sorted(missing):
+        msg_parts.append(f"  missing edge:    {f} -> {t}")
+      fail(CheckResult.FAIL_CFG, "\n".join(msg_parts))
 
   declared_nodes = {n for edge in cfg_edges for n in edge}
   for node in ast.walk(func_node):
@@ -311,16 +305,21 @@ def check_cfg(func_node, src: bytes, cfg_edges: list[tuple[str, str]]) -> None:
         f"Valid targets: {sorted(declared_nodes)}",
       )
 
-  # Edge check: each dispatch guard must transfer to the block its flag
-  # names. Flag renames are behavior-neutral (remask/CFG/path cannot see
-  # them), so membership alone would accept a declared-but-wrong target.
+  # Edge check: each one-hop dispatch guard (`_brk_` / `_cnt_` pairings)
+  # must transfer to the block its flag names. Flag renames are
+  # behavior-neutral (remask/CFG/path cannot see them), so membership
+  # alone would accept a declared-but-wrong target. `_go_` flags unwind
+  # through multi-hop dispatch chains, so their transfer equality does
+  # not hold: their target is instead validated by topology, where the
+  # extractor re-derives each flag's edge from its SetFlag site.
   for flag, encoded, structural, lineno in iter_flag_dispatches(func_node, src):
-    if encoded != structural:
-      fail(
-        CheckResult.FAIL_CFG,
-        f"Goto flag '{flag}' claims target '{encoded}' but line {lineno} "
-        f"transfers to '{structural}'.",
-      )
+    if flag.startswith(("_brk_", "_break_", "_cnt_", "_continue_")):
+      if encoded != structural:
+        fail(
+          CheckResult.FAIL_CFG,
+          f"Goto flag '{flag}' claims target '{encoded}' but line {lineno} "
+          f"transfers to '{structural}'.",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -334,23 +333,13 @@ def run_python_solution(py_path: str) -> tuple[list[str], int]:
   The run is capped at 5s; a timeout fails the PATH/OUTPUT stages with
   FAIL_TIMEOUT.
   """
-  env = dict(os.environ)
-  env["DUMP_TRACE"] = "1"
   try:
-    r_run = subprocess.run(
-      [sys.executable, py_path], capture_output=True, text=True, timeout=5, env=env
-    )
-  except subprocess.TimeoutExpired:
+    return run_dumps_trace(py_path, timeout=5.0)
+  except RuntimeError as e:
     fail(
       CheckResult.FAIL_TIMEOUT,
-      "Solution timed out after 5s while running.",
+      f"Solution timed out while running: {e}",
     )
-
-  trace = []
-  for line in r_run.stdout.splitlines():
-    if line.startswith("^"):
-      trace.append(line[1:].rstrip(":"))
-  return trace, r_run.returncode
 
 
 # ---------------------------------------------------------------------------
