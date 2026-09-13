@@ -158,6 +158,40 @@ def _f2i(x, n):
     return v
 
 
+def _need_int(v, msg):
+    # Reject bool and subclasses with overloaded arithmetic/comparisons.
+    if type(v) is not int:
+        _trap(msg)
+
+
+def _chk_geom(buf, off, stride, lo, hi):
+    # Validate internal consistency, not the authenticity of a root
+    # extent. Root-object metadata must come from the trusted frontend.
+    for v in (off, stride, lo, hi):
+        _need_int(v, "invalid pointer geometry")
+
+    if buf is None:
+        if off != 0 or stride != 0 or lo != 0 or hi != 0:
+            _trap("invalid null pointer geometry")
+        return
+
+    if type(buf) is not list:
+        _trap("invalid pointer buffer")
+    if stride < 0:
+        _trap("invalid pointer stride")
+    if lo < 0 or hi < 0 or off < 0:
+        _trap("invalid pointer offset")
+    if lo > hi:
+        _trap("invalid pointer extent")
+    if off < lo or off > hi:
+        _trap("pointer out of object bounds")
+
+    # Do not require hi <= len(buf). Compact scalar boxes hold one
+    # entry even when their logical extent is multiple bytes, e.g.
+    # _Ptr([21], 0, 4, 0, 4).
+    # Actual list indexing is checked separately at dereference time.
+
+
 class _Ptr:
     # A provenance-tracked pointer into a flat leaf-slot list: `off` is
     # the current leaf offset, `stride` the pointee's leaf count, and
@@ -165,15 +199,51 @@ class _Ptr:
     # is the legal one-past-end position). `frame` is the liveness cell of
     # the activation owning the storage, or None for a pointer that owns
     # none (null).
-    __slots__ = ("buf", "off", "stride", "lo", "hi", "frame")
+    #
+    # Pointer metadata is read-only; storage and frame remain mutable.
+    #
+    # Construction from buf is retained for frontend-generated roots.
+    # It cannot independently authenticate caller-supplied root bounds.
+    __slots__ = ("_state",)
 
     def __init__(self, buf, off, stride, lo, hi, frame=None):
-        self.buf = buf
-        self.off = off
-        self.stride = stride
-        self.lo = lo
-        self.hi = hi
-        self.frame = frame
+        # Explicitly calling __init__ again must not replace provenance.
+        if hasattr(self, "_state"):
+            _trap("pointer metadata is immutable")
+        _chk_geom(buf, off, stride, lo, hi)
+        object.__setattr__(
+            self, "_state", (buf, off, stride, lo, hi, frame)
+        )
+
+    def __setattr__(self, name, value):
+        _trap("pointer metadata is immutable")
+
+    def __delattr__(self, name):
+        _trap("pointer metadata is immutable")
+
+    @property
+    def buf(self):
+        return self._state[0]
+
+    @property
+    def off(self):
+        return self._state[1]
+
+    @property
+    def stride(self):
+        return self._state[2]
+
+    @property
+    def lo(self):
+        return self._state[3]
+
+    @property
+    def hi(self):
+        return self._state[4]
+
+    @property
+    def frame(self):
+        return self._state[5]
 
 
 _NULL = _Ptr(None, 0, 0, 0, 0)
@@ -182,10 +252,10 @@ _PAD = ["pad"]  # interior byte of a wider leaf; never a valid access
 
 
 def _live(p):
-    # SPEC 7.5 rule 27. A returned activation's locals are dead, but the
-    # list holding them outlives the call as long as a pointer references
-    # it, so liveness is asked of the frame rather than observed of the
-    # storage.
+    # SPEC 7.5 rule 27. A returned activation's locals are dead, but
+    # their storage may remain referenced by a pointer.
+    if type(p) is not _Ptr:
+        _trap("invalid pointer")
     if p.frame is not None and not p.frame[0]:
         _trap("access through a pointer to a returned activation")
 
@@ -209,69 +279,180 @@ def _vrd(buf, off, n, stride):
     return [_rd(buf, off + k * stride) for k in range(n)]
 
 
+def _chk_ptr(p):
+    # Geometry was validated at construction and ordinary attribute
+    # mutation is prohibited. Only check the helper's pointer precondition.
+    if type(p) is not _Ptr:
+        _trap("invalid pointer")
+    if p.buf is None:
+        _trap("null pointer")
+
+
+def _chk_deref(p, msg):
+    # Call only after _chk_ptr.
+    #
+    # Zero-sized pointees cannot be loaded or stored through these
+    # scalar access helpers. In particular, off == hi must never pass
+    # merely because stride == 0.
+    if (
+        p.stride <= 0
+        or p.off < p.lo
+        or p.off >= p.hi
+        or p.off + p.stride > p.hi
+    ):
+        _trap(msg)
+
+    # Scalar boxes may have a logical extent larger than len(buf),
+    # but the entry actually accessed must exist.
+    if p.off >= len(p.buf):
+        _trap(msg)
+
+
+def _derive(p, off, stride, lo, hi, msg):
+    # Internal helper: callers have already established that p is a
+    # valid non-null pointer. Construction validates child geometry exactly once.
+    child = _Ptr(p.buf, off, stride, lo, hi, p.frame)
+
+    # Internal consistency is not enough: derived bounds must also
+    # remain within the parent's extent.
+    if child.lo < p.lo or child.hi > p.hi:
+        _trap(msg)
+
+    return child
+
+
 def _padd(p, n):
+    if type(p) is not _Ptr:
+        _trap("invalid pointer arithmetic")
     if p.buf is None:
         _trap("pointer arithmetic on null")
+    _need_int(n, "invalid pointer offset")
+    _chk_ptr(p)
+
     off = p.off + n * p.stride
     if off < p.lo or off > p.hi:
         _trap("pointer arithmetic out of object bounds")
-    return _Ptr(p.buf, off, p.stride, p.lo, p.hi, p.frame)
+
+    return _derive(p, off, p.stride, p.lo, p.hi, "pointer extent out of parent bounds")
 
 
 def _pdiff(p, q):
+    if type(p) is not _Ptr or type(q) is not _Ptr:
+        _trap("invalid pointer subtraction")
     if p.buf is None or q.buf is None or p.buf is not q.buf:
         _trap("cross-object pointer subtraction")
+
+    _chk_ptr(p)
+    _chk_ptr(q)
+    if p.stride <= 0:
+        _trap("invalid pointer stride")
+
     return (p.off - q.off) // p.stride
 
 
 def _peq(p, q):
+    if type(p) is not _Ptr or type(q) is not _Ptr:
+        _trap("invalid pointer comparison")
     return p.buf is q.buf and p.off == q.off
 
 
 def _prel(p, q):
+    if type(p) is not _Ptr or type(q) is not _Ptr:
+        _trap("invalid pointer comparison")
     if p.buf is None or q.buf is None or p.buf is not q.buf:
         _trap("relational compare of cross-object pointers")
+
+    _chk_ptr(p)
+    _chk_ptr(q)
     return p.off - q.off
 
 
 def _load(p):
+    if type(p) is not _Ptr:
+        _trap("invalid pointer dereference")
     if p.buf is None:
         _trap("null pointer dereference")
+
     _live(p)
-    if p.off < p.lo or p.off + p.stride > p.hi:
-        _trap("pointer dereference out of bounds")
+    _chk_ptr(p)
+    _chk_deref(p, "pointer dereference out of bounds")
     return _rd(p.buf, p.off)
 
 
 def _store(p, v):
+    if type(p) is not _Ptr:
+        _trap("invalid pointer store")
     if p.buf is None:
         _trap("null pointer store")
+
     _live(p)
-    if p.off < p.lo or p.off + p.stride > p.hi:
-        _trap("pointer store out of bounds")
+    _chk_ptr(p)
+    _chk_deref(p, "pointer store out of bounds")
+
+    # Do not use _rd here: initializing _UNDEF is valid, but overwriting
+    # the interior of an existing wider value is not.
+    if p.buf[p.off] is _PAD:
+        _trap("access to the interior of a value")
+
     p.buf[p.off] = v
 
 
 def _pidx(p, i, n, estride):
+    if type(p) is not _Ptr:
+        _trap("invalid ptrindex pointer")
     if p.buf is None:
         _trap("ptrindex on null pointer")
+
+    for v in (i, n, estride):
+        _need_int(v, "invalid ptrindex argument")
+
     _live(p)
+    _chk_ptr(p)
+
     if p.off >= p.hi:
         _trap("ptrindex on one-past-end pointer")
+    if n < 0 or estride < 0:
+        _trap("invalid ptrindex extent")
     if i < 0 or i > n:
         _trap("ptrindex index out of range")
-    return _Ptr(p.buf, p.off + i * estride, estride, p.off, p.off + n * estride, p.frame)
+
+    # i == n constructs a legal one-past-end pointer, not an
+    # accessible element. _derive traps a child extent past the parent.
+    hi = p.off + n * estride
+
+    return _derive(
+        p, p.off + i * estride, estride, p.off, hi,
+        "ptrindex extent out of parent bounds"
+    )
 
 
 def _pfield(p, foff, flen, slen):
     # Provenance of a field pointer is the whole containing struct
     # (SPEC 7.5 rule 15): arithmetic may roam across sibling fields.
+    if type(p) is not _Ptr:
+        _trap("invalid ptrfield pointer")
     if p.buf is None:
         _trap("ptrfield on null pointer")
+
+    for v in (foff, flen, slen):
+        _need_int(v, "invalid ptrfield argument")
+
     _live(p)
+    _chk_ptr(p)
+
     if p.off >= p.hi:
         _trap("ptrfield on one-past-end pointer")
-    return _Ptr(p.buf, p.off + foff, flen, p.off, p.off + slen, p.frame)
+    if foff < 0 or flen < 0 or slen < 0:
+        _trap("invalid ptrfield extent")
+    if foff + flen > slen:
+        _trap("ptrfield field out of struct bounds")
+
+    hi = p.off + slen
+
+    return _derive(
+        p, p.off + foff, flen, p.off, hi,
+        "ptrfield extent out of parent bounds"
+    )
 )PY";
 
     // --no-ub-guards preamble: the same value semantics as
@@ -307,8 +488,11 @@ def _f32(x):
 
 
 class _Ptr:
-    # Same shape as the guarded build's, `frame` included, so a pointer
-    # means the same thing either way; nothing here consults it.
+    # Guard-free counterpart of the guarded build's `_Ptr`, with identical
+    # positional construction (`_Ptr(buf, off, stride, lo, hi, frame)`),
+    # plain mutable fields and no validation. The two builds are never
+    # mixed (one preamble per module), so the only shared contract is
+    # the constructor's argument order.
     __slots__ = ("buf", "off", "stride", "lo", "hi", "frame")
 
     def __init__(self, buf, off, stride, lo, hi, frame=None):
