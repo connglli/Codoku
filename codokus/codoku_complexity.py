@@ -612,11 +612,12 @@ def analyze_puzzle(path: Path, gt_path: Path | None = None) -> PuzzleMetrics:
 
   CFG markers, masks, budgets, and sizes come from the puzzle itself.
   Vocabulary (Halstead) and data flow (DepDegree) are measured on the
-  ground-truth leaf when available — the explicit gt_path (generation),
-  else the oracle sibling or same-directory <stem>.gt.py — because masked
-  holes carry no vocabulary of their own.  Without any usable GT, fall back
-  to the placeholder-demasked puzzle (same mapping as solution-space
-  parsing); anything still unparsable, or without a leaf, measures zero.
+  ground-truth leaf when available (the explicit gt_path at generation,
+  else the oracle sibling or the same-directory <stem>.gt.py) because
+  masked holes carry no vocabulary of their own.  Without any usable GT,
+  fall back to the placeholder-demasked puzzle (same mapping as
+  solution-space parsing); anything still unparsable, or without a leaf,
+  measures zero.
   """
   text = path.read_text()
   lines = text.splitlines()

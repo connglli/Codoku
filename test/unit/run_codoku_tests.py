@@ -50,7 +50,7 @@ def check(name, ok, detail=""):
   results.append((name, ok, detail))
   color = GREEN if ok else RED
   tag = "PASS" if ok else "FAIL"
-  print(f"  [{color}{tag}{NC}] {name}" + (f" — {detail}" if detail and not ok else ""))
+  print(f"  [{color}{tag}{NC}] {name}" + (f" ({detail})" if detail and not ok else ""))
 
 
 def import_codoku(codoku_path):
