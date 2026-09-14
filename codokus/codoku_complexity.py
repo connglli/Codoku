@@ -415,7 +415,7 @@ MASK_WEIGHTS: Mapping[str, float] = {
 
 CFG_EDGE_RE = re.compile(r"#//@\s*CFG_EDGE\s*:\s*(.+)")
 EXEC_PATH_RE = re.compile(r"#//@\s*EXEC_PATH\s*:\s*(.+)")
-CONST_BUDGET_RE = re.compile(r"#//@\s*<FILL_CONST>\s*:\s*(.+?)\s+(\d+)\s*$")
+CONST_BUDGET_RE = re.compile(r"#//@\s*<FILL_CONST>\s*:\s*(.+?)\s+(\d+)\s+(\d+)\s*$")
 BLOCK_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*|\d+")
 MASK_TOKEN_RE = re.compile(r"<FILL_[A-Z_]+>")
 DISABLEABLE_MASKS = frozenset(
@@ -642,7 +642,7 @@ def analyze_puzzle(path: Path, gt_path: Path | None = None) -> PuzzleMetrics:
     budget_match = CONST_BUDGET_RE.search(line)
     if budget_match:
       const_budget_entries += 1
-      const_budget_total += int(budget_match.group(2))
+      const_budget_total += int(budget_match.group(2)) + int(budget_match.group(3))
       const_budget_values.add(budget_match.group(1))
 
   cfg_nodes = {node for s, t in cfg_edges for node in (s, t)}

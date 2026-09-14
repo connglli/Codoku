@@ -1243,6 +1243,158 @@ def disabled_masks_unit_tests(ccommon, mod) -> bool:
   return ok
 
 
+def trusted_layout_unit_tests_pass(ccommon) -> bool:
+  """_Ptr geometry args (off/stride/lo/hi) and _cast_int widths come from
+  the frontend layout and IR types, not the answer space: both stay
+  visible and never enter the constant budget. The _Ptr buffer and the
+  _cast_int value mask normally."""
+  ok = True
+  src = (
+    "def func_t(v1):\n"
+    "    # ^entry\n"
+    "    y = (v1 + 1)\n"
+    "    while True:\n"
+    "        # ^b0\n"
+    "        p0 = _Ptr(v1, 0, 2, 0, 2, _frame)\n"
+    "        v2 = _cast_int(v1 + 5, 32)\n"
+    "        break\n"
+    "    # ^exit\n"
+    "    return y\n"
+  ).encode("utf-8")
+  tree = ast.parse(src)
+  leaf, _ = ccommon.find_python_leaf_function(tree, src)
+  maskable, entry_line, _ = ccommon.get_python_maskable_statements(leaf, src)
+  local_names = ccommon.collect_python_leaf_locals(leaf)
+  repls: list = []
+  budget: dict = {}
+  for stmt in maskable:
+    ccommon.collect_python_replacements(
+      stmt, src, stmt.lineno > entry_line, repls, budget, local_names, set()
+    )
+  masked = ccommon.apply_replacements(src, repls).decode("utf-8")
+
+  good = "_Ptr(<FILL_VAR>, 0, 2, 0, 2, _frame)" in masked
+  check("trusted: _Ptr geometry stays visible", good, masked)
+  ok = ok and good
+
+  good = "_cast_int(<FILL_VAR> <FILL_OP> <FILL_CONST>, 32)" in masked
+  check("trusted: _cast_int width stays visible", good, masked)
+  ok = ok and good
+
+  good = budget == {"5": 1}
+  check("trusted: geometry args never enter the budget", good, str(budget))
+  ok = ok and good
+
+  return ok
+
+
+def budget_split_unit_tests_pass(ccommon, chk_mod) -> bool:
+  """The budget is a (live, dead) split per value: live slots sit in blocks
+  the prescribed run reaches (plus pre-entry declarations, which always
+  run), dead slots off it. Totals that add up but park a constant across
+  the boundary fail."""
+  ok = True
+  src = (
+    "def func_t(pa):\n"
+    "    _brk_exit = False\n"
+    "    v1 = 7\n"
+    "    while True:\n"
+    "        # ^entry\n"
+    "        if (pa > 0):\n"
+    "            # ^b0\n"
+    "            v1 = 5\n"
+    "            _brk_exit = True\n"
+    "            break\n"
+    "        else:\n"
+    "            break\n"
+    "    # ^exit\n"
+    "    return v1\n"
+  ).encode("utf-8")
+  tree = ast.parse(src)
+  leaf, _ = ccommon.find_python_leaf_function(tree, src)
+  maskable, entry_line, _ = ccommon.get_python_maskable_statements(leaf, src)
+  local_names = ccommon.collect_python_leaf_locals(leaf)
+  comments = ccommon.find_python_block_comments(src)
+  live_blocks = frozenset({"entry", "exit"})
+
+  repls: list = []
+  live_counts: dict = {}
+  dead_counts: dict = {}
+  for stmt in maskable:
+    stmt_budget: dict = {}
+    ccommon.collect_python_replacements(
+      stmt, src, stmt.lineno > entry_line, repls, stmt_budget, local_names, set()
+    )
+    slot = (
+      live_counts
+      if ccommon.stmt_is_on_live_path(comments, stmt.lineno, live_blocks)
+      else dead_counts
+    )
+    for val, cnt in stmt_budget.items():
+      slot[val] = slot.get(val, 0) + cnt
+  split = ccommon.merge_const_split(live_counts, dead_counts)
+
+  good = (
+    split == {"7": (1, 0), "5": (0, 1)}
+    and live_counts == {"7": 1}
+    and dead_counts == {"5": 1}
+  )
+  check("split: pre-entry slots live, off-path slots dead", good, str(split))
+  ok = ok and good
+
+  banner = (
+    "#//@ CFG_EDGE: entry -> b0\n"
+    "#//@ CFG_EDGE: b0 -> exit\n"
+    "#//@ EXEC_PATH: entry -> exit\n"
+    "#//@ <FILL_CONST>: 7 1 0\n"
+    "#//@ <FILL_CONST>: 5 0 1\n"
+  )
+  puzzle = banner + ccommon.apply_replacements(src, repls).decode("utf-8")
+  mask_set = chk_mod.infer_mask_set_from_puzzle(leaf, src, puzzle, set())
+  good = mask_set is not None
+  check("split: mask set infers from the split puzzle", good, str(mask_set))
+  ok = ok and good
+  if mask_set is None:
+    return ok
+
+  actual = chk_mod.check_remasking(
+    leaf, src, puzzle, mask_set, set(), frozenset(live_blocks)
+  )
+  check("split: re-masking counts the true split", actual == split, str(actual))
+
+  req = chk_mod.parse_puzzle_requirements(puzzle)
+  truth_ok = True
+  detail = ""
+  try:
+    chk_mod.check_fill_const_budget(actual, req.const_budget)
+  except chk_mod.CheckFailure as exc:
+    truth_ok = False
+    detail = str(exc)
+  check("split: the true split passes", truth_ok, detail)
+  ok = ok and truth_ok
+
+  parked_ok = False
+  try:
+    chk_mod.check_fill_const_budget(actual, {"7": (0, 1), "5": (1, 0)})
+  except chk_mod.CheckFailure as exc:
+    parked_ok = exc.result == chk_mod.CheckResult.FAIL_FILL_CONST
+  except Exception as exc:  # noqa: BLE001
+    check("split: parked across the boundary fails on equal totals", False, str(exc))
+    return ok
+  check("split: parked across the boundary fails on equal totals", parked_ok)
+  ok = ok and parked_ok
+
+  legacy_ok = False
+  try:
+    chk_mod.parse_puzzle_requirements("#//@ <FILL_CONST>: 7 1\n")
+  except chk_mod.CheckFailure as exc:
+    legacy_ok = exc.result == chk_mod.CheckResult.FAIL_PARSE
+  check("split: legacy 2-token lines fail closed at parse", legacy_ok)
+  ok = ok and legacy_ok
+
+  return ok
+
+
 def main():
   if len(sys.argv) < 3:
     print("usage: run_codoku_tests.py <codoku.py> <rysmith>")
@@ -1258,6 +1410,8 @@ def main():
   sir_extractor_tests_pass(ccommon, chk_mod)
   complexity_unit_tests_pass(import_codoku_complexity(codoku_src))
   disabled_masks_unit_tests(ccommon, mod)
+  trusted_layout_unit_tests_pass(ccommon)
+  budget_split_unit_tests_pass(ccommon, chk_mod)
 
   with tempfile.TemporaryDirectory(prefix="codoku_gen_") as workdir:
     # Mirror the image layout: codoku + vendored modules + rysmith in one dir.

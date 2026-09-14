@@ -8,7 +8,7 @@
 
 Codoku (short for *code sudoku*) offers renewable challenges for coding agents. A Codoku puzzle masks a generated Python function with **typed cells** (`<FILL_*>` marks): identifiers, function names, numeric constants, operators, control keywords, and CFG labels. A solution fills every cell subject to global semantic constraints:
 
-1. **Static**: the completion parses and compiles, matches the declared control-flow graph, and draws each constant from the constant table at exactly its listed multiplicity (`1` and `1.0` count as distinct).
+1. **Static**: the completion parses and compiles, matches the declared control-flow graph, and draws each constant from the constant table at exactly its listed live and dead counts (`1` and `1.0` count as distinct).
 2. **Dynamic**: on the given input it follows the prescribed execution path block-for-block and returns the expected output.
 
 Each choice can ripple through later statements, branches, loops, or the output, so locally valid fills may still invalidate the whole solution, while valid solutions are sparse in a large search space.
@@ -48,10 +48,11 @@ Like [README.md](./README.md), this project centers on Codoku. The RefractIR par
 ```text
 //@ EXEC_PATH: entry -> b0 -> ... -> exit
 //@ CFG_EDGE: A -> B
-//@ <FILL_CONST>: <value> <count>
+//@ <FILL_CONST>: <value> <live> <dead>
 //@ DISABLED_MASKS: <FILL_OP> <FILL_FUNC>
 ```
 
++ `<live>` counts the value's slots in blocks on the execution path (plus the pre-entry declarations, which always run); `<dead>` its slots in blocks off it. A constant parked in the wrong region fails even when the totals add up.
 + `DISABLED_MASKS` lists the kinds a profile disabled; their constructs stay visible in the puzzle. `DISABLEABLE_MASKS` in [codokus/codoku_complexity.py](./codokus/codoku_complexity.py) carries the disableable kinds; goto-flag compound tokens and control keywords cannot be disabled, so every flag target remains hidden.
 
 ## Toolchain Overview
@@ -94,7 +95,7 @@ install: puzzle.py + INSTRUCTION.md + oracle/
 ```text
 basics (markers, unfilled cells) → parse → re-mask skeleton match → compile
   → CFG topology vs declared edges → timed run → path trace → checksum output
-  → constant budget multiset
+  → constant budget live/dead split
 ```
 
 + The checker infers the masked cells from the puzzle itself and re-masks the solution with the vocabulary it parses from the banner, so producer and consumer cannot drift (`filter_disabled_masks` is the shared mechanism).

@@ -376,6 +376,38 @@ def block_label_for_line(comments, lineno: int) -> str | None:
   return current
 
 
+# Constant budget: each value maps to its (live, dead) slot split. Live
+# slots sit in blocks on the execution path (plus pre-entry
+# declarations, which always run); dead slots sit in blocks off it.
+ConstBudget = dict[str, tuple[int, int]]
+
+
+def merge_const_split(
+  live_counts: dict[str, int], dead_counts: dict[str, int]
+) -> ConstBudget:
+  """Merge per-region counts into one budget split per value.
+
+  The creator and the checker both build their splits this way so the
+  two sides cannot drift: every value seen on either side appears once,
+  missing on one side as zero.
+  """
+  return {
+    val: (live_counts.get(val, 0), dead_counts.get(val, 0))
+    for val in live_counts.keys() | dead_counts.keys()
+  }
+
+
+def stmt_is_on_live_path(comments, lineno: int, live_blocks: frozenset[str]) -> bool:
+  """True when a statement at *lineno* counts toward the live budget.
+
+  Statements before the first block comment are pre-entry declarations:
+  they always execute, so they are live. Any other statement is live
+  exactly when its block lies on the prescribed execution path.
+  """
+  label = block_label_for_line(comments, lineno)
+  return label is None or label in live_blocks
+
+
 def run_dumps_trace(py_path: str | Path, timeout: float) -> tuple[list[str], int]:
   """Run a Python module with DUMP_TRACE=1 and collect its block-entry trace.
 
@@ -706,9 +738,8 @@ def collect_python_replacements(
       # Trusted layout metadata stays visible (see the docstring): _Ptr
       # geometry (positions 1-4) and the _cast_int width (position 1).
       # Anything else in these calls masks normally: the _Ptr buffer
-      # (arg 0, which object is pointed to) and the _cast_int value.
-      # The frame arg is scratch and never masks; short calls (e.g. the
-      # 5-arg _NULL root) simply have fewer visible positions.
+      # (arg 0, which object is pointed to) and the _cast_int value. The
+      # frame arg is the scratch `_frame` cell and never masks.
       skip_args: frozenset[int] = frozenset()
       if func_name == "_Ptr":
         skip_args = frozenset({1, 2, 3, 4})

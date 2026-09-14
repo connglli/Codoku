@@ -15,7 +15,7 @@ Checks performed in strict order from easiest to hardest to reason about:
   Stage 6 - FAIL_TIMEOUT    : The solution run exceeded the 5s execution cap.
   Stage 7 - FAIL_PATH       : Execution did not follow the prescribed path exactly.
   Stage 8 - FAIL_OUTPUT     : check_chksum reports a wrong result (non-zero exit).
-  Stage 9 - FAIL_FILL_CONST : Constant budget multiset mismatch.
+  Stage 9 - FAIL_FILL_CONST : Constant budget live/dead split mismatch.
 
 Each stage is a strict prerequisite for the next.  When a stage fails, later
 stages are skipped, making it unambiguous *why* a solution is wrong.
@@ -27,18 +27,23 @@ import os
 import sys
 import tempfile
 from enum import Enum
+from typing import NamedTuple
 
 from codoku_common import (
+  ConstBudget,
   apply_replacements,
   build_python_cfg,
   collect_python_leaf_locals,
   collect_python_replacements,
+  find_python_block_comments,
   find_python_leaf_function,
   get_byte_offsets,
   get_python_maskable_statements,
   goto_flag_target,
   iter_flag_dispatches,
+  merge_const_split,
   run_dumps_trace,
+  stmt_is_on_live_path,
   strip_refractir_prefix,
 )
 from codoku_complexity import DISABLEABLE_MASKS, filter_disabled_masks
@@ -73,6 +78,22 @@ class CheckFailure(Exception):
 def fail(result: CheckResult, msg: str) -> None:
   """Raise a tagged failure carrying the failing stage and message."""
   raise CheckFailure(result, msg)
+
+
+class PuzzleRequirements(NamedTuple):
+  """Machine markers parsed from the puzzle banner.
+
+  const_budget maps each constant to its (live, dead) slot split: live
+  slots sit in blocks on the execution path (plus pre-entry
+  declarations), dead slots in blocks off it. A NamedTuple (rather than
+  a plain tuple) so call sites read fields by name; positional
+  unpacking keeps working.
+  """
+
+  expected_path: list[str]
+  const_budget: ConstBudget
+  cfg_edges: list[tuple[str, str]]
+  disabled_masks: frozenset[str]
 
 
 # ---------------------------------------------------------------------------
@@ -146,10 +167,10 @@ def strip_comments_and_whitespace(text: str) -> str:
 
 def parse_puzzle_requirements(
   puzzle_text: str,
-) -> tuple[list[str], dict[str, int], list[tuple[str, str]], frozenset[str]]:
+) -> PuzzleRequirements:
   """Parse markers from the puzzle banner."""
   expected_path: list[str] = []
-  const_counts: dict[str, int] = {}
+  const_budget: ConstBudget = {}
   cfg_edges: list[tuple[str, str]] = []
   disabled_masks: set[str] = set()
 
@@ -159,20 +180,29 @@ def parse_puzzle_requirements(
       expected_path = [x.strip() for x in path_part.split("->") if x.strip()]
     elif "//@ <FILL_CONST>:" in line:
       parts = line.split("//@ <FILL_CONST>:", 1)[1].strip().split()
-      if len(parts) != 2:
+      if len(parts) != 3:
         fail(
           CheckResult.FAIL_PARSE,
-          f"Malformed //@ <FILL_CONST> marker: expected 2 tokens, got {len(parts)} in '{line}'",
+          f"Malformed //@ <FILL_CONST> marker: expected 3 tokens "
+          f"('<value> <live> <dead>'), got {len(parts)} in '{line}'",
         )
       val = parts[0]
       try:
-        cnt = int(parts[1])
+        live = int(parts[1])
+        dead = int(parts[2])
       except ValueError:
         fail(
           CheckResult.FAIL_PARSE,
-          f"Malformed //@ <FILL_CONST> marker: count '{parts[1]}' is not an integer in '{line}'",
+          f"Malformed //@ <FILL_CONST> marker: live/dead counts "
+          f"'{parts[1]}' '{parts[2]}' are not integers in '{line}'",
         )
-      const_counts[val] = cnt
+      if live < 0 or dead < 0:
+        fail(
+          CheckResult.FAIL_PARSE,
+          f"Malformed //@ <FILL_CONST> marker: live/dead counts "
+          f"must not be negative in '{line}'",
+        )
+      const_budget[val] = (live, dead)
     elif "//@ CFG_EDGE:" in line:
       edge_part = line.split("//@ CFG_EDGE:", 1)[1].strip()
       if "->" not in edge_part:
@@ -204,7 +234,9 @@ def parse_puzzle_requirements(
           )
       disabled_masks.update(tokens)
 
-  return expected_path, const_counts, cfg_edges, frozenset(disabled_masks)
+  return PuzzleRequirements(
+    expected_path, const_budget, cfg_edges, frozenset(disabled_masks)
+  )
 
 
 # ---------------------------------------------------------------------------
@@ -393,29 +425,42 @@ def check_remasking(
   puzzle_text: str,
   mask_set: set[int],
   defined_funcs: set[str],
+  live_blocks: frozenset[str],
   disabled_masks: frozenset[str] = frozenset(),
-) -> dict[str, int]:
+) -> ConstBudget:
   """Re-mask the solution at *mask_set* and verify it matches the puzzle skeleton."""
   maskable, entry_line, exit_line = get_python_maskable_statements(sol_leaf, sol_src)
   local_names = collect_python_leaf_locals(sol_leaf)
+  comments = find_python_block_comments(sol_src)
 
   remasked_repls: list = []
-  actual_counts: dict[str, int] = {}
+  live_counts: dict[str, int] = {}
+  dead_counts: dict[str, int] = {}
+  const_disabled = "<FILL_CONST>" in disabled_masks
 
   for idx, stmt in enumerate(maskable):
     if idx in mask_set:
       is_body = stmt.lineno > entry_line
       stmt_repls: list = []
+      stmt_budget: dict[str, int] = {}
       collect_python_replacements(
         stmt,
         sol_src,
         is_body,
         stmt_repls,
-        actual_counts,
+        stmt_budget,
         local_names,
         defined_funcs,
       )
       remasked_repls.extend(filter_disabled_masks(stmt_repls, disabled_masks))
+      if not const_disabled:
+        slot_counts = (
+          live_counts
+          if stmt_is_on_live_path(comments, stmt.lineno, live_blocks)
+          else dead_counts
+        )
+        for val, cnt in stmt_budget.items():
+          slot_counts[val] = slot_counts.get(val, 0) + cnt
 
   remasked_text = apply_replacements(sol_src, remasked_repls).decode("utf-8")
   if strip_comments_and_whitespace(remasked_text) != strip_comments_and_whitespace(
@@ -428,30 +473,33 @@ def check_remasking(
       "  unauthorized variables / statements / basic blocks.",
     )
 
-  return actual_counts
+  return merge_const_split(live_counts, dead_counts)
 
 
 def check_fill_const_budget(
-  actual_counts: dict[str, int], expected_counts: dict[str, int]
+  actual_counts: ConstBudget,
+  expected_counts: ConstBudget,
 ) -> None:
-  """Verify the FILL_CONST multiset matches the puzzle budget exactly."""
+  """Verify the FILL_CONST (live, dead) split matches the puzzle budget exactly."""
   if not expected_counts:
     return
 
-  for val, expected_cnt in expected_counts.items():
-    actual_cnt = actual_counts.get(val, 0)
-    if actual_cnt != expected_cnt:
+  for val, (expected_live, expected_dead) in expected_counts.items():
+    actual_live, actual_dead = actual_counts.get(val, (0, 0))
+    if (actual_live, actual_dead) != (expected_live, expected_dead):
       fail(
         CheckResult.FAIL_FILL_CONST,
         f"<FILL_CONST> count mismatch for '{val}'. "
-        f"Expected {expected_cnt}, got {actual_cnt}.",
+        f"Expected live {expected_live} dead {expected_dead}, "
+        f"got live {actual_live} dead {actual_dead}.",
       )
 
-  for val, actual_cnt in actual_counts.items():
+  for val, (actual_live, actual_dead) in actual_counts.items():
     if val not in expected_counts:
       fail(
         CheckResult.FAIL_FILL_CONST,
-        f"Off-budget constant in a <FILL_CONST> position: '{val}' (count: {actual_cnt}).",
+        f"Off-budget constant in a <FILL_CONST> position: '{val}' "
+        f"(live: {actual_live}, dead: {actual_dead}).",
       )
 
 
@@ -463,7 +511,7 @@ def check_fill_const_budget(
 def check(puzzle: str, solution: str) -> None:
   """Validate *solution* against *puzzle*.
 
-  Runs the eight stages in strict order.  Raises CheckFailure on the first
+  Runs the nine stages in strict order.  Raises CheckFailure on the first
   failing stage; returns normally on success.
   """
 
@@ -481,15 +529,13 @@ def check(puzzle: str, solution: str) -> None:
   except (OSError, UnicodeError) as e:
     fail(CheckResult.FAIL_BASICS, f"Puzzle file '{puzzle}' cannot be read: {e}")
 
-  expected_path, const_counts, cfg_edges, disabled_masks = parse_puzzle_requirements(
-    puzzle_text
-  )
-  if not expected_path:
+  req = parse_puzzle_requirements(puzzle_text)
+  if not req.expected_path:
     fail(
       CheckResult.FAIL_BASICS,
       "Puzzle is missing a '//@ EXEC_PATH:' marker; cannot validate.",
     )
-  if not cfg_edges:
+  if not req.cfg_edges:
     fail(
       CheckResult.FAIL_BASICS,
       "Puzzle is missing '//@ CFG_EDGE:' markers; cannot validate.",
@@ -556,7 +602,7 @@ def check(puzzle: str, solution: str) -> None:
     sol_src,
     puzzle_text,
     defined_funcs,
-    disabled_masks,
+    req.disabled_masks,
   )
   if mask_set is None:
     fail(
@@ -565,14 +611,16 @@ def check(puzzle: str, solution: str) -> None:
       "  Structure outside <FILL_XXX> slots differs from the puzzle.",
     )
 
-  # Re-mask and compare; also yields actual_counts for Stage 8.
+  # Re-mask and compare; also yields actual_counts for Stage 9.
+  # The live set is the prescribed path: req is already parsed.
   actual_counts = check_remasking(
     sol_leaf,
     sol_src,
     puzzle_text,
     mask_set,
     defined_funcs,
-    disabled_masks,
+    frozenset(req.expected_path),
+    req.disabled_masks,
   )
 
   # -------------------------------------------------------------------------
@@ -589,7 +637,7 @@ def check(puzzle: str, solution: str) -> None:
   # -------------------------------------------------------------------------
   # Stage 5 - FAIL_CFG: CFG topology check.
   # -------------------------------------------------------------------------
-  check_cfg(sol_leaf, sol_src, cfg_edges)
+  check_cfg(sol_leaf, sol_src, req.cfg_edges)
 
   # -------------------------------------------------------------------------
   # Stage 6 - FAIL_TIMEOUT (raised by run_python_solution)
@@ -605,13 +653,13 @@ def check(puzzle: str, solution: str) -> None:
     trace, exit_code = run_python_solution(sol_path)
   finally:
     os.unlink(sol_path)
-  check_path(trace, expected_path)
+  check_path(trace, req.expected_path)
   check_output(exit_code)
 
   # -------------------------------------------------------------------------
   # Stage 9 - FAIL_FILL_CONST
   # -------------------------------------------------------------------------
-  check_fill_const_budget(actual_counts, const_counts)
+  check_fill_const_budget(actual_counts, req.const_budget)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

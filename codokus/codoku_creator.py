@@ -22,9 +22,10 @@ import sys
 import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, NamedTuple
 
 from codoku_common import (
+  ConstBudget,
   apply_replacements,
   build_python_cfg,
   collect_python_leaf_locals,
@@ -34,6 +35,8 @@ from codoku_common import (
   get_line_indent,
   get_python_maskable_statements,
   mentions_go_flag,
+  merge_const_split,
+  stmt_is_on_live_path,
   strip_refractir_prefix,
   swap_preamble,
 )
@@ -120,7 +123,7 @@ DUMP_TRACE=1 python solution.py
 
 BUDGET_READ = (
   "- The **<FILL_CONST> budget** "
-  "(`#//@ <FILL_CONST>: <value> <count>` lines) - constants you must use"
+  "(`#//@ <FILL_CONST>: <value> <live> <dead>` lines) - constants you must use"
 )
 NO_BUDGET_READ = (
   "- The **<FILL_CONST> marks** - fill each with any literal that keeps "
@@ -128,8 +131,8 @@ NO_BUDGET_READ = (
 )
 CONST_FILL_BUDGET = (
   "`<FILL_CONST>` → an integer or float literal (must match the budget "
-  "exactly - right value, right type, right count; `1` and `1.0` are "
-  "distinct)"
+  "exactly - right value, right type, right live/dead split; `1` and `1.0` "
+  "are distinct)"
 )
 CONST_FILL_FREE = (
   "`<FILL_CONST>` → an integer, float, boolean, or None literal "
@@ -137,15 +140,16 @@ CONST_FILL_FREE = (
 )
 BUDGET_RULE = (
   "- The `<FILL_CONST>` budget must be matched exactly: each value at its "
-  "exact count, no extras, and with the same type (integer vs float - "
-  "`1` is not `1.0`).\n"
+  "exact live and dead counts, no extras, and with the same type (integer "
+  "vs float - `1` is not `1.0`). A constant parked in the wrong region "
+  "fails even when the totals add up.\n"
   "- For variable declarations (the lines before `# ^entry`), never fill "
   "`<FILL_CONST>` with `0`, `1`, `0.0`, or `1.0`. Those values stay visible "
   "there and are never masked. Filling them fails re-masking (`FAIL_REMASKING`)."
 )
 BUDGET_TIP = (
   "- For each `<FILL_CONST>`, use the budget "
-  "(`#//@ <FILL_CONST>: <value> <count>` lines) to constrain your choices."
+  "(`#//@ <FILL_CONST>: <value> <live> <dead>` lines) to constrain your choices."
 )
 CHECK_ERR = (
   "- If the checker fails with a <FILL_CONST> budget error, you used the "
@@ -221,9 +225,12 @@ BUDGET_SECTION_TEMPLATE = """\
 # ------------------------------------------------
 #
 # The lines below list every constant the <FILL_CONST> marks must carry, as
-# "<value> <count>" pairs. Across your whole solution each <value> must appear
-# in <FILL_CONST> positions exactly <count> times -- no more, no fewer -- and no
-# other constant may appear in any <FILL_CONST> position. The value must match
+# "<value> <live> <dead>" triples. <live> counts the slots in blocks on the
+# execution path (plus the declarations before `# ^entry`, which always run);
+# <dead> counts the slots in blocks off the path. Across your whole solution
+# each <value> must appear in <FILL_CONST> positions exactly <live> times on
+# the path and <dead> times off it -- no more, no fewer -- and no other
+# constant may appear in any <FILL_CONST> position. The value must match
 # exactly, including its type: `1` (integer) and `1.0` (float) are distinct.
 # Constants already shown in the fixed (entry/exit) code do not count toward
 # this budget. `0`, `1`, `0.0`, and `1.0` are not allowed for variable
@@ -732,6 +739,16 @@ def build_trace_replacements(leaf_node: ast.FunctionDef, src: bytes) -> list:
   return replacements
 
 
+class MaskedPuzzle(NamedTuple):
+  """Masking output: puzzle and ground-truth bodies, the masked statement
+  set, and the constant budget as a (live, dead) split per value."""
+
+  puzzle_body: str
+  gt_body: str
+  mask_set: set[int]
+  budget_counts: ConstBudget
+
+
 def mask_puzzle(
   src: bytes,
   leaf_node: ast.FunctionDef,
@@ -741,13 +758,16 @@ def mask_puzzle(
   defined_funcs: set[str],
   p_mask: float,
   seed: int | None,
+  live_blocks: frozenset[str],
   disabled_masks: frozenset[str] = frozenset(),
-) -> tuple[str, str, set[int], dict[str, int]]:
-  """Return (puzzle_body, gt_body, mask_set, budget_counts).
+) -> MaskedPuzzle:
+  """Return a MaskedPuzzle (puzzle_body, gt_body, mask_set, budget_counts).
 
   puzzle_body has both the DUMP_TRACE instrumentation and the <FILL_XXX> masks;
   gt_body has only the instrumentation.  Kinds in *disabled_masks* stay
-  visible; their constructs are never masked.
+  visible; their constructs are never masked.  budget_counts maps each
+  constant to its (live, dead) slot split: slots in blocks on the
+  prescribed path (plus pre-entry declarations) are live, the rest dead.
   """
   mask_seed = seed if seed is not None else random.randint(0, 2**31 - 1)
   rng = random.Random(mask_seed)
@@ -771,7 +791,9 @@ def mask_puzzle(
       mask_set.add(idx)
 
   trace_repls = build_trace_replacements(leaf_node, src)
-  budget_counts: dict[str, int] = {}
+  comments = find_python_block_comments(src)
+  live_counts: dict[str, int] = {}
+  dead_counts: dict[str, int] = {}
   mask_repls: list = []
   const_disabled = "<FILL_CONST>" in disabled_masks
   for idx, stmt in enumerate(maskable):
@@ -786,26 +808,32 @@ def mask_puzzle(
       # kinds are masked (goto-flag spans never match a known kind).
       mask_repls.extend(filter_disabled_masks(stmt_repls, disabled_masks))
       if not const_disabled:
+        slot_counts = (
+          live_counts
+          if stmt_is_on_live_path(comments, stmt.lineno, live_blocks)
+          else dead_counts
+        )
         for val, cnt in stmt_budget.items():
-          budget_counts[val] = budget_counts.get(val, 0) + cnt
+          slot_counts[val] = slot_counts.get(val, 0) + cnt
 
   puzzle_body = apply_replacements(src, trace_repls + mask_repls).decode("utf-8")
   gt_body = apply_replacements(src, trace_repls).decode("utf-8")
-  return puzzle_body, gt_body, mask_set, budget_counts
+  budget_counts = merge_const_split(live_counts, dead_counts)
+  return MaskedPuzzle(puzzle_body, gt_body, mask_set, budget_counts)
 
 
 def render_header(
   leaf_name: str,
   cfg_edges: list,
   path_str: str,
-  budget_counts: dict,
+  budget_counts: ConstBudget,
   lift_consts: bool,
   disabled_masks: frozenset[str] = frozenset(),
 ) -> str:
   fill_const_lines = "".join(
-    f"#//@ <FILL_CONST>: {val} {cnt}\n"
+    f"#//@ <FILL_CONST>: {val} {live} {dead}\n"
     for val in sorted(budget_counts)
-    for cnt in [budget_counts[val]]
+    for live, dead in [budget_counts[val]]
   )
   # No <FILL_CONST> marks when constants are disabled, so the budget section
   # (a prose banner over an empty list) is suppressed like lift_consts.
@@ -876,14 +904,14 @@ def self_check(
     return False
   local_names = collect_python_leaf_locals(gt_leaf)
 
+  # self-check verifies structure only; the budget is unused.
   remasked_repls: list = []
-  gt_budget: dict = {}
   for idx, stmt in enumerate(gt_maskable):
     if idx in mask_set:
       is_body = stmt.lineno > entry_line
       stmt_repls: list = []
       collect_python_replacements(
-        stmt, gt_bytes, is_body, stmt_repls, gt_budget, local_names, defined_funcs
+        stmt, gt_bytes, is_body, stmt_repls, {}, local_names, defined_funcs
       )
       remasked_repls.extend(filter_disabled_masks(stmt_repls, disabled_masks))
   remasked = apply_replacements(gt_bytes, remasked_repls).decode("utf-8")
@@ -1045,8 +1073,11 @@ def generate_candidate(
   # embeds the adjacency and PATH comments verbatim.
   cfg_edges = extract_cfg_from_sir(sir_path)
   path_str = extract_path_from_sir(sir_path)
+  live_blocks = frozenset(
+    block.strip() for block in path_str.split("->") if block.strip()
+  )
 
-  puzzle_body, gt_body, mask_set, budget_counts = mask_puzzle(
+  masked = mask_puzzle(
     src,
     leaf_node,
     entry_line,
@@ -1055,11 +1086,17 @@ def generate_candidate(
     defined_funcs,
     config.p_mask,
     used_seed,
+    live_blocks,
     config.disabled_masks,
   )
 
   if not self_check(
-    gt_body, puzzle_body, mask_set, defined_funcs, cfg_edges, config.disabled_masks
+    masked.gt_body,
+    masked.puzzle_body,
+    masked.mask_set,
+    defined_funcs,
+    cfg_edges,
+    config.disabled_masks,
   ):
     raise RuntimeError("self-check failed")
 
@@ -1067,12 +1104,12 @@ def generate_candidate(
     leaf_name,
     cfg_edges,
     path_str,
-    budget_counts,
+    masked.budget_counts,
     config.lift_consts,
     config.disabled_masks,
   )
-  (candidate_dir / "puzzle.py").write_text(header + puzzle_body)
-  (candidate_dir / "puzzle.gt.py").write_text(gt_body)
+  (candidate_dir / "puzzle.py").write_text(header + masked.puzzle_body)
+  (candidate_dir / "puzzle.gt.py").write_text(masked.gt_body)
 
   metrics = analyze_puzzle(
     candidate_dir / "puzzle.py", gt_path=candidate_dir / "puzzle.gt.py"
