@@ -617,6 +617,12 @@ def collect_python_replacements(
   - unary operators → ``<FILL_OP>``
   - ternary if/else in IfExp → ``<FILL_OP>``
 
+  Trusted layout metadata is never masked: ``_Ptr`` geometry arguments
+  (off/stride/lo/hi) come from the frontend's object layout and
+  ``_cast_int`` widths come from the IR's integer types, so both stay
+  visible and out of the constant budget. Only the ``_Ptr`` buffer (which
+  object is pointed to) masks normally.
+
   ``is_body`` is True for statements strictly inside the function body (between
   entry/exit).  For let-initialisers (``is_body=False``) the sentinels ``0``
   and ``1`` are left visible.
@@ -697,6 +703,40 @@ def collect_python_replacements(
       if func_name in defined_funcs and func_name not in INTERNAL_HELPER_FUNCS:
         start, end = get_node_offsets(node.func)
         replacements.append((start, end, "<FILL_FUNC>"))
+      # Trusted layout metadata stays visible (see the docstring): _Ptr
+      # geometry (positions 1-4) and the _cast_int width (position 1).
+      # Anything else in these calls masks normally: the _Ptr buffer
+      # (arg 0, which object is pointed to) and the _cast_int value.
+      # The frame arg is scratch and never masks; short calls (e.g. the
+      # 5-arg _NULL root) simply have fewer visible positions.
+      skip_args: frozenset[int] = frozenset()
+      if func_name == "_Ptr":
+        skip_args = frozenset({1, 2, 3, 4})
+      elif func_name == "_cast_int":
+        skip_args = frozenset({1})
+      if skip_args:
+        for idx, arg in enumerate(node.args):
+          if idx not in skip_args:
+            collect_python_replacements(
+              arg,
+              src_bytes,
+              is_body,
+              replacements,
+              budget_counts,
+              local_names,
+              defined_funcs,
+            )
+        for keyword in node.keywords:
+          collect_python_replacements(
+            keyword.value,
+            src_bytes,
+            is_body,
+            replacements,
+            budget_counts,
+            local_names,
+            defined_funcs,
+          )
+        return
     for arg in node.args:
       collect_python_replacements(
         arg,
