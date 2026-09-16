@@ -39,7 +39,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       m4 python3-mesonpy libmpfr6 libmpfr-dev \
       git curl wget ca-certificates \
       python3 python3-pip python3-venv \
-      jq file ripgrep \
+      jq file ripgrep vim \
     && apt-get autoremove -y && apt-get clean -y \
     && rm -rf /var/lib/apt/lists/*
 
