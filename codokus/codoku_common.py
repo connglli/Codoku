@@ -336,6 +336,79 @@ def apply_replacements(src_bytes: bytes, replacements: list) -> bytes:
   return bytes(res)
 
 
+def canonical_cells(repls: list) -> list:
+  """Order mask spans by offset and resolve overlaps like the puzzle render.
+
+  ``apply_replacements`` drops overlapping ranges (outermost wins); the
+  cell list follows the same rule, so the rendered puzzle and this list
+  always agree on which spans a mask occupies.
+  """
+  sorted_repls = sorted(set(repls), key=lambda x: (x[0], x[1]), reverse=True)
+  last_start = None
+  valid = []
+  for start, end, repl in sorted_repls:
+    if last_start is None or end <= last_start:
+      valid.append((start, end, repl))
+      last_start = start
+  valid.reverse()
+  return valid
+
+
+def collect_canonical_cells(
+  maskable: list,
+  entry_line: int,
+  src_bytes: bytes,
+  local_names: set[str],
+  defined_funcs: set[str],
+  disabled_masks: frozenset[str] = frozenset(),
+) -> tuple[list, set, dict]:
+  """Collect, filter, and canonicalize every mask cell of the maskable statements.
+
+  Returns (cells, lhs_spans, const_values): *cells* lists every kept cell
+  in source order as ``(start, end, token, stmt_index, is_lhs)``;
+  *lhs_spans* tags ``<FILL_VAR>`` spans that sit in an assignment target
+  (left-hand side); *const_values* maps every ``<FILL_CONST>`` span to its
+  literal. Kinds in *disabled_masks* stay visible: their spans are dropped
+  before this list is built, so they are never masked or budgeted.
+  """
+  cells: list = []
+  lhs_spans: set = set()
+  const_values: dict = {}
+  for stmt_index, stmt in enumerate(maskable):
+    repls: list = []
+    collect_python_replacements(
+      stmt,
+      src_bytes,
+      stmt.lineno > entry_line,
+      repls,
+      local_names,
+      defined_funcs,
+      lhs_spans=lhs_spans,
+      const_values=const_values,
+    )
+    for start, end, token in canonical_cells(
+      filter_disabled_masks(repls, disabled_masks)
+    ):
+      cells.append((start, end, token, stmt_index, (start, end) in lhs_spans))
+  return cells, lhs_spans, const_values
+
+
+def filter_disabled_masks(repls: list, disabled: frozenset[str]) -> list:
+  """Drop replacements whose mask text is in *disabled*.
+
+  Masking locates each blank as a ``(start, end, mask_text)`` span; a
+  profile that disables kinds keeps those constructs visible by dropping
+  their spans before the cell list is built, so they are never masked or
+  budgeted. Exact-token filtering is why goto flags survive:
+  ``_go_<FILL_LABEL>`` and ``_<FILL_CTRL>_<FILL_LABEL>`` are compound
+  tokens, not known kinds, so disabling any kind leaves every flag target
+  hidden.
+  """
+  if not disabled:
+    return repls
+  return [repl for repl in repls if repl[2] not in disabled]
+
+
 # ---------------------------------------------------------------------------
 # Python block comments
 # ---------------------------------------------------------------------------
@@ -479,11 +552,16 @@ def collect_python_leaf_locals(leaf_node: ast.FunctionDef) -> set[str]:
   # Local assignments
   for stmt in ast.walk(leaf_node):
     if isinstance(stmt, ast.Assign):
-      for target in stmt.targets:
-        if isinstance(target, ast.Name):
-          names.add(target.id)
-        elif isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
-          names.add(target.value.id)
+      targets = stmt.targets
+    elif isinstance(stmt, ast.AugAssign):
+      targets = [stmt.target]
+    else:
+      continue
+    for target in targets:
+      if isinstance(target, ast.Name):
+        names.add(target.id)
+      elif isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
+        names.add(target.value.id)
   # Exclude scratch variables starting with '_' or 'v__'
   return {
     name for name in names if not name.startswith("_") and not name.startswith("v__")
@@ -577,7 +655,9 @@ def get_python_maskable_statements(
     # Exclude entry and exit blocks -- except goto-flag plumbing, which is
     # maskable wherever it appears.
     if block is not None and block != "entry" and block != "exit":
-      if isinstance(node, (ast.Assign, ast.Break, ast.Continue, ast.Expr)):
+      if isinstance(
+        node, (ast.Assign, ast.AugAssign, ast.Break, ast.Continue, ast.Expr)
+      ):
         body_statements.append(node)
         return
       elif isinstance(node, (ast.If, ast.While)):
@@ -630,15 +710,17 @@ def collect_python_replacements(
   src_bytes: bytes,
   is_body: bool,
   replacements: list,
-  budget_counts: dict,
   local_names: set[str],
   defined_funcs: set[str],
+  is_lhs: bool = False,
+  lhs_spans: set[tuple[int, int]] | None = None,
+  const_values: dict[tuple[int, int], str] | None = None,
 ) -> None:
   """Recursively walk node and append (start, end, <FILL_XXX>) replacement tuples.
 
   Masking rules (mirrors puzzle_common.hpp's SIRMaskedPrinter):
   - lvalues whose base is in *local_names* → ``<FILL_VAR>``
-  - number literals → ``<FILL_CONST>`` (counted in *budget_counts*)
+  - number literals → ``<FILL_CONST>``
   - break/continue → ``<FILL_CTRL>``
   - function calls to functions defined in the same file
     (*defined_funcs*) → ``<FILL_FUNC>`` (excluding internal helpers like
@@ -648,6 +730,13 @@ def collect_python_replacements(
   - comparison operators → ``<FILL_OP>``
   - unary operators → ``<FILL_OP>``
   - ternary if/else in IfExp → ``<FILL_OP>``
+
+  The walk emits EVERY maskable cell; whether a cell is masked is not
+  decided here.  ``is_lhs`` tracks assignment-target contexts (the left
+  side of ``=`` and ``+=``), so a ``<FILL_VAR>`` cell inside one is
+  recorded in *lhs_spans*, and ``<FILL_CONST>`` cells record their literal
+  in *const_values* (span → value), which the budget reads at masked
+  positions only.
 
   Trusted layout metadata is never masked: ``_Ptr`` geometry arguments
   (off/stride/lo/hi) come from the frontend's object layout and
@@ -686,31 +775,91 @@ def collect_python_replacements(
 
   leftmost = get_py_leftmost_base(node)
 
-  if not is_body and isinstance(node, ast.Assign):
+  if isinstance(node, ast.Assign):
+    if not is_body:
+      # let-initialisers: non-flag lvalues stay visible; the value masks.
+      for target in node.targets:
+        if mentions_go_flag(target):
+          collect_python_replacements(
+            target,
+            src_bytes,
+            is_body,
+            replacements,
+            local_names,
+            defined_funcs,
+            is_lhs,
+            lhs_spans,
+            const_values,
+          )
+      collect_python_replacements(
+        node.value,
+        src_bytes,
+        is_body,
+        replacements,
+        local_names,
+        defined_funcs,
+        False,
+        lhs_spans,
+        const_values,
+      )
+      return
+    # Body assignment: its target subtrees (left-hand side) and value mask.
     for target in node.targets:
-      if mentions_go_flag(target):
-        collect_python_replacements(
-          target,
-          src_bytes,
-          is_body,
-          replacements,
-          budget_counts,
-          local_names,
-          defined_funcs,
-        )
+      collect_python_replacements(
+        target,
+        src_bytes,
+        is_body,
+        replacements,
+        local_names,
+        defined_funcs,
+        True,
+        lhs_spans,
+        const_values,
+      )
     collect_python_replacements(
       node.value,
       src_bytes,
       is_body,
       replacements,
-      budget_counts,
       local_names,
       defined_funcs,
+      False,
+      lhs_spans,
+      const_values,
+    )
+    return
+  if isinstance(node, ast.AugAssign):
+    # Augmented assignment reads and writes its target (as x = x + v does),
+    # so the target is left-hand side. The operator (+=) stays structural,
+    # as does `=`: neither takes a mask.
+    collect_python_replacements(
+      node.target,
+      src_bytes,
+      is_body,
+      replacements,
+      local_names,
+      defined_funcs,
+      True,
+      lhs_spans,
+      const_values,
+    )
+    collect_python_replacements(
+      node.value,
+      src_bytes,
+      is_body,
+      replacements,
+      local_names,
+      defined_funcs,
+      False,
+      lhs_spans,
+      const_values,
     )
     return
   if isinstance(leftmost, ast.Name) and leftmost.id in local_names:
     start, end = get_node_offsets(node)
     replacements.append((start, end, "<FILL_VAR>"))
+    if is_lhs and lhs_spans is not None:
+      lhs_spans.add((start, end))
     return
 
   if isinstance(node, ast.Constant):
@@ -726,7 +875,8 @@ def collect_python_replacements(
       val_str = str(node.value)
       start, end = get_node_offsets(node)
       replacements.append((start, end, "<FILL_CONST>"))
-      budget_counts[val_str] = budget_counts.get(val_str, 0) + 1
+      if const_values is not None:
+        const_values[(start, end)] = val_str
       return
 
   if isinstance(node, (ast.Break, ast.Continue)):
@@ -758,9 +908,11 @@ def collect_python_replacements(
               src_bytes,
               is_body,
               replacements,
-              budget_counts,
               local_names,
               defined_funcs,
+              False,
+              lhs_spans,
+              const_values,
             )
         for keyword in node.keywords:
           collect_python_replacements(
@@ -768,9 +920,11 @@ def collect_python_replacements(
             src_bytes,
             is_body,
             replacements,
-            budget_counts,
             local_names,
             defined_funcs,
+            False,
+            lhs_spans,
+            const_values,
           )
         return
     for arg in node.args:
@@ -779,9 +933,11 @@ def collect_python_replacements(
         src_bytes,
         is_body,
         replacements,
-        budget_counts,
         local_names,
         defined_funcs,
+        False,
+        lhs_spans,
+        const_values,
       )
     for keyword in node.keywords:
       collect_python_replacements(
@@ -789,9 +945,11 @@ def collect_python_replacements(
         src_bytes,
         is_body,
         replacements,
-        budget_counts,
         local_names,
         defined_funcs,
+        False,
+        lhs_spans,
+        const_values,
       )
     return
 
@@ -811,18 +969,22 @@ def collect_python_replacements(
       src_bytes,
       is_body,
       replacements,
-      budget_counts,
       local_names,
       defined_funcs,
+      False,
+      lhs_spans,
+      const_values,
     )
     collect_python_replacements(
       node.right,
       src_bytes,
       is_body,
       replacements,
-      budget_counts,
       local_names,
       defined_funcs,
+      False,
+      lhs_spans,
+      const_values,
     )
     return
 
@@ -844,18 +1006,22 @@ def collect_python_replacements(
         src_bytes,
         is_body,
         replacements,
-        budget_counts,
         local_names,
         defined_funcs,
+        False,
+        lhs_spans,
+        const_values,
       )
     collect_python_replacements(
       node.left,
       src_bytes,
       is_body,
       replacements,
-      budget_counts,
       local_names,
       defined_funcs,
+      False,
+      lhs_spans,
+      const_values,
     )
     return
 
@@ -875,9 +1041,11 @@ def collect_python_replacements(
       src_bytes,
       is_body,
       replacements,
-      budget_counts,
       local_names,
       defined_funcs,
+      False,
+      lhs_spans,
+      const_values,
     )
     return
 
@@ -903,27 +1071,33 @@ def collect_python_replacements(
       src_bytes,
       is_body,
       replacements,
-      budget_counts,
       local_names,
       defined_funcs,
+      False,
+      lhs_spans,
+      const_values,
     )
     collect_python_replacements(
       node.test,
       src_bytes,
       is_body,
       replacements,
-      budget_counts,
       local_names,
       defined_funcs,
+      False,
+      lhs_spans,
+      const_values,
     )
     collect_python_replacements(
       node.orelse,
       src_bytes,
       is_body,
       replacements,
-      budget_counts,
       local_names,
       defined_funcs,
+      False,
+      lhs_spans,
+      const_values,
     )
     return
 
@@ -933,9 +1107,11 @@ def collect_python_replacements(
       src_bytes,
       is_body,
       replacements,
-      budget_counts,
       local_names,
       defined_funcs,
+      is_lhs,
+      lhs_spans,
+      const_values,
     )
 
 

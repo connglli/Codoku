@@ -80,8 +80,7 @@ rysmith --target python
   ↓
 swap_preamble (guarded memory model) + strip refractir_ prefix
   ↓
-mask_puzzle: mask_set ← profile p_mask up to forced goto-flag statements
-  → collect replacements → filter_disabled_masks
+mask_puzzle: cells ← per-element rolls (p_mask_ops, p_mask_lhs_vars, p_mask_rhs_vars, p_mask_funcs, p_mask_consts; ctrl and goto tokens always) → filter_disabled_masks
   ↓
 self_check: ground truth re-masks byte-for-byte to the puzzle
   ↓

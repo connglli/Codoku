@@ -33,11 +33,10 @@ from codoku_common import (
   ConstBudget,
   apply_replacements,
   build_python_cfg,
+  collect_canonical_cells,
   collect_python_leaf_locals,
-  collect_python_replacements,
   find_python_block_comments,
   find_python_leaf_function,
-  get_byte_offsets,
   get_python_maskable_statements,
   goto_flag_target,
   iter_flag_dispatches,
@@ -46,7 +45,7 @@ from codoku_common import (
   stmt_is_on_live_path,
   strip_refractir_prefix,
 )
-from codoku_complexity import DISABLEABLE_MASKS, filter_disabled_masks
+from codoku_complexity import DISABLEABLE_MASKS
 
 # ---------------------------------------------------------------------------
 # Check result - ordered from easiest to hardest to satisfy.
@@ -240,92 +239,74 @@ def parse_puzzle_requirements(
 
 
 # ---------------------------------------------------------------------------
-# Mask-set inference (mirrors inferMaskSetFromPuzzle in puzzle_common.hpp)
+# Masked-cell inference
 # ---------------------------------------------------------------------------
 
 
-def infer_mask_set_from_puzzle(
+class InferredMasks(NamedTuple):
+  """Masked cells inferred from the puzzle text.
+
+  *cells* lists every masked cell as ``(start, end, token, stmt_index)``
+  in the solution's coordinates; *const_values* maps every ``<FILL_CONST>``
+  cell span of the solution to its literal, which the budget reads.
+  """
+
+  cells: list
+  const_values: dict
+
+
+def infer_masked_cells(
   sol_leaf,
   sol_src: bytes,
   puzzle_text: str,
   defined_funcs: set[str],
   disabled_masks: frozenset[str] = frozenset(),
-) -> set[int] | None:
-  """Infer which statement indices were masked in the puzzle by comparing renders.
+) -> InferredMasks | None:
+  """Infer which mask cells were masked in the puzzle, or None.
 
-  Returns the set of masked position indices, or ``None`` if the structure of
-  the puzzle and the solution are incompatible (re-masking failure).
+  Walks the stripped puzzle against the stripped solution cell by cell:
+  fixed text between cells must match verbatim, a masked cell shows its
+  fill token, and a visible cell keeps its own text. The walk is the
+  re-masking skeleton comparison made piecewise, so producer and consumer
+  cannot drift.
   """
   maskable, entry_line, exit_line = get_python_maskable_statements(sol_leaf, sol_src)
   if not entry_line or not exit_line:
     return None
+  try:
+    sol_src.decode("utf-8")
+  except UnicodeDecodeError:
+    return None
   local_names = collect_python_leaf_locals(sol_leaf)
+  cells, _lhs_spans, const_values = collect_canonical_cells(
+    maskable, entry_line, sol_src, local_names, defined_funcs, disabled_masks
+  )
 
-  full_repls: list = []
-  plain_repls: list = []
-  dummy_budget: dict = {}
-
-  for stmt in maskable:
-    stmt_offsets = get_byte_offsets(
-      sol_src, stmt.lineno, stmt.col_offset, stmt.end_lineno, stmt.end_col_offset
-    )
-    sentinel = (stmt_offsets[0], stmt_offsets[0], "\x01")
-    full_repls.append(sentinel)
-    plain_repls.append(sentinel)
-    is_body = stmt.lineno > entry_line
-    stmt_repls: list = []
-    collect_python_replacements(
-      stmt,
-      sol_src,
-      is_body,
-      stmt_repls,
-      dummy_budget,
-      local_names,
-      defined_funcs,
-    )
-    full_repls.extend(filter_disabled_masks(stmt_repls, disabled_masks))
-
-  full_rendered = apply_replacements(sol_src, full_repls).decode("utf-8")
-  plain_rendered = apply_replacements(sol_src, plain_repls).decode("utf-8")
-
-  full_stripped = strip_comments_and_whitespace(full_rendered)
-  plain_stripped = strip_comments_and_whitespace(plain_rendered)
-
-  full_parts = full_stripped.split("\x01")
-  plain_parts = plain_stripped.split("\x01")
-
+  # Cell spans are byte offsets into sol_src, so slice the bytes and then
+  # decode: slicing the decoded string would skew past multibyte characters.
   stripped_puzzle = strip_comments_and_whitespace(puzzle_text)
-
-  n_positions = len(plain_parts) - 1
-  mask_set: set[int] = set()
   pos = 0
-
-  if not plain_parts:
-    return None
-  prefix = plain_parts[0]
-  if not stripped_puzzle.startswith(prefix):
-    return None
-  pos += len(prefix)
-
-  for i in range(n_positions):
-    masked_seg = full_parts[i + 1] if i + 1 < len(full_parts) else ""
-    plain_seg = plain_parts[i + 1] if i + 1 < len(plain_parts) else ""
-
-    if (
-      pos + len(masked_seg) <= len(stripped_puzzle)
-      and stripped_puzzle[pos : pos + len(masked_seg)] == masked_seg
-    ):
-      mask_set.add(i)
-      pos += len(masked_seg)
-    elif (
-      pos + len(plain_seg) <= len(stripped_puzzle)
-      and stripped_puzzle[pos : pos + len(plain_seg)] == plain_seg
-    ):
-      pos += len(plain_seg)
+  prev = 0
+  masked: list = []
+  for start, end, token, stmt_index, _is_lhs in cells:
+    fixed = strip_comments_and_whitespace(sol_src[prev:start].decode("utf-8"))
+    if stripped_puzzle[pos : pos + len(fixed)] != fixed:
+      return None
+    pos += len(fixed)
+    visible = strip_comments_and_whitespace(sol_src[start:end].decode("utf-8"))
+    if stripped_puzzle[pos : pos + len(token)] == token:
+      masked.append((start, end, token, stmt_index))
+      pos += len(token)
+    elif stripped_puzzle[pos : pos + len(visible)] == visible:
+      pos += len(visible)
     else:
       return None
-
-  return mask_set
+    prev = end
+  if stripped_puzzle[pos:] != strip_comments_and_whitespace(
+    sol_src[prev:].decode("utf-8")
+  ):
+    return None
+  return InferredMasks(masked, const_values)
 
 
 def check_cfg(func_node, src: bytes, cfg_edges: list[tuple[str, str]]) -> None:
@@ -423,46 +404,18 @@ def check_remasking(
   sol_leaf,
   sol_src: bytes,
   puzzle_text: str,
-  mask_set: set[int],
-  defined_funcs: set[str],
+  inferred: InferredMasks,
   live_blocks: frozenset[str],
-  disabled_masks: frozenset[str] = frozenset(),
 ) -> ConstBudget:
-  """Re-mask the solution at *mask_set* and verify it matches the puzzle skeleton."""
-  maskable, entry_line, exit_line = get_python_maskable_statements(sol_leaf, sol_src)
-  local_names = collect_python_leaf_locals(sol_leaf)
-  comments = find_python_block_comments(sol_src)
+  """Re-mask the solution at the inferred cells and verify the skeleton.
 
-  remasked_repls: list = []
-  live_counts: dict[str, int] = {}
-  dead_counts: dict[str, int] = {}
-  const_disabled = "<FILL_CONST>" in disabled_masks
-
-  for idx, stmt in enumerate(maskable):
-    if idx in mask_set:
-      is_body = stmt.lineno > entry_line
-      stmt_repls: list = []
-      stmt_budget: dict[str, int] = {}
-      collect_python_replacements(
-        stmt,
-        sol_src,
-        is_body,
-        stmt_repls,
-        stmt_budget,
-        local_names,
-        defined_funcs,
-      )
-      remasked_repls.extend(filter_disabled_masks(stmt_repls, disabled_masks))
-      if not const_disabled:
-        slot_counts = (
-          live_counts
-          if stmt_is_on_live_path(comments, stmt.lineno, live_blocks)
-          else dead_counts
-        )
-        for val, cnt in stmt_budget.items():
-          slot_counts[val] = slot_counts.get(val, 0) + cnt
-
-  remasked_text = apply_replacements(sol_src, remasked_repls).decode("utf-8")
+  Also yields the budget: each masked ``<FILL_CONST>`` cell counts at its
+  statement's region (live on the prescribed path plus pre-entry
+  declarations, dead off it).
+  """
+  remasked_text = apply_replacements(
+    sol_src, [(start, end, token) for start, end, token, _ in inferred.cells]
+  ).decode("utf-8")
   if strip_comments_and_whitespace(remasked_text) != strip_comments_and_whitespace(
     puzzle_text
   ):
@@ -472,6 +425,22 @@ def check_remasking(
       "  You may have changed code outside the <FILL_XXX> marks, or introduced\n"
       "  unauthorized variables / statements / basic blocks.",
     )
+
+  maskable, _entry_line, _exit_line = get_python_maskable_statements(sol_leaf, sol_src)
+  comments = find_python_block_comments(sol_src)
+  live_counts: dict[str, int] = {}
+  dead_counts: dict[str, int] = {}
+  for start, end, token, stmt_index in inferred.cells:
+    if token != "<FILL_CONST>":
+      continue
+    val = inferred.const_values[(start, end)]
+    stmt = maskable[stmt_index]
+    slot_counts = (
+      live_counts
+      if stmt_is_on_live_path(comments, stmt.lineno, live_blocks)
+      else dead_counts
+    )
+    slot_counts[val] = slot_counts.get(val, 0) + 1
 
   return merge_const_split(live_counts, dead_counts)
 
@@ -597,14 +566,14 @@ def check(puzzle: str, solution: str) -> None:
   # Stage 3 - FAIL_REMASKING: Re-mask and compare.
   # Pure static check - no execution required.
   # -------------------------------------------------------------------------
-  mask_set = infer_mask_set_from_puzzle(
+  inferred = infer_masked_cells(
     sol_leaf,
     sol_src,
     puzzle_text,
     defined_funcs,
     req.disabled_masks,
   )
-  if mask_set is None:
+  if inferred is None:
     fail(
       CheckResult.FAIL_REMASKING,
       "Solution structural integrity check failed.\n"
@@ -617,10 +586,8 @@ def check(puzzle: str, solution: str) -> None:
     sol_leaf,
     sol_src,
     puzzle_text,
-    mask_set,
-    defined_funcs,
+    inferred,
     frozenset(req.expected_path),
-    req.disabled_masks,
   )
 
   # -------------------------------------------------------------------------

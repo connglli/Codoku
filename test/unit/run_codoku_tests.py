@@ -501,7 +501,7 @@ def goto_flag_unit_tests_pass(ccommon, chk_mod) -> bool:
   repls: list = []
   for stmt in maskable:
     ccommon.collect_python_replacements(
-      stmt, mod_bytes, stmt.lineno > entry_line, repls, {}, local_names, defined_funcs
+      stmt, mod_bytes, stmt.lineno > entry_line, repls, local_names, defined_funcs
     )
   masked = ccommon.apply_replacements(mod_bytes, repls).decode("utf-8")
   leaked = sorted(
@@ -525,9 +525,7 @@ def goto_flag_unit_tests_pass(ccommon, chk_mod) -> bool:
     node = ast.parse(spelled, mode="eval").body
     src_bytes = spelled.encode("utf-8")
     word_repls: list = []
-    ccommon.collect_python_replacements(
-      node, src_bytes, True, word_repls, {}, set(), set()
-    )
+    ccommon.collect_python_replacements(node, src_bytes, True, word_repls, set(), set())
     word_masked = ccommon.apply_replacements(src_bytes, word_repls).decode("utf-8")
     if word_masked != "_<FILL_CTRL>_<FILL_LABEL>":
       check(f"unit: {spelled} masks to compound token", False, word_masked)
@@ -556,7 +554,7 @@ def goto_flag_unit_tests_pass(ccommon, chk_mod) -> bool:
   go_repls: list = []
   for stmt in go_maskable:
     ccommon.collect_python_replacements(
-      stmt, go_src, stmt.lineno > go_entry, go_repls, {}, go_locals, set()
+      stmt, go_src, stmt.lineno > go_entry, go_repls, go_locals, set()
     )
   go_masked = ccommon.apply_replacements(go_src, go_repls).decode("utf-8")
   if "_go_<FILL_LABEL>" not in go_masked or "_<FILL_CTRL>_<FILL_LABEL>" in go_masked:
@@ -591,7 +589,7 @@ def goto_flag_unit_tests_pass(ccommon, chk_mod) -> bool:
   exit_repls: list = []
   for stmt in exit_maskable:
     ccommon.collect_python_replacements(
-      stmt, exit_src, stmt.lineno > exit_entry, exit_repls, {}, exit_locals, set()
+      stmt, exit_src, stmt.lineno > exit_entry, exit_repls, exit_locals, set()
     )
   exit_masked = ccommon.apply_replacements(exit_src, exit_repls).decode("utf-8")
   exit_leaks = sorted(
@@ -640,7 +638,6 @@ def goto_flag_unit_tests_pass(ccommon, chk_mod) -> bool:
       setter_src,
       stmt.lineno > setter_entry,
       setter_repls,
-      {},
       setter_locals,
       set(),
     )
@@ -1118,14 +1115,12 @@ def disabled_masks_unit_tests(ccommon, mod) -> bool:
   defined_funcs = {"helper"}
 
   all_repls: list = []
-  all_budget: dict = {}
   for stmt in maskable:
     ccommon.collect_python_replacements(
       stmt,
       src,
       stmt.lineno > entry_line,
       all_repls,
-      all_budget,
       local_names,
       defined_funcs,
     )
@@ -1152,11 +1147,10 @@ def disabled_masks_unit_tests(ccommon, mod) -> bool:
         src,
         stmt.lineno > entry_line,
         stmt_repls,
-        {},
         local_names,
         defined_funcs,
       )
-      stmt_repls = mod.filter_disabled_masks(stmt_repls, disabled)
+      stmt_repls = ccommon.filter_disabled_masks(stmt_repls, disabled)
       repls.extend(stmt_repls)
     return ccommon.apply_replacements(src, repls).decode("utf-8")
 
@@ -1221,7 +1215,11 @@ def disabled_masks_unit_tests(ccommon, mod) -> bool:
         n_bbls=mod.IntRange(2, 4),
         n_stmts=mod.IntRange(2, 3),
         min_loop_iter=mod.IntRange(0, 1),
-        p_mask=mod.FloatRange(0.5, 0.7),
+        p_mask_lhs_vars=mod.FloatRange(0.05, 0.15),
+        p_mask_rhs_vars=mod.FloatRange(0.5, 0.7),
+        p_mask_ops=mod.FloatRange(0.5, 0.7),
+        p_mask_funcs=mod.FloatRange(0.5, 0.7),
+        p_mask_consts=mod.FloatRange(0.5, 0.7),
         max_ptr_depth=mod.IntRange(0, 0),
         p_backedge=mod.FloatRange(0.1, 0.3),
         p_branch=mod.FloatRange(0.3, 0.5),
@@ -1266,10 +1264,16 @@ def trusted_layout_unit_tests_pass(ccommon) -> bool:
   maskable, entry_line, _ = ccommon.get_python_maskable_statements(leaf, src)
   local_names = ccommon.collect_python_leaf_locals(leaf)
   repls: list = []
-  budget: dict = {}
+  const_values: dict = {}
   for stmt in maskable:
     ccommon.collect_python_replacements(
-      stmt, src, stmt.lineno > entry_line, repls, budget, local_names, set()
+      stmt,
+      src,
+      stmt.lineno > entry_line,
+      repls,
+      local_names,
+      set(),
+      const_values=const_values,
     )
   masked = ccommon.apply_replacements(src, repls).decode("utf-8")
 
@@ -1281,8 +1285,8 @@ def trusted_layout_unit_tests_pass(ccommon) -> bool:
   check("trusted: _cast_int width stays visible", good, masked)
   ok = ok and good
 
-  good = budget == {"5": 1}
-  check("trusted: geometry args never enter the budget", good, str(budget))
+  good = set(const_values.values()) == {"5"}
+  check("trusted: geometry args never enter the budget", good, str(const_values))
   ok = ok and good
 
   return ok
@@ -1317,21 +1321,27 @@ def budget_split_unit_tests_pass(ccommon, chk_mod) -> bool:
   comments = ccommon.find_python_block_comments(src)
   live_blocks = frozenset({"entry", "exit"})
 
-  repls: list = []
+  # Every cell of every statement is in the render, so the budget counts
+  # each const cell at its statement's region.
   live_counts: dict = {}
   dead_counts: dict = {}
-  for stmt in maskable:
-    stmt_budget: dict = {}
-    ccommon.collect_python_replacements(
-      stmt, src, stmt.lineno > entry_line, repls, stmt_budget, local_names, set()
-    )
+  repls: list = []
+  cells, _lhs_spans, const_values = ccommon.collect_canonical_cells(
+    maskable, entry_line, src, local_names, set(), frozenset()
+  )
+  for start, end, token, stmt_index, _is_lhs in cells:
+    repls.append((start, end, token))
+    if token != "<FILL_CONST>":
+      continue
     slot = (
       live_counts
-      if ccommon.stmt_is_on_live_path(comments, stmt.lineno, live_blocks)
+      if ccommon.stmt_is_on_live_path(
+        comments, maskable[stmt_index].lineno, live_blocks
+      )
       else dead_counts
     )
-    for val, cnt in stmt_budget.items():
-      slot[val] = slot.get(val, 0) + cnt
+    val = const_values[(start, end)]
+    slot[val] = slot.get(val, 0) + 1
   split = ccommon.merge_const_split(live_counts, dead_counts)
 
   good = (
@@ -1350,16 +1360,14 @@ def budget_split_unit_tests_pass(ccommon, chk_mod) -> bool:
     "#//@ <FILL_CONST>: 5 0 1\n"
   )
   puzzle = banner + ccommon.apply_replacements(src, repls).decode("utf-8")
-  mask_set = chk_mod.infer_mask_set_from_puzzle(leaf, src, puzzle, set())
-  good = mask_set is not None
-  check("split: mask set infers from the split puzzle", good, str(mask_set))
+  inferred = chk_mod.infer_masked_cells(leaf, src, puzzle, set())
+  good = inferred is not None
+  check("split: mask set infers from the split puzzle", good, str(inferred))
   ok = ok and good
-  if mask_set is None:
+  if inferred is None:
     return ok
 
-  actual = chk_mod.check_remasking(
-    leaf, src, puzzle, mask_set, set(), frozenset(live_blocks)
-  )
+  actual = chk_mod.check_remasking(leaf, src, puzzle, inferred, frozenset(live_blocks))
   check("split: re-masking counts the true split", actual == split, str(actual))
 
   req = chk_mod.parse_puzzle_requirements(puzzle)
@@ -1422,10 +1430,16 @@ def sentinel_unit_tests_pass(ccommon, chk_mod) -> bool:
   maskable, entry_line, _ = ccommon.get_python_maskable_statements(leaf, src)
   local_names = ccommon.collect_python_leaf_locals(leaf)
   repls: list = []
-  budget: dict = {}
+  const_values: dict = {}
   for stmt in maskable:
     ccommon.collect_python_replacements(
-      stmt, src, stmt.lineno > entry_line, repls, budget, local_names, set()
+      stmt,
+      src,
+      stmt.lineno > entry_line,
+      repls,
+      local_names,
+      set(),
+      const_values=const_values,
     )
   masked = ccommon.apply_replacements(src, repls).decode("utf-8")
 
@@ -1441,8 +1455,8 @@ def sentinel_unit_tests_pass(ccommon, chk_mod) -> bool:
   check("sentinel: float sentinels stay visible", good, masked)
   ok = ok and good
 
-  good = budget == {"7": 1, "2": 1}
-  check("sentinel: 0/1 never enter the budget", good, str(budget))
+  good = set(const_values.values()) == {"7", "2"}
+  check("sentinel: 0/1 never enter the budget", good, str(const_values))
   ok = ok and good
 
   banner = (
@@ -1456,11 +1470,11 @@ def sentinel_unit_tests_pass(ccommon, chk_mod) -> bool:
   filled_zero = (banner + src.decode("utf-8")).replace("v9 = v3 - 2", "v9 = v3 - 0")
   filled_tree = ast.parse(filled_zero)
   filled_leaf, _ = ccommon.find_python_leaf_function(filled_tree, filled_zero)
-  zero_mask_set = chk_mod.infer_mask_set_from_puzzle(
+  inferred_zero = chk_mod.infer_masked_cells(
     filled_leaf, filled_zero.encode("utf-8"), puzzle, set()
   )
-  good = zero_mask_set is None
-  check("sentinel: filling a mark with 0 fails re-masking", good, str(zero_mask_set))
+  good = inferred_zero is None
+  check("sentinel: filling a mark with 0 fails re-masking", good, str(inferred_zero))
   ok = ok and good
 
   # Declarations keep their sentinels verbatim even when they sit in the
@@ -1470,13 +1484,13 @@ def sentinel_unit_tests_pass(ccommon, chk_mod) -> bool:
   check("sentinel: declaration sentinels remain visible", good, masked)
   ok = ok and good
 
-  mask_set = chk_mod.infer_mask_set_from_puzzle(leaf, src, puzzle, set())
+  inferred = chk_mod.infer_masked_cells(leaf, src, puzzle, set())
   split_ok = False
   detail = ""
-  if mask_set is not None:
+  if inferred is not None:
     try:
       split = chk_mod.check_remasking(
-        leaf, src, puzzle, mask_set, set(), frozenset({"entry", "b0", "exit"})
+        leaf, src, puzzle, inferred, frozenset({"entry", "b0", "exit"})
       )
       split_ok = split == {"7": (1, 0), "2": (1, 0)}
       detail = str(split)
@@ -1484,6 +1498,449 @@ def sentinel_unit_tests_pass(ccommon, chk_mod) -> bool:
       detail = str(exc)
   check("sentinel: end-to-end split excludes 0/1", split_ok, detail)
   ok = ok and split_ok
+
+  return ok
+
+
+def fine_grained_unit_tests_pass(ccommon, chk_mod, mod) -> bool:
+  """Every cell wears its kind's probability: ops/consts/funcs mask on
+  p_mask_ops/consts/funcs, variables split by side on p_mask_lhs_vars and
+  p_mask_rhs_vars, and ctrl/goto cells mask always. The checker infers the
+  masked cells from the puzzle text itself."""
+  ok = True
+  src = (
+    "def func_t(pa):\n"
+    "    v1 = 7\n"
+    "    while True:\n"
+    "        # ^entry\n"
+    "        if (pa > 0):\n"
+    "            # ^b0\n"
+    "            v2 = v1 + 5\n"
+    "            v3 = v1 * 2\n"
+    "            break\n"
+    "    # ^exit\n"
+    "    return v2\n"
+  ).encode("utf-8")
+  tree = ast.parse(src)
+  leaf, _ = ccommon.find_python_leaf_function(tree, src)
+  maskable, entry_line, _ = ccommon.get_python_maskable_statements(leaf, src)
+  local_names = ccommon.collect_python_leaf_locals(leaf)
+
+  def collect():
+    """Canonical cells per statement, with statement indices and const values."""
+    with_stmt = []
+    const_values = {}
+    for idx, stmt in enumerate(maskable):
+      repls: list = []
+      ccommon.collect_python_replacements(
+        stmt,
+        src,
+        stmt.lineno > entry_line,
+        repls,
+        local_names,
+        set(),
+        const_values=const_values,
+      )
+      for start, end, token in ccommon.canonical_cells(repls):
+        with_stmt.append((start, end, token, idx))
+    return with_stmt, const_values
+
+  stmt_cells, const_values = collect()
+
+  # (1) A partially masked body: the lhs var and the const of one statement,
+  # everything else visible. The checker infers exactly those masked cells.
+  chosen = []
+  for start, end, token, idx in stmt_cells:
+    line = src[start:end].decode("utf-8")
+    if token == "<FILL_VAR>" and src[end:].decode("utf-8").lstrip().startswith(
+      "= v1 + 5"
+    ):
+      chosen.append((start, end, token, idx))
+    elif token == "<FILL_CONST>" and (line == "5" or line == "7"):
+      chosen.append((start, end, token, idx))
+  masked_cells = [(s, e, t) for s, e, t, _ in chosen]
+  banner = (
+    "#//@ CFG_EDGE: entry -> b0\n"
+    "#//@ CFG_EDGE: b0 -> exit\n"
+    "#//@ EXEC_PATH: entry -> b0 -> exit\n"
+    "#//@ <FILL_CONST>: 7 1 0\n"
+    "#//@ <FILL_CONST>: 5 1 0\n"
+  )
+  puzzle = banner + ccommon.apply_replacements(src, masked_cells).decode("utf-8")
+  inferred = chk_mod.infer_masked_cells(leaf, src, puzzle, set(), frozenset())
+  good = inferred is not None and inferred.cells == chosen
+  check("fine: checker infers the masked cells", good, str(inferred))
+  ok = ok and good
+
+  # (2) Changed fixed code has no consistent masked set: FAIL_REMASKING.
+  tampered = puzzle.replace("return v2", "return v3", 1)
+  inferred = chk_mod.infer_masked_cells(leaf, src, tampered, set(), frozenset())
+  good = inferred is None
+  check("fine: tampered fixed code fails re-masking", good, str(inferred))
+  ok = ok and good
+
+  # (3) The budget is the multiset of masked const cells, split by their
+  # statement's region; visible const cells never enter it.
+  actual = chk_mod.check_remasking(
+    leaf,
+    src,
+    puzzle,
+    chk_mod.InferredMasks(chosen, const_values),
+    frozenset({"entry", "b0", "exit"}),
+  )
+  good = actual == {"7": (1, 0), "5": (1, 0)}
+  check("fine: budget counts only masked const cells", good, str(actual))
+  ok = ok and good
+
+  # (4) Zero probabilities still mask the forced cells: ctrl keywords and
+  # goto tokens. Nothing else shows a mask.
+  flag_src = (
+    "def func_g(x):\n"
+    "    _brk_exit = False\n"
+    "    v1 = 5\n"
+    "    while True:\n"
+    "        # ^entry\n"
+    "        v2 = v1 + x\n"
+    "        if (v2 > 3):\n"
+    "            # ^b0\n"
+    "            _brk_exit = True\n"
+    "            break\n"
+    "    # ^exit\n"
+    "    return v2\n"
+  ).encode("utf-8")
+  flag_tree = ast.parse(flag_src)
+  flag_leaf, _ = ccommon.find_python_leaf_function(flag_tree, flag_src)
+  flag_maskable, flag_entry, _ = ccommon.get_python_maskable_statements(
+    flag_leaf, flag_src
+  )
+  flag_locals = ccommon.collect_python_leaf_locals(flag_leaf)
+  zero_masked = mod.mask_puzzle(
+    flag_src,
+    flag_leaf,
+    flag_entry,
+    flag_maskable,
+    flag_locals,
+    set(),
+    mod.MaskProbs(0.0, 0.0, 0.0, 0.0, 0.0),
+    42,
+    frozenset(),
+    frozenset(),
+  )
+  body = zero_masked.puzzle_body
+  good = (
+    "<FILL_CTRL>" in body
+    and "_<FILL_CTRL>_<FILL_LABEL>" in body
+    and "<FILL_VAR>" not in body
+    and "<FILL_OP>" not in body
+    and "<FILL_CONST>" not in body
+  )
+  check("fine: zero probs leave only forced cells masked", good, body)
+  ok = ok and good
+
+  # (5) lhs and rhs variables roll separately: full lhs probability masks
+  # only assignment targets; rhs vars, ops, and consts stay visible.
+  lhs_masked = mod.mask_puzzle(
+    src,
+    leaf,
+    entry_line,
+    maskable,
+    local_names,
+    set(),
+    mod.MaskProbs(1.0, 0.0, 0.0, 0.0, 0.0),
+    42,
+    frozenset(),
+    frozenset(),
+  )
+  good = (
+    "<FILL_VAR> = v1 + 5" in lhs_masked.puzzle_body
+    and "<FILL_VAR> = v1 * 2" in lhs_masked.puzzle_body
+    and "v1 + 5" in lhs_masked.puzzle_body
+    and "return v2" in lhs_masked.puzzle_body
+  )
+  check("fine: lhs and rhs variables roll separately", good, lhs_masked.puzzle_body)
+  ok = ok and good
+
+  # (5b) rhs, ops, and consts roll independently on their own knobs.
+  rhs_masked = mod.mask_puzzle(
+    src,
+    leaf,
+    entry_line,
+    maskable,
+    local_names,
+    set(),
+    mod.MaskProbs(0.0, 1.0, 0.0, 0.0, 0.0),
+    42,
+    frozenset(),
+    frozenset(),
+  )
+  good = (
+    "v2 = <FILL_VAR> + 5" in rhs_masked.puzzle_body
+    and "v3 = <FILL_VAR> * 2" in rhs_masked.puzzle_body
+    and "<FILL_VAR> = " not in rhs_masked.puzzle_body
+  )
+  check("fine: rhs roll masks only operand variables", good, rhs_masked.puzzle_body)
+  ok = ok and good
+
+  ops_masked = mod.mask_puzzle(
+    src,
+    leaf,
+    entry_line,
+    maskable,
+    local_names,
+    set(),
+    mod.MaskProbs(0.0, 0.0, 1.0, 0.0, 0.0),
+    42,
+    frozenset(),
+    frozenset(),
+  )
+  good = (
+    "v1 <FILL_OP> 5" in ops_masked.puzzle_body
+    and "v1 <FILL_OP> 2" in ops_masked.puzzle_body
+    and "<FILL_VAR>" not in ops_masked.puzzle_body
+    and "<FILL_CONST>" not in ops_masked.puzzle_body
+  )
+  check("fine: ops roll masks only operators", good, ops_masked.puzzle_body)
+  ok = ok and good
+
+  consts_masked = mod.mask_puzzle(
+    src,
+    leaf,
+    entry_line,
+    maskable,
+    local_names,
+    set(),
+    mod.MaskProbs(0.0, 0.0, 0.0, 0.0, 1.0),
+    42,
+    frozenset(),
+    frozenset(),
+  )
+  good = (
+    "v1 + <FILL_CONST>" in consts_masked.puzzle_body
+    and "v1 * <FILL_CONST>" in consts_masked.puzzle_body
+    and "<FILL_VAR>" not in consts_masked.puzzle_body
+    and "<FILL_OP>" not in consts_masked.puzzle_body
+  )
+  check("fine: consts roll masks only constants", good, consts_masked.puzzle_body)
+  ok = ok and good
+
+  func_src = (
+    "def func_f(pa):\n"
+    "    v1 = 7\n"
+    "    while True:\n"
+    "        # ^entry\n"
+    "        if (pa > 0):\n"
+    "            # ^b0\n"
+    "            v2 = helper(v1)\n"
+    "            break\n"
+    "    # ^exit\n"
+    "    return v2\n"
+    "def helper(x):\n"
+    "    return x + 1\n"
+  ).encode("utf-8")
+  func_tree = ast.parse(func_src)
+  func_leaf, _ = ccommon.find_python_leaf_function(func_tree, func_src)
+  func_maskable, func_entry, _ = ccommon.get_python_maskable_statements(
+    func_leaf, func_src
+  )
+  func_locals = ccommon.collect_python_leaf_locals(func_leaf)
+  funcs_masked = mod.mask_puzzle(
+    func_src,
+    func_leaf,
+    func_entry,
+    func_maskable,
+    func_locals,
+    {"helper"},
+    mod.MaskProbs(0.0, 0.0, 0.0, 1.0, 0.0),
+    42,
+    frozenset(),
+    frozenset(),
+  )
+  good = (
+    "v2 = <FILL_FUNC>(v1)" in funcs_masked.puzzle_body
+    and "<FILL_VAR>" not in funcs_masked.puzzle_body
+  )
+  check("fine: funcs roll masks only function calls", good, funcs_masked.puzzle_body)
+  ok = ok and good
+
+  # (6) The piece walk is insensitive to whitespace between cells: a
+  # solution reformatted with blank lines still re-masks to the puzzle,
+  # with the same masked cells and the same budget.
+  reformatted = src.replace(b"    v2 = v1 + 5\n", b"    v2 = v1 + 5\n\n", 1)
+  fmt_tree = ast.parse(reformatted)
+  fmt_leaf, _ = ccommon.find_python_leaf_function(fmt_tree, reformatted)
+  re_inferred = chk_mod.infer_masked_cells(fmt_leaf, reformatted, puzzle, set())
+  fmt_ok = re_inferred is not None
+  if fmt_ok:
+    fmt_split = chk_mod.check_remasking(
+      fmt_leaf,
+      reformatted,
+      puzzle,
+      re_inferred,
+      frozenset({"entry", "b0", "exit"}),
+    )
+    fmt_ok = fmt_split == {"7": (1, 0), "5": (1, 0)}
+  check("fine: reformatted solution still checks", fmt_ok, str(re_inferred))
+  ok = ok and fmt_ok
+
+  # (6b) Cell spans are byte offsets: a multibyte character before a masked
+  # cell must not skew the inference walk.
+  uni_src = src.replace(
+    b"        # ^entry\n",
+    "        # caf\u00e9 note\n        # ^entry\n".encode("utf-8"),
+    1,
+  )
+  uni_tree = ast.parse(uni_src)
+  uni_leaf, _ = ccommon.find_python_leaf_function(uni_tree, uni_src)
+  uni_maskable, uni_entry, _ = ccommon.get_python_maskable_statements(uni_leaf, uni_src)
+  uni_locals = ccommon.collect_python_leaf_locals(uni_leaf)
+  uni_cells, _uni_lhs, _uni_cvals = ccommon.collect_canonical_cells(
+    uni_maskable, uni_entry, uni_src, uni_locals, set(), frozenset()
+  )
+  uni_tgt = [(s, e, t) for s, e, t, _si, _lhs in uni_cells if uni_src[s:e] == b"5"]
+  uni_puzzle = banner + ccommon.apply_replacements(uni_src, uni_tgt).decode("utf-8")
+  uni_inferred = chk_mod.infer_masked_cells(uni_leaf, uni_src, uni_puzzle, set())
+  uni_ok = uni_inferred is not None and len(uni_inferred.cells) == 1
+  check("fine: multibyte text before a cell still infers", uni_ok, str(uni_inferred))
+  ok = ok and uni_ok
+
+  # (7) The five knobs carry defaults (lhs 0.1, rest 0.75), reject values
+  # outside [0, 1], and sample within each profile's five ranges.
+  cfg = mod.GeneratorConfig(
+    n_bbls=2,
+    n_stmts=2,
+    min_loop_iter=1,
+    max_ptr_depth=0,
+    p_backedge=0.5,
+    p_branch=0.5,
+    n_vars=4,
+    n_params=2,
+    lift_consts=False,
+  )
+  good = (
+    cfg.p_mask_lhs_vars == 0.1
+    and cfg.p_mask_rhs_vars == 0.75
+    and cfg.p_mask_ops == 0.75
+    and cfg.p_mask_funcs == 0.75
+    and cfg.p_mask_consts == 0.75
+  )
+  check("fine: five knobs carry defaults", good, str(cfg))
+  ok = ok and good
+
+  bad_cfg = mod.GeneratorConfig(
+    n_bbls=2,
+    n_stmts=2,
+    min_loop_iter=1,
+    p_mask_lhs_vars=1.5,
+    max_ptr_depth=0,
+    p_backedge=0.5,
+    p_branch=0.5,
+    n_vars=4,
+    n_params=2,
+    lift_consts=False,
+  )
+  bad_ok = False
+  try:
+    bad_cfg.validate()
+  except ValueError:
+    bad_ok = True
+  check("fine: out-of-range knob rejected", bad_ok, str(bad_cfg))
+  ok = ok and bad_ok
+
+  for name, prof in mod.PROFILES.items():
+    prof.validate(name)
+    rng = __import__("random").Random(2)
+    for _ in range(20):
+      sampled_cfg = mod.sample_config(prof, rng)
+      sampled = (
+        prof.p_mask_ops.minimum <= sampled_cfg.p_mask_ops <= prof.p_mask_ops.maximum
+        and prof.p_mask_lhs_vars.minimum
+        <= sampled_cfg.p_mask_lhs_vars
+        <= prof.p_mask_lhs_vars.maximum
+        and prof.p_mask_rhs_vars.minimum
+        <= sampled_cfg.p_mask_rhs_vars
+        <= prof.p_mask_rhs_vars.maximum
+        and prof.p_mask_funcs.minimum
+        <= sampled_cfg.p_mask_funcs
+        <= prof.p_mask_funcs.maximum
+        and prof.p_mask_consts.minimum
+        <= sampled_cfg.p_mask_consts
+        <= prof.p_mask_consts.maximum
+      )
+      if not sampled:
+        check(f"fine: {name} samples the five within ranges", False, str(sampled_cfg))
+        ok = False
+        break
+    else:
+      check(f"fine: {name} samples the five within ranges", True)
+
+  # (8) AugAssign targets are left-hand side: they roll on p_mask_lhs_vars.
+  aug_src = (
+    "def func_t(pa):\n"
+    "    v1 = 7\n"
+    "    while True:\n"
+    "        # ^entry\n"
+    "        if (pa > 0):\n"
+    "            # ^b0\n"
+    "            v2 = v1 + 5\n"
+    "            v2 += 3\n"
+    "            break\n"
+    "    # ^exit\n"
+    "    return v2\n"
+  ).encode("utf-8")
+  aug_tree = ast.parse(aug_src)
+  aug_leaf, _ = ccommon.find_python_leaf_function(aug_tree, aug_src)
+  aug_maskable, aug_entry, _ = ccommon.get_python_maskable_statements(aug_leaf, aug_src)
+  aug_locals = ccommon.collect_python_leaf_locals(aug_leaf)
+  good = any(isinstance(s, ast.AugAssign) for s in aug_maskable)
+  check("fine: augassign statement is maskable", good, str(aug_maskable))
+  ok = ok and good
+
+  aug_stmt = next((s for s in aug_maskable if isinstance(s, ast.AugAssign)), None)
+  if aug_stmt is None:
+    check("fine: augassign target is lhs", False, "no AugAssign statement found")
+    ok = False
+    return ok
+  aug_repls: list = []
+  aug_lhs: set = set()
+  ccommon.collect_python_replacements(
+    aug_stmt, aug_src, True, aug_repls, aug_locals, set(), lhs_spans=aug_lhs
+  )
+  aug_target = [(s, e) for s, e, t in aug_repls if aug_src[s:e] == b"v2"]
+  good = len(aug_target) == 1 and aug_target[0] in aug_lhs
+  check("fine: augassign target is lhs", good, str(aug_repls))
+  ok = ok and good
+
+  aug_lhs_masked = mod.mask_puzzle(
+    aug_src,
+    aug_leaf,
+    aug_entry,
+    aug_maskable,
+    aug_locals,
+    set(),
+    mod.MaskProbs(1.0, 0.0, 0.0, 0.0, 0.0),
+    42,
+    frozenset(),
+    frozenset(),
+  )
+  good = "<FILL_VAR> += 3" in aug_lhs_masked.puzzle_body
+  check("fine: lhs roll masks the augassign target", good, aug_lhs_masked.puzzle_body)
+  ok = ok and good
+
+  aug_rhs_masked = mod.mask_puzzle(
+    aug_src,
+    aug_leaf,
+    aug_entry,
+    aug_maskable,
+    aug_locals,
+    set(),
+    mod.MaskProbs(0.0, 1.0, 0.0, 0.0, 0.0),
+    42,
+    frozenset(),
+    frozenset(),
+  )
+  good = "v2 += 3" in aug_rhs_masked.puzzle_body
+  check("fine: rhs roll leaves the augassign target", good, aug_rhs_masked.puzzle_body)
+  ok = ok and good
 
   return ok
 
@@ -1506,6 +1963,7 @@ def main():
   trusted_layout_unit_tests_pass(ccommon)
   budget_split_unit_tests_pass(ccommon, chk_mod)
   sentinel_unit_tests_pass(ccommon, chk_mod)
+  fine_grained_unit_tests_pass(ccommon, chk_mod, mod)
 
   with tempfile.TemporaryDirectory(prefix="codoku_gen_") as workdir:
     # Mirror the image layout: codoku + vendored modules + rysmith in one dir.
@@ -1619,7 +2077,11 @@ def main():
       n_bbls=5,
       n_stmts=2,
       min_loop_iter=1,
-      p_mask=1.0,
+      p_mask_lhs_vars=1.0,
+      p_mask_rhs_vars=1.0,
+      p_mask_ops=1.0,
+      p_mask_funcs=1.0,
+      p_mask_consts=1.0,
       max_ptr_depth=0,
       p_backedge=0.4,
       p_branch=0.5,

@@ -28,13 +28,12 @@ from codoku_common import (
   ConstBudget,
   apply_replacements,
   build_python_cfg,
+  collect_canonical_cells,
   collect_python_leaf_locals,
-  collect_python_replacements,
   find_python_block_comments,
   find_python_leaf_function,
   get_line_indent,
   get_python_maskable_statements,
-  mentions_go_flag,
   merge_const_split,
   stmt_is_on_live_path,
   strip_refractir_prefix,
@@ -46,7 +45,6 @@ from codoku_complexity import (
   PuzzleMetrics,
   analyze_puzzle,
   estimate_complexity,
-  filter_disabled_masks,
 )
 
 DEFAULT_MAX_ATTEMPTS = 20
@@ -272,6 +270,22 @@ class FloatRange:
       raise ValueError(f"{name}: minimum {self.minimum} exceeds maximum {self.maximum}")
 
 
+class MaskProbs(NamedTuple):
+  """Fine-grained per-element masking probabilities.
+
+  Each cell of a maskable statement masks independently: variables by
+  side, operators, function names, and constants by kind, so no whole
+  statement is masked or left visible as a unit. Ctrl keywords and goto
+  tokens mask always; disabled kinds stay visible.
+  """
+
+  p_mask_lhs_vars: float = 0.1
+  p_mask_rhs_vars: float = 0.75
+  p_mask_ops: float = 0.75
+  p_mask_funcs: float = 0.75
+  p_mask_consts: float = 0.75
+
+
 @dataclass(frozen=True)
 class GeneratorConfig:
   """Inputs passed to rysmith (see `rysmith --help`).
@@ -283,13 +297,17 @@ class GeneratorConfig:
   n_bbls: int
   n_stmts: int
   min_loop_iter: int
-  p_mask: float
   max_ptr_depth: int
   p_backedge: float
   p_branch: float
   n_vars: int
   n_params: int
   lift_consts: bool
+  p_mask_lhs_vars: float = 0.1
+  p_mask_rhs_vars: float = 0.75
+  p_mask_ops: float = 0.75
+  p_mask_funcs: float = 0.75
+  p_mask_consts: float = 0.75
   features: tuple[str, ...] = ()
   disabled_masks: frozenset[str] = frozenset()
 
@@ -300,8 +318,6 @@ class GeneratorConfig:
       raise ValueError("n_stmts must be at least 1")
     if self.min_loop_iter < 0:
       raise ValueError("min_loop_iter must be at least 0")
-    if not 0.0 <= self.p_mask <= 1.0:
-      raise ValueError("p_mask must be in [0, 1]")
     if self.max_ptr_depth < 0:
       raise ValueError("max_ptr_depth must be at least 0")
     if not 0.0 <= self.p_backedge <= 1.0:
@@ -312,6 +328,16 @@ class GeneratorConfig:
       raise ValueError("n_vars must be at least 1")
     if self.n_params < 1:
       raise ValueError("n_params must be at least 1")
+    for name in (
+      "p_mask_lhs_vars",
+      "p_mask_rhs_vars",
+      "p_mask_ops",
+      "p_mask_funcs",
+      "p_mask_consts",
+    ):
+      value = getattr(self, name)
+      if not 0.0 <= value <= 1.0:
+        raise ValueError(f"{name} must be in [0, 1]")
 
 
 @dataclass(frozen=True)
@@ -325,7 +351,11 @@ class GenerationProfile:
   n_bbls: IntRange
   n_stmts: IntRange
   min_loop_iter: IntRange
-  p_mask: FloatRange
+  p_mask_lhs_vars: FloatRange
+  p_mask_rhs_vars: FloatRange
+  p_mask_ops: FloatRange
+  p_mask_funcs: FloatRange
+  p_mask_consts: FloatRange
   max_ptr_depth: IntRange
   p_backedge: FloatRange
   p_branch: FloatRange
@@ -340,16 +370,24 @@ class GenerationProfile:
     self.n_bbls.validate(f"{name}.n_bbls")
     self.n_stmts.validate(f"{name}.n_stmts")
     self.min_loop_iter.validate(f"{name}.min_loop_iter")
-    self.p_mask.validate(f"{name}.p_mask")
     self.max_ptr_depth.validate(f"{name}.max_ptr_depth")
     self.p_backedge.validate(f"{name}.p_backedge")
     self.p_branch.validate(f"{name}.p_branch")
     self.n_vars.validate(f"{name}.n_vars")
     self.n_params.validate(f"{name}.n_params")
-    if not 0.0 <= self.p_mask.minimum <= 1.0:
-      raise ValueError(f"{name}.p_mask minimum must be in [0, 1]")
-    if not 0.0 <= self.p_mask.maximum <= 1.0:
-      raise ValueError(f"{name}.p_mask maximum must be in [0, 1]")
+    for range_name in (
+      "p_mask_lhs_vars",
+      "p_mask_rhs_vars",
+      "p_mask_ops",
+      "p_mask_funcs",
+      "p_mask_consts",
+    ):
+      rng = getattr(self, range_name)
+      rng.validate(f"{name}.{range_name}")
+      if not 0.0 <= rng.minimum <= 1.0:
+        raise ValueError(f"{name}.{range_name} minimum must be in [0, 1]")
+      if not 0.0 <= rng.maximum <= 1.0:
+        raise ValueError(f"{name}.{range_name} maximum must be in [0, 1]")
     if not 0.0 <= self.p_backedge.minimum <= 1.0:
       raise ValueError(f"{name}.p_backedge minimum must be in [0, 1]")
     if not 0.0 <= self.p_backedge.maximum <= 1.0:
@@ -375,12 +413,16 @@ class GenerationProfile:
 
 PROFILES: dict[str, GenerationProfile] = {
   # ---- by size ----
-  # A small function with a short path, where part of the code stays visible and constants need no maching.
+  # A small function with a short path, where part of the code stays visible and constants need no matching.
   "small": GenerationProfile(
     n_bbls=IntRange(2, 4),
     n_stmts=IntRange(2, 3),
     min_loop_iter=IntRange(0, 1),
-    p_mask=FloatRange(0.5, 0.7),
+    p_mask_lhs_vars=FloatRange(0.1, 0.1),
+    p_mask_rhs_vars=FloatRange(0.75, 0.75),
+    p_mask_ops=FloatRange(0.75, 0.75),
+    p_mask_funcs=FloatRange(1.0, 1.0),
+    p_mask_consts=FloatRange(0.75, 0.75),
     max_ptr_depth=IntRange(0, 0),
     p_backedge=FloatRange(0.1, 0.3),
     p_branch=FloatRange(0.3, 0.5),
@@ -405,7 +447,11 @@ PROFILES: dict[str, GenerationProfile] = {
     n_bbls=IntRange(3, 6),
     n_stmts=IntRange(2, 4),
     min_loop_iter=IntRange(1, 2),
-    p_mask=FloatRange(0.8, 1.0),
+    p_mask_lhs_vars=FloatRange(0.1, 0.1),
+    p_mask_rhs_vars=FloatRange(0.75, 0.75),
+    p_mask_ops=FloatRange(0.75, 0.75),
+    p_mask_funcs=FloatRange(1.0, 1.0),
+    p_mask_consts=FloatRange(0.75, 0.75),
     max_ptr_depth=IntRange(1, 1),
     p_backedge=FloatRange(0.2, 0.4),
     p_branch=FloatRange(0.4, 0.6),
@@ -428,7 +474,11 @@ PROFILES: dict[str, GenerationProfile] = {
     n_bbls=IntRange(6, 10),
     n_stmts=IntRange(3, 5),
     min_loop_iter=IntRange(2, 4),
-    p_mask=FloatRange(1.0, 1.0),
+    p_mask_lhs_vars=FloatRange(0.1, 0.1),
+    p_mask_rhs_vars=FloatRange(0.75, 0.75),
+    p_mask_ops=FloatRange(0.75, 0.75),
+    p_mask_funcs=FloatRange(1.0, 1.0),
+    p_mask_consts=FloatRange(0.75, 0.75),
     max_ptr_depth=IntRange(2, 2),
     p_backedge=FloatRange(0.3, 0.5),
     p_branch=FloatRange(0.5, 0.7),
@@ -448,7 +498,11 @@ PROFILES: dict[str, GenerationProfile] = {
     n_bbls=IntRange(6, 10),
     n_stmts=IntRange(3, 5),
     min_loop_iter=IntRange(1, 2),
-    p_mask=FloatRange(1.0, 1.0),
+    p_mask_lhs_vars=FloatRange(1.0, 1.0),
+    p_mask_rhs_vars=FloatRange(1.0, 1.0),
+    p_mask_ops=FloatRange(1.0, 1.0),
+    p_mask_funcs=FloatRange(1.0, 1.0),
+    p_mask_consts=FloatRange(1.0, 1.0),
     max_ptr_depth=IntRange(1, 1),
     p_backedge=FloatRange(0.20, 0.40),
     p_branch=FloatRange(0.50, 0.70),
@@ -471,7 +525,11 @@ PROFILES: dict[str, GenerationProfile] = {
     n_bbls=IntRange(6, 10),
     n_stmts=IntRange(3, 5),
     min_loop_iter=IntRange(1, 2),
-    p_mask=FloatRange(1.0, 1.0),
+    p_mask_lhs_vars=FloatRange(1.0, 1.0),
+    p_mask_rhs_vars=FloatRange(1.0, 1.0),
+    p_mask_ops=FloatRange(1.0, 1.0),
+    p_mask_funcs=FloatRange(1.0, 1.0),
+    p_mask_consts=FloatRange(1.0, 1.0),
     max_ptr_depth=IntRange(1, 1),
     p_backedge=FloatRange(0.20, 0.40),
     p_branch=FloatRange(0.50, 0.70),
@@ -494,7 +552,11 @@ PROFILES: dict[str, GenerationProfile] = {
     n_bbls=IntRange(6, 10),
     n_stmts=IntRange(3, 5),
     min_loop_iter=IntRange(1, 2),
-    p_mask=FloatRange(1.0, 1.0),
+    p_mask_lhs_vars=FloatRange(1.0, 1.0),
+    p_mask_rhs_vars=FloatRange(1.0, 1.0),
+    p_mask_ops=FloatRange(1.0, 1.0),
+    p_mask_funcs=FloatRange(1.0, 1.0),
+    p_mask_consts=FloatRange(1.0, 1.0),
     max_ptr_depth=IntRange(1, 1),
     p_backedge=FloatRange(0.20, 0.40),
     p_branch=FloatRange(0.50, 0.70),
@@ -520,7 +582,11 @@ PROFILES: dict[str, GenerationProfile] = {
     n_bbls=IntRange(5, 8),
     n_stmts=IntRange(3, 5),
     min_loop_iter=IntRange(1, 2),
-    p_mask=FloatRange(0.60, 0.75),
+    p_mask_lhs_vars=FloatRange(0.05, 0.15),
+    p_mask_rhs_vars=FloatRange(0.60, 0.75),
+    p_mask_ops=FloatRange(0.60, 0.75),
+    p_mask_funcs=FloatRange(0.60, 0.75),
+    p_mask_consts=FloatRange(0.60, 0.75),
     max_ptr_depth=IntRange(0, 0),
     p_backedge=FloatRange(0.20, 0.35),
     p_branch=FloatRange(0.40, 0.60),
@@ -545,7 +611,11 @@ PROFILES: dict[str, GenerationProfile] = {
     n_bbls=IntRange(5, 8),
     n_stmts=IntRange(3, 5),
     min_loop_iter=IntRange(2, 3),
-    p_mask=FloatRange(0.65, 0.85),
+    p_mask_lhs_vars=FloatRange(0.05, 0.15),
+    p_mask_rhs_vars=FloatRange(0.65, 0.85),
+    p_mask_ops=FloatRange(0.65, 0.85),
+    p_mask_funcs=FloatRange(0.65, 0.85),
+    p_mask_consts=FloatRange(0.65, 0.85),
     max_ptr_depth=IntRange(0, 0),
     p_backedge=FloatRange(0.30, 0.45),
     p_branch=FloatRange(0.40, 0.60),
@@ -569,7 +639,11 @@ PROFILES: dict[str, GenerationProfile] = {
     n_bbls=IntRange(6, 10),
     n_stmts=IntRange(3, 5),
     min_loop_iter=IntRange(1, 2),
-    p_mask=FloatRange(0.70, 0.90),
+    p_mask_lhs_vars=FloatRange(0.05, 0.15),
+    p_mask_rhs_vars=FloatRange(0.70, 0.90),
+    p_mask_ops=FloatRange(0.70, 0.90),
+    p_mask_funcs=FloatRange(0.70, 0.90),
+    p_mask_consts=FloatRange(0.70, 0.90),
     max_ptr_depth=IntRange(1, 1),
     p_backedge=FloatRange(0.20, 0.40),
     p_branch=FloatRange(0.50, 0.70),
@@ -750,6 +824,31 @@ class MaskedPuzzle(NamedTuple):
   budget_counts: ConstBudget
 
 
+def _cell_prob(token: str, is_lhs: bool, probs: MaskProbs) -> float:
+  """Per-cell masking probability from the cell's kind.
+
+  Variable cells split by side (assignment targets from RHS uses); ops,
+  function names, and constants wear their own kind's probability. Ctrl
+  keywords and goto tokens mask always: they steer the prescribed path,
+  and a visible flag target would reveal every other <FILL_LABEL> slot's
+  target. Disabled kinds never reach a cell list.
+  """
+  if token == "<FILL_CTRL>":
+    return 1.0
+  if "<FILL_LABEL>" in token:
+    # Goto-flag targets (``_go_<FILL_LABEL>`` and ``_<FILL_CTRL>_<FILL_LABEL>``).
+    return 1.0
+  if token == "<FILL_VAR>":
+    return probs.p_mask_lhs_vars if is_lhs else probs.p_mask_rhs_vars
+  if token == "<FILL_CONST>":
+    return probs.p_mask_consts
+  if token == "<FILL_OP>":
+    return probs.p_mask_ops
+  if token == "<FILL_FUNC>":
+    return probs.p_mask_funcs
+  return 1.0
+
+
 def mask_puzzle(
   src: bytes,
   leaf_node: ast.FunctionDef,
@@ -757,7 +856,7 @@ def mask_puzzle(
   maskable: list,
   local_names: set[str],
   defined_funcs: set[str],
-  p_mask: float,
+  probs: MaskProbs,
   seed: int | None,
   live_blocks: frozenset[str],
   disabled_masks: frozenset[str] = frozenset(),
@@ -765,57 +864,52 @@ def mask_puzzle(
   """Return a MaskedPuzzle (puzzle_body, gt_body, mask_set, budget_counts).
 
   puzzle_body has both the DUMP_TRACE instrumentation and the <FILL_XXX> masks;
-  gt_body has only the instrumentation.  Kinds in *disabled_masks* stay
-  visible; their constructs are never masked.  budget_counts maps each
-  constant to its (live, dead) slot split: slots in blocks on the
-  prescribed path (plus pre-entry declarations) are live, the rest dead.
+  gt_body has only the instrumentation.  Every cell of every maskable
+  statement masks independently on its kind's probability (variables by
+  side), so a masked statement may still show visible cells and a
+  skipped one may still show a mask; ctrl keywords and goto tokens mask
+  always; kinds in *disabled_masks* stay visible.  mask_set indexes the
+  canonical cell list the masked cells came from.  budget_counts maps
+  each masked constant to its (live, dead) slot split: slots in blocks
+  on the prescribed path (plus pre-entry declarations) are live, the
+  rest dead.
   """
   mask_seed = seed if seed is not None else random.randint(0, 2**31 - 1)
   rng = random.Random(mask_seed)
 
-  mask_set: set[int] = set()
-  if p_mask > 0.0:
-    for _ in range(100):
-      mask_set = set()
-      for idx in range(len(maskable)):
-        if rng.random() < p_mask:
-          mask_set.add(idx)
-      if mask_set:
-        break
-    if not mask_set and p_mask > 1e-9:
-      raise RuntimeError("failed to build a non-empty mask set after 100 attempts")
+  cells, _lhs_spans, const_values = collect_canonical_cells(
+    maskable, entry_line, src, local_names, defined_funcs, disabled_masks
+  )
 
-  # Goto flags of any spelling are always masked: one visible occurrence
-  # would reveal every other <FILL_LABEL> slot's target.
-  for idx, stmt in enumerate(maskable):
-    if mentions_go_flag(stmt):
-      mask_set.add(idx)
+  mask_set: set[int] = set()
+  for _ in range(100):
+    mask_set = {
+      idx
+      for idx, (_s, _e, token, _si, is_lhs) in enumerate(cells)
+      if rng.random() < _cell_prob(token, is_lhs, probs)
+    }
+    if mask_set:
+      break
+  if not mask_set:
+    raise RuntimeError("failed to mask any cell after 100 attempts")
 
   trace_repls = build_trace_replacements(leaf_node, src)
   comments = find_python_block_comments(src)
   live_counts: dict[str, int] = {}
   dead_counts: dict[str, int] = {}
   mask_repls: list = []
-  const_disabled = "<FILL_CONST>" in disabled_masks
-  for idx, stmt in enumerate(maskable):
-    if idx in mask_set:
-      is_body = stmt.lineno > entry_line
-      stmt_repls: list = []
-      stmt_budget: dict[str, int] = {}
-      collect_python_replacements(
-        stmt, src, is_body, stmt_repls, stmt_budget, local_names, defined_funcs
+  for idx in sorted(mask_set):
+    start, end, token, stmt_index, _is_lhs = cells[idx]
+    mask_repls.append((start, end, token))
+    if token == "<FILL_CONST>":
+      val = const_values[(start, end)]
+      stmt = maskable[stmt_index]
+      slot_counts = (
+        live_counts
+        if stmt_is_on_live_path(comments, stmt.lineno, live_blocks)
+        else dead_counts
       )
-      # Disabled kinds stay visible: drop their spans so only enabled
-      # kinds are masked (goto-flag spans never match a known kind).
-      mask_repls.extend(filter_disabled_masks(stmt_repls, disabled_masks))
-      if not const_disabled:
-        slot_counts = (
-          live_counts
-          if stmt_is_on_live_path(comments, stmt.lineno, live_blocks)
-          else dead_counts
-        )
-        for val, cnt in stmt_budget.items():
-          slot_counts[val] = slot_counts.get(val, 0) + cnt
+      slot_counts[val] = slot_counts.get(val, 0) + 1
 
   puzzle_body = apply_replacements(src, trace_repls + mask_repls).decode("utf-8")
   gt_body = apply_replacements(src, trace_repls).decode("utf-8")
@@ -905,16 +999,20 @@ def self_check(
     return False
   local_names = collect_python_leaf_locals(gt_leaf)
 
-  # self-check verifies structure only; the budget is unused.
-  remasked_repls: list = []
-  for idx, stmt in enumerate(gt_maskable):
-    if idx in mask_set:
-      is_body = stmt.lineno > entry_line
-      stmt_repls: list = []
-      collect_python_replacements(
-        stmt, gt_bytes, is_body, stmt_repls, {}, local_names, defined_funcs
-      )
-      remasked_repls.extend(filter_disabled_masks(stmt_repls, disabled_masks))
+  # self-check verifies structure only; the budget is unused. The masked
+  # cells re-derive from the ground truth over the same cell pipeline the
+  # puzzle was built with, so any divergence fails loudly here.
+  cells, _lhs_spans, _const_values = collect_canonical_cells(
+    gt_maskable, entry_line, gt_bytes, local_names, defined_funcs, disabled_masks
+  )
+  try:
+    remasked_repls = [cells[idx][:3] for idx in sorted(mask_set)]
+  except IndexError:
+    print(
+      "Error: self-check failed: mask set out of range for the cell list.",
+      file=sys.stderr,
+    )
+    return False
   remasked = apply_replacements(gt_bytes, remasked_repls).decode("utf-8")
   if remasked != puzzle_body:
     print(
@@ -953,7 +1051,11 @@ def sample_config(profile: GenerationProfile, rng: random.Random) -> GeneratorCo
     n_bbls=profile.n_bbls.sample(rng),
     n_stmts=profile.n_stmts.sample(rng),
     min_loop_iter=profile.min_loop_iter.sample(rng),
-    p_mask=round(profile.p_mask.sample(rng), 4),
+    p_mask_lhs_vars=round(profile.p_mask_lhs_vars.sample(rng), 4),
+    p_mask_rhs_vars=round(profile.p_mask_rhs_vars.sample(rng), 4),
+    p_mask_ops=round(profile.p_mask_ops.sample(rng), 4),
+    p_mask_funcs=round(profile.p_mask_funcs.sample(rng), 4),
+    p_mask_consts=round(profile.p_mask_consts.sample(rng), 4),
     max_ptr_depth=profile.max_ptr_depth.sample(rng),
     p_backedge=round(profile.p_backedge.sample(rng), 4),
     p_branch=round(profile.p_branch.sample(rng), 4),
@@ -1078,6 +1180,13 @@ def generate_candidate(
     block.strip() for block in path_str.split("->") if block.strip()
   )
 
+  probs = MaskProbs(
+    p_mask_lhs_vars=config.p_mask_lhs_vars,
+    p_mask_rhs_vars=config.p_mask_rhs_vars,
+    p_mask_ops=config.p_mask_ops,
+    p_mask_funcs=config.p_mask_funcs,
+    p_mask_consts=config.p_mask_consts,
+  )
   masked = mask_puzzle(
     src,
     leaf_node,
@@ -1085,7 +1194,7 @@ def generate_candidate(
     maskable,
     local_names,
     defined_funcs,
-    config.p_mask,
+    probs,
     used_seed,
     live_blocks,
     config.disabled_masks,

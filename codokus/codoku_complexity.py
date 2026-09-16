@@ -437,21 +437,6 @@ NONDISABLEABLE_MASKS = frozenset(
 KNOWN_MASKS = DISABLEABLE_MASKS | NONDISABLEABLE_MASKS
 
 
-def filter_disabled_masks(repls: list, disabled: frozenset[str]) -> list:
-  """Drop replacements whose mask text is in *disabled*.
-
-  Masking locates each blank as a ``(start, end, mask_text)`` span; a
-  profile that disables kinds keeps those constructs visible by dropping
-  their spans before the puzzle is rendered.  Exact-token filtering is
-  why goto flags survive: ``_go_<FILL_LABEL>`` and
-  ``_<FILL_CTRL>_<FILL_LABEL>`` are compound tokens, not known kinds, so
-  disabling any kind leaves every flag target hidden.
-  """
-  if not disabled:
-    return repls
-  return [repl for repl in repls if repl[2] not in disabled]
-
-
 # ---------------------------------------------------------------------------
 # Solution-space estimation
 # ---------------------------------------------------------------------------
