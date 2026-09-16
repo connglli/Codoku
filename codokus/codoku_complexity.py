@@ -480,7 +480,7 @@ def count_code_masks(text: str) -> Counter[str]:
 
 
 def collect_fill_choices(
-  text: str, budget_values: set[str], n_cfg_nodes: int
+  text: str, budget_values: set[str], n_cfg_nodes: int, tree=None
 ) -> dict[str, int]:
   """Candidate-token vocabulary size for one slot of each mask kind.
 
@@ -498,8 +498,10 @@ def collect_fill_choices(
                   the node count is the approximation).
   - <FILL_TYPE>/<FILL_FIELD>: unused by the Python target (0).
 
-  If the de-masked source fails to parse, the AST-derived entries
-  (<FILL_VAR>, <FILL_FUNC>) stay 0.
+  The AST-derived entries (<FILL_VAR>, <FILL_FUNC>) come from *tree* when
+  one is given (the ground-truth tree at generation); a masked ternary's
+  `else` makes the placeholder-demasked text unparsable, so that parse is
+  only the last fallback, and failing it keeps those entries at 0.
   """
   choices: dict[str, int] = {kind: 0 for kind in KNOWN_MASKS}
   op_symbols = {
@@ -514,11 +516,11 @@ def collect_fill_choices(
     len(budget_values) if budget_values else UNBOUNDED_FILL_CONST_CHOICES
   )
 
-  try:
-    tree = ast.parse(
+  if tree is None:
+    tree = _tree_from_source(
       MASK_TOKEN_RE.sub(lambda m: FILL_PARSE_PLACEHOLDERS.get(m.group(0), "None"), text)
     )
-  except SyntaxError:
+  if tree is None:
     return choices
 
   leaf, _ = find_python_leaf_function(tree, b"")
@@ -551,11 +553,18 @@ def estimate_sol_space_log10(
   return total
 
 
+def _tree_from_source(source: str) -> ast.Module | None:
+  """Parse source and return its tree, or None when unavailable."""
+  try:
+    return ast.parse(source)
+  except SyntaxError:
+    return None
+
+
 def _leaf_from_source(source: str) -> ast.FunctionDef | None:
   """Parse source and return its leaf function, or None when unavailable."""
-  try:
-    tree = ast.parse(source)
-  except SyntaxError:
+  tree = _tree_from_source(source)
+  if tree is None:
     return None
   leaf, _ = find_python_leaf_function(tree, b"")
   return leaf
@@ -668,22 +677,27 @@ def analyze_puzzle(path: Path, gt_path: Path | None = None) -> PuzzleMetrics:
   for known_mask in KNOWN_MASKS:
     masks.setdefault(known_mask, 0)
 
-  fill_choices = collect_fill_choices(text, const_budget_values, node_count)
+  # Vocabulary, data flow, and the <FILL_VAR>/<FILL_FUNC> fill choices all
+  # prefer the ground-truth tree: the placeholder-demasked puzzle cannot
+  # parse when a masked ternary's `else` reforms into a placeholder, and
+  # an unparsable tree keeps those measurements at zero.
+  gt_source = resolve_vocab_source(path, gt_path)
+  vocab_tree = None
+  if gt_source is not None:
+    try:
+      vocab_tree = _tree_from_source(gt_source.read_text())
+    except (OSError, UnicodeError):
+      vocab_tree = None
+  fill_choices = collect_fill_choices(text, const_budget_values, node_count, vocab_tree)
   sol_space_log10 = estimate_sol_space_log10(masks, fill_choices)
 
   non_comment_lines = sum(
     1 for line in lines if line.strip() and not line.lstrip().startswith("#")
   )
 
-  # Vocabulary and data-flow prefer the ground-truth leaf (see docstring);
-  # the placeholder-demasked puzzle is only the fallback.
-  gt_source = resolve_vocab_source(path, gt_path)
   leaf_node = None
-  if gt_source is not None:
-    try:
-      leaf_node = _leaf_from_source(gt_source.read_text())
-    except (OSError, UnicodeError):
-      leaf_node = None
+  if vocab_tree is not None:
+    leaf_node, _ = find_python_leaf_function(vocab_tree, b"")
   if leaf_node is None:
     demasked = MASK_TOKEN_RE.sub(
       lambda m: FILL_PARSE_PLACEHOLDERS.get(m.group(0), "None"), text
@@ -860,12 +874,34 @@ def run_analyze(
     return 0
 
   print(f"Puzzle analysis: {path}")
-  print("  structure:")
+  if vocab_source is not None:
+    print(f"  ground-truth source: {vocab_source}")
+  else:
+    print("  ground-truth source: placeholder fallback (no usable GT file found)")
+  print("  vocabulary (Halstead, leaf-scoped, no time/defect heuristics):")
+  print(
+    f"    operators={metrics.hal_operators} operands={metrics.hal_operands}"
+    f" total_operators={metrics.hal_total_operators}"
+    f" total_operands={metrics.hal_total_operands}"
+    f" vocabulary={metrics.hal_vocabulary} length={metrics.hal_length}"
+  )
+  print(
+    f"    volume={metrics.hal_volume:.2f}"
+    f" difficulty={metrics.hal_difficulty:.2f}"
+    f" effort={metrics.hal_effort:.2f}"
+  )
+  print("  control flow (McCabe):")
   print(f"    cfg_nodes={metrics.cfg_nodes} cfg_edges={metrics.cfg_edges}")
   print(f"    cyclomatic={metrics.cyclomatic}")
   print(
     f"    source_lines={metrics.source_lines}"
     f" non_comment_source_lines={metrics.non_comment_source_lines}"
+  )
+  print("  data flow (DepDegree, nearest-prior reaching defs):")
+  print(
+    f"    nodes={metrics.dep_nodes} edges={metrics.dep_edges}"
+    f" avg_degree={metrics.dep_avg_degree:.2f} max_degree={metrics.dep_max_degree}"
+    f" density={metrics.dep_density:.4f}"
   )
   print("  execution path:")
   print(
@@ -890,29 +926,8 @@ def run_analyze(
     f"    entries={metrics.const_budget_entries}"
     f" total_slots={metrics.const_budget_total}"
   )
-  print("  vocabulary (Halstead, leaf-scoped, no time/defect heuristics):")
-  print(
-    f"    operators={metrics.hal_operators} operands={metrics.hal_operands}"
-    f" total_operators={metrics.hal_total_operators}"
-    f" total_operands={metrics.hal_total_operands}"
-    f" vocabulary={metrics.hal_vocabulary} length={metrics.hal_length}"
-  )
-  print(
-    f"    volume={metrics.hal_volume:.2f}"
-    f" difficulty={metrics.hal_difficulty:.2f}"
-    f" effort={metrics.hal_effort:.2f}"
-  )
-  print("  data flow (DepDegree, nearest-prior reaching defs):")
-  print(
-    f"    nodes={metrics.dep_nodes} edges={metrics.dep_edges}"
-    f" avg_degree={metrics.dep_avg_degree:.2f} max_degree={metrics.dep_max_degree}"
-    f" density={metrics.dep_density:.4f}"
-  )
-  if vocab_source is not None:
-    print(f"  vocab source: {vocab_source}")
-  else:
-    print("  vocab source: placeholder fallback (no usable GT file found)")
-  print(f"  solution space: log10={metrics.sol_space_log10:.2f}")
+  print("  solution space:")
+  print(f"    log10={metrics.sol_space_log10:.2f}")
   print("  complexity estimate (heuristic, uncalibrated):")
   for axis in ("static_struct", "dynamic_trace", "masking", "constraints"):
     print(f"    {axis}={getattr(estimate, axis):.2f}")

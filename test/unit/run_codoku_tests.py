@@ -354,6 +354,28 @@ def complexity_unit_tests_pass(cmod) -> bool:
     good = rc_bad == 2 and "ground-truth" in err.getvalue().lower()
     check("unit: unusable --ground-truth errors", good, err.getvalue()[-200:])
     ok = ok and good
+
+    # A masked ternary's `else` keyword is `<FILL_OP>`, so the
+    # placeholder-demasked text loses the ternary and cannot parse.  The
+    # vocabulary measurement falls back to the ground-truth tree instead
+    # of collapsing the solution space to -inf.
+    invalid_demask = (
+      "def func_t(a, b):\n"
+      "    c = a if a <FILL_OP> 1 <FILL_OP> b\n"
+      "    return <FILL_VAR>\n"
+    )
+    puzzle_bad = outdir / "puzzleBad.py"
+    gt_bad = outdir / "oracle" / "puzzleBad.gt.py"
+    puzzle_bad.write_text(invalid_demask)
+    gt_bad.write_text(gt_body.replace("c = a + b", "c = a if a < 1 else b"))
+    met_bad = cmod.analyze_puzzle(puzzle_bad, gt_path=gt_bad)
+    good = met_bad.sol_space_log10 != float("-inf") and met_bad.total_masks > 0
+    check(
+      "unit: masked ternary keeps the sol space finite",
+      good,
+      str(met_bad.sol_space_log10),
+    )
+    ok = ok and good
   finally:
     shutil.rmtree(gt_dir, ignore_errors=True)
 
