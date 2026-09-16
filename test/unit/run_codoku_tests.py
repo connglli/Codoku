@@ -1395,6 +1395,99 @@ def budget_split_unit_tests_pass(ccommon, chk_mod) -> bool:
   return ok
 
 
+def sentinel_unit_tests_pass(ccommon, chk_mod) -> bool:
+  """0, 1, 0.0, and 1.0 are structural sentinels (counters, identity
+  elements): they stay visible in every zone, never become <FILL_CONST>
+  cells, and never enter the budget, so filling a mark with one fails
+  re-masking."""
+  ok = True
+  src = (
+    "def func_t(pa):\n"
+    "    v1 = 0\n"
+    "    v2 = 1\n"
+    "    v3 = 7\n"
+    "    # ^entry\n"
+    "    v4 = pa\n"
+    "    # ^b0\n"
+    "    v5 = v3 * 0\n"
+    "    v6 = v3 + 1\n"
+    "    v7 = v3 + 1.0\n"
+    "    v8 = v3 * 0.0\n"
+    "    v9 = v3 - 2\n"
+    "    # ^exit\n"
+    "    return v4\n"
+  ).encode("utf-8")
+  tree = ast.parse(src)
+  leaf, _ = ccommon.find_python_leaf_function(tree, src)
+  maskable, entry_line, _ = ccommon.get_python_maskable_statements(leaf, src)
+  local_names = ccommon.collect_python_leaf_locals(leaf)
+  repls: list = []
+  budget: dict = {}
+  for stmt in maskable:
+    ccommon.collect_python_replacements(
+      stmt, src, stmt.lineno > entry_line, repls, budget, local_names, set()
+    )
+  masked = ccommon.apply_replacements(src, repls).decode("utf-8")
+
+  good = "<FILL_OP> 0\n" in masked
+  check("sentinel: body 0 stays visible", good, masked)
+  ok = ok and good
+
+  good = "<FILL_OP> 1\n" in masked
+  check("sentinel: body 1 stays visible", good, masked)
+  ok = ok and good
+
+  good = "<FILL_OP> 1.0\n" in masked and "<FILL_OP> 0.0\n" in masked
+  check("sentinel: float sentinels stay visible", good, masked)
+  ok = ok and good
+
+  good = budget == {"7": 1, "2": 1}
+  check("sentinel: 0/1 never enter the budget", good, str(budget))
+  ok = ok and good
+
+  banner = (
+    "#//@ CFG_EDGE: entry -> b0\n"
+    "#//@ CFG_EDGE: b0 -> exit\n"
+    "#//@ EXEC_PATH: entry -> b0 -> exit\n"
+    "#//@ <FILL_CONST>: 7 1 0\n"
+    "#//@ <FILL_CONST>: 2 1 0\n"
+  )
+  puzzle = banner + masked
+  filled_zero = (banner + src.decode("utf-8")).replace("v9 = v3 - 2", "v9 = v3 - 0")
+  filled_tree = ast.parse(filled_zero)
+  filled_leaf, _ = ccommon.find_python_leaf_function(filled_tree, filled_zero)
+  zero_mask_set = chk_mod.infer_mask_set_from_puzzle(
+    filled_leaf, filled_zero.encode("utf-8"), puzzle, set()
+  )
+  good = zero_mask_set is None
+  check("sentinel: filling a mark with 0 fails re-masking", good, str(zero_mask_set))
+  ok = ok and good
+
+  # Declarations keep their sentinels verbatim even when they sit in the
+  # mask set, and the end-to-end re-masked split matches the budget: only
+  # non-sentinel values appear, at their true live and dead counts.
+  good = "v1 = 0" in masked and "v2 = 1" in masked and "v3 = <FILL_CONST>" in masked
+  check("sentinel: declaration sentinels remain visible", good, masked)
+  ok = ok and good
+
+  mask_set = chk_mod.infer_mask_set_from_puzzle(leaf, src, puzzle, set())
+  split_ok = False
+  detail = ""
+  if mask_set is not None:
+    try:
+      split = chk_mod.check_remasking(
+        leaf, src, puzzle, mask_set, set(), frozenset({"entry", "b0", "exit"})
+      )
+      split_ok = split == {"7": (1, 0), "2": (1, 0)}
+      detail = str(split)
+    except chk_mod.CheckFailure as exc:
+      detail = str(exc)
+  check("sentinel: end-to-end split excludes 0/1", split_ok, detail)
+  ok = ok and split_ok
+
+  return ok
+
+
 def main():
   if len(sys.argv) < 3:
     print("usage: run_codoku_tests.py <codoku.py> <rysmith>")
@@ -1412,6 +1505,7 @@ def main():
   disabled_masks_unit_tests(ccommon, mod)
   trusted_layout_unit_tests_pass(ccommon)
   budget_split_unit_tests_pass(ccommon, chk_mod)
+  sentinel_unit_tests_pass(ccommon, chk_mod)
 
   with tempfile.TemporaryDirectory(prefix="codoku_gen_") as workdir:
     # Mirror the image layout: codoku + vendored modules + rysmith in one dir.

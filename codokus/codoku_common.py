@@ -656,8 +656,9 @@ def collect_python_replacements(
   object is pointed to) masks normally.
 
   ``is_body`` is True for statements strictly inside the function body (between
-  entry/exit).  For let-initialisers (``is_body=False``) the sentinels ``0``
-  and ``1`` are left visible.
+  entry/exit); it separates let-initialiser assigns (whose non-flag lvalues
+  stay visible) from body assigns.  The sentinels ``0``, ``1``, ``0.0``, and
+  ``1.0`` are left visible in every zone.
 
   Regardless of zone: every goto-flag identifier is replaced by its
   kind's mask token (see GOTO_FLAG_MASK_TEMPLATE). The target must be derived
@@ -716,9 +717,13 @@ def collect_python_replacements(
     if isinstance(node.value, (int, float, bool)) or node.value is None:
       if isinstance(node.value, bool) or node.value is None:
         return
-      val_str = str(node.value)
-      if not is_body and node.value in (0, 1, 0.0, 1.0):
+      # 0, 1, 0.0, and 1.0 are structural sentinels (counters, identity
+      # elements): guessing them is noise, so they stay visible in every
+      # zone and never enter a <FILL_CONST> position or the budget. A
+      # fill that puts one into a mark fails the re-mask skeleton match.
+      if node.value in (0, 1, 0.0, 1.0):
         return
+      val_str = str(node.value)
       start, end = get_node_offsets(node)
       replacements.append((start, end, "<FILL_CONST>"))
       budget_counts[val_str] = budget_counts.get(val_str, 0) + 1

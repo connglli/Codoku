@@ -8,7 +8,7 @@
 
 Codoku (short for *code sudoku*) offers renewable challenges for coding agents. A Codoku puzzle masks a generated Python function with **typed cells** (`<FILL_*>` marks): identifiers, function names, numeric constants, operators, control keywords, and CFG labels. A solution fills every cell subject to global semantic constraints:
 
-1. **Static**: the completion parses and compiles, matches the declared control-flow graph, and draws each constant from the constant table at exactly its listed live and dead counts (`1` and `1.0` count as distinct).
+1. **Static**: the completion parses and compiles, matches the declared control-flow graph, and draws each constant from the constant table at exactly its listed live and dead counts (`2` and `2.0` count as distinct).
 2. **Dynamic**: on the given input it follows the prescribed execution path block-for-block and returns the expected output.
 
 Each choice can ripple through later statements, branches, loops, or the output, so locally valid fills may still invalidate the whole solution, while valid solutions are sparse in a large search space.
@@ -35,7 +35,7 @@ Like [README.md](./README.md), this project centers on Codoku. The RefractIR par
 | Cell | What it hides |
 | :--- | :--- |
 | `<FILL_VAR>` | a local variable or parameter name (possibly with `[idx]`) |
-| `<FILL_CONST>` | a numeric literal (budgeted from the constant table, or free) |
+| `<FILL_CONST>` | a numeric literal (budgeted from the constant table, or free); the sentinels `0`, `1`, `0.0`, and `1.0` stay visible |
 | `<FILL_OP>` | an operator or operator-like keyword |
 | `<FILL_CTRL>` | a control keyword (`break`, `continue`) |
 | `<FILL_LABEL>` | the destination of a general goto flag (`_go_<FILL_LABEL>`) |

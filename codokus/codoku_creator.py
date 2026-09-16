@@ -126,26 +126,27 @@ BUDGET_READ = (
   "(`#//@ <FILL_CONST>: <value> <live> <dead>` lines) - constants you must use"
 )
 NO_BUDGET_READ = (
-  "- The **<FILL_CONST> marks** - fill each with any literal that keeps "
-  "the function correct"
+  "- The **<FILL_CONST> marks** - fill each with an integer or float literal "
+  "that keeps the function correct"
 )
 CONST_FILL_BUDGET = (
   "`<FILL_CONST>` → an integer or float literal (must match the budget "
-  "exactly - right value, right type, right live/dead split; `1` and `1.0` "
+  "exactly - right value, right type, right live/dead split; `2` and `2.0` "
   "are distinct)"
 )
 CONST_FILL_FREE = (
-  "`<FILL_CONST>` → an integer, float, boolean, or None literal "
-  "(choose any value that keeps the function correct)"
+  "`<FILL_CONST>` → an integer or float literal (choose any value that keeps "
+  "the function correct; `0`, `1`, `0.0`, and `1.0` stay visible and do not "
+  "fill a mark)"
 )
 BUDGET_RULE = (
   "- The `<FILL_CONST>` budget must be matched exactly: each value at its "
   "exact live and dead counts, no extras, and with the same type (integer "
-  "vs float - `1` is not `1.0`). A constant parked in the wrong region "
+  "vs float - `2` is not `2.0`). A constant parked in the wrong region "
   "fails even when the totals add up.\n"
-  "- For variable declarations (the lines before `# ^entry`), never fill "
-  "`<FILL_CONST>` with `0`, `1`, `0.0`, or `1.0`. Those values stay visible "
-  "there and are never masked. Filling them fails re-masking (`FAIL_REMASKING`)."
+  "- `<FILL_CONST>` is never `0`, `1`, `0.0`, or `1.0`: those literals stay "
+  "visible in the puzzle and are not masked anywhere. Filling a mark with "
+  "them fails re-masking (`FAIL_REMASKING`)."
 )
 BUDGET_TIP = (
   "- For each `<FILL_CONST>`, use the budget "
@@ -155,7 +156,7 @@ CHECK_ERR = (
   "- If the checker fails with a <FILL_CONST> budget error, you used the "
   "wrong constant value, type, or count.\n"
   "- If the checker fails with a `FAIL_REMASKING` error after filling "
-  "`0`, `1`, `0.0`, or `1.0` in variable declarations, replace them with "
+  "`0`, `1`, `0.0`, or `1.0` into a `<FILL_CONST>` mark, replace them with "
   "other budgeted values."
 )
 
@@ -213,8 +214,8 @@ PUZZLE_HEADER_TEMPLATE = """\
 # 2. You have access to all common command line tools and SMT solvers.
 # 3. Do NOT change any code except for the <FILL_XXX> marks.
 # 4. Do NOT introduce any new code, variables, or basic blocks.
-# 5. In variable declarations (before `# ^entry`), do NOT fill <FILL_CONST>
-# with `0`, `1`, `0.0`, or `1.0`; that fails with FAIL_REMASKING.
+# 5. <FILL_CONST> is never `0`, `1`, `0.0`, or `1.0` (those literals stay
+# visible). Do NOT fill a mark with them; that fails with FAIL_REMASKING.
 #
 {{BUDGET_SECTION}}//
 """
@@ -231,10 +232,10 @@ BUDGET_SECTION_TEMPLATE = """\
 # each <value> must appear in <FILL_CONST> positions exactly <live> times on
 # the path and <dead> times off it -- no more, no fewer -- and no other
 # constant may appear in any <FILL_CONST> position. The value must match
-# exactly, including its type: `1` (integer) and `1.0` (float) are distinct.
+# exactly, including its type: `2` (integer) and `2.0` (float) are distinct.
 # Constants already shown in the fixed (entry/exit) code do not count toward
-# this budget. `0`, `1`, `0.0`, and `1.0` are not allowed for variable
-# declarations (i.e., lines before `# ^entry`).
+# this budget. `0`, `1`, `0.0`, and `1.0` stay visible and never take a
+# <FILL_CONST> position, so they are not in the budget.
 #
 {{FILL_CONST}}//
 """
