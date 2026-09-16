@@ -80,6 +80,8 @@ rysmith --target python
   ↓
 swap_preamble (guarded memory model) + strip refractir_ prefix
   ↓
+randomize_checksum (per-step operator sample + expected-value recalibration)
+  ↓
 mask_puzzle: cells ← per-element rolls (p_mask_ops, p_mask_lhs_vars, p_mask_rhs_vars, p_mask_funcs, p_mask_consts; ctrl and goto tokens always) → filter_disabled_masks
   ↓
 self_check: ground truth re-masks byte-for-byte to the puzzle

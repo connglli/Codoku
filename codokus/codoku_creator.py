@@ -14,7 +14,9 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import os
 import random
+import re
 import secrets
 import shutil
 import subprocess
@@ -32,6 +34,7 @@ from codoku_common import (
   collect_python_leaf_locals,
   find_python_block_comments,
   find_python_leaf_function,
+  get_byte_offsets,
   get_line_indent,
   get_python_maskable_statements,
   merge_const_split,
@@ -798,6 +801,156 @@ def extract_cfg_from_sir(sir_path: Path) -> list[tuple[str, str]]:
 
 
 # ---------------------------------------------------------------------------
+# rysmith's addition-based checksum (--no-crc32) sums the leaf's final
+# locals with `+`; the creator swaps the operator per chain step and
+# recalibrates main from a run of the ground truth.  Zero divisors,
+# exponents, and shift counts are guarded by construction (_checksum_wrap),
+# and failing samples keep the original chain.
+# ---------------------------------------------------------------------------
+
+CHECKSUM_OPS: tuple[bytes, ...] = (
+  b"+",
+  b"-",
+  b"*",
+  b"//",
+  b"%",
+  b"**",
+  b"^",
+  b"&",
+  b"|",
+  b"<<",
+  b">>",
+)
+CHECKSUM_SAMPLE_ATTEMPTS = 20
+CHECKSUM_LITERAL_LIMIT = 1000  # decimal characters of the expected checksum
+CHECKSUM_RUN_TIMEOUT = 5.0  # matches the checker's execution cap
+CHECKSUM_EXPECTED_RE = re.compile(r"_in_check_chksum\(-?\d+\s*,\s*r\)")
+
+
+def _checksum_wrap(op: str, y: str) -> str:
+  """One chain step's operator with its guarded right side: `y | 1` sets a
+  divisor's lowest bit (never zero) and powers and shifts clamp their
+  second operand into 0..64; the other operators apply as-is."""
+  if op in ("//", "%"):
+    return f"{op} ({y} | 1)"
+  if op in ("**", "<<", ">>"):
+    return f"{op} min(max({y}, 0), 64)"
+  return f"{op} {y}"
+
+
+def _checksum_chain(tree, src: bytes) -> list[tuple[int, int, int, int, bool, str]]:
+  """Byte spans of the `+` in the leaf's exit-block checksum chain: each
+  step assigns a v__-prefixed accumulator from one Add whose other operand
+  is that accumulator.  Returns (left_start, left_end, right_start,
+  right_end, acc_on_left, acc_id) in source order."""
+  leaf, _ = find_python_leaf_function(tree, src)
+  if leaf is None:
+    raise RuntimeError("no leaf function in rysmith output")
+  spans: list[tuple[int, int, int, int, bool, str]] = []
+  for stmt in ast.walk(leaf):
+    if not isinstance(stmt, ast.Assign) or len(stmt.targets) != 1:
+      continue
+    target = stmt.targets[0]
+    value = stmt.value
+    if not (isinstance(target, ast.Name) and target.id.startswith("v__")):
+      continue
+    if not (isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add)):
+      continue
+    on_left = isinstance(value.left, ast.Name) and value.left.id == target.id
+    on_right = isinstance(value.right, ast.Name) and value.right.id == target.id
+    if not (on_left or on_right):
+      continue
+    start_left, end_left = get_byte_offsets(
+      src,
+      value.left.lineno,
+      value.left.col_offset,
+      value.left.end_lineno,
+      value.left.end_col_offset,
+    )
+    start_right, end_right = get_byte_offsets(
+      src,
+      value.right.lineno,
+      value.right.col_offset,
+      value.right.end_lineno,
+      value.right.end_col_offset,
+    )
+    op_slice = src[end_left:start_right]
+    idx = op_slice.find(b"+")
+    if idx == -1:
+      continue
+    spans.append((start_left, end_left, start_right, end_right, on_left, target.id))
+  spans.sort()
+  if not spans:
+    raise RuntimeError("addition-based checksum chain is missing")
+  return spans
+
+
+def _run_expected_checksum(src_str: str) -> int | None:
+  """Run *src_str* with the check patched to a print; the leaf's return
+  value is the recalibrated checksum, or None when the run fails."""
+  patched = CHECKSUM_EXPECTED_RE.sub("print(r)", src_str, count=1)
+  if patched == src_str:
+    return None
+  try:
+    ast.parse(patched)
+  except SyntaxError:
+    return None
+  with tempfile.NamedTemporaryFile("wb", suffix=".py", delete=False) as tf:
+    tf.write(patched.encode("utf-8"))
+    path = tf.name
+  try:
+    r = subprocess.run(
+      [sys.executable, path],
+      capture_output=True,
+      text=True,
+      timeout=CHECKSUM_RUN_TIMEOUT,
+    )
+  except subprocess.TimeoutExpired:
+    return None
+  finally:
+    os.unlink(path)
+  if r.returncode != 0:
+    return None
+  try:
+    return int(r.stdout.strip())
+  except ValueError:
+    return None
+
+
+def randomize_checksum(src_bytes: bytes, seed: int) -> bytes:
+  """Sample one operator per checksum chain step and write the recalibrated
+  constant into the sampled chain, so code and harness cannot drift.
+  Failing samples are discarded; with none left the original addition
+  chain stays, whose checksum rysmith already calibrated."""
+  try:
+    tree = ast.parse(src_bytes)
+  except SyntaxError as e:
+    raise RuntimeError(f"rysmith output is not valid Python: {e}") from e
+  spans = _checksum_chain(tree, src_bytes)
+  src_str = src_bytes.decode("utf-8")
+  if not CHECKSUM_EXPECTED_RE.search(src_str):
+    raise RuntimeError("main harness is missing its checksum check")
+  rng = random.Random(seed)
+  for _ in range(CHECKSUM_SAMPLE_ATTEMPTS):
+    replacements = []
+    for left_start, left_end, right_start, right_end, acc_on_left, acc_id in spans:
+      op = rng.choice(CHECKSUM_OPS).decode("ascii")
+      x_start, x_end = (
+        (right_start, right_end) if acc_on_left else (left_start, left_end)
+      )
+      chain_text = f"{acc_id} {_checksum_wrap(op, src_str[x_start:x_end])}"
+      replacements.append((left_start, right_end, chain_text))
+    candidate = apply_replacements(src_bytes, replacements).decode("utf-8")
+    value = _run_expected_checksum(candidate)
+    if value is None or len(str(value)) > CHECKSUM_LITERAL_LIMIT:
+      continue
+    return CHECKSUM_EXPECTED_RE.sub(
+      f"_in_check_chksum({value}, r)", candidate, count=1
+    ).encode("utf-8")
+  return src_bytes
+
+
+# ---------------------------------------------------------------------------
 # Masking and puzzle assembly
 # ---------------------------------------------------------------------------
 
@@ -1157,6 +1310,7 @@ def generate_candidate(
 
   src_raw = py_path.read_bytes()
   src = strip_refractir_prefix(swap_preamble(src_raw))
+  src = randomize_checksum(src, used_seed)
   try:
     tree = ast.parse(src)
   except Exception as e:

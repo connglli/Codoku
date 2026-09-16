@@ -1945,6 +1945,157 @@ def fine_grained_unit_tests_pass(ccommon, chk_mod, mod) -> bool:
   return ok
 
 
+def checksum_unit_tests_pass(ccommon, chk_mod, mod) -> bool:
+  """The exit-block checksum randomizes its operator per chain step and
+  recalibrates the expected checksum in main by running the ground truth;
+  a sample that trips div/rem by zero or a negative shift count is
+  discarded, and all failing samples keep the addition chain."""
+  ok = True
+  fix_src = (
+    "def _in_check_chksum(expected, actual):\n"
+    "    return 0 if expected == actual else 1\n"
+    "\n"
+    "def func_t(pa0, pa1, pa2):\n"
+    "    v__chk = 0\n"
+    "    v__chk = (v__chk + pa0)\n"
+    "    v__chk = (v__chk + pa1)\n"
+    "    v__chk = (v__chk + pa2)\n"
+    "    return v__chk\n"
+    "\n"
+    "def main():\n"
+    "    r = func_t(3, 5, 7)\n"
+    "    r = _in_check_chksum(123, r)\n"
+    "    return 0\n"
+    "\n"
+    'if __name__ == "__main__":\n'
+    "    import sys\n"
+    "    sys.exit(main())\n"
+  ).encode("utf-8")
+
+  def run_module(src_bytes: bytes) -> int:
+    import subprocess
+
+    with tempfile.NamedTemporaryFile("wb", suffix=".py", delete=False) as tf:
+      tf.write(src_bytes)
+      path = tf.name
+    try:
+      r = subprocess.run(
+        [sys.executable, path], capture_output=True, text=True, timeout=60
+      )
+    finally:
+      os.unlink(path)
+    return r.returncode
+
+  # (1) The chain operators are randomized: the rewritten source differs
+  # from the addition chain at a fixed seed.
+  randomized = mod.randomize_checksum(fix_src, 42)
+  good = randomized != fix_src
+  check(
+    "checksum: the chain operators are randomized", good, randomized.decode("utf-8")
+  )
+  ok = ok and good
+
+  # (2) The recalibrated expected checksum makes main's check pass.
+  returncode = run_module(randomized)
+  good = returncode == 0
+  check("checksum: main's check passes after recalibration", good, str(returncode))
+  ok = ok and good
+
+  # (3) The rewrite is deterministic for a seed.
+  again = mod.randomize_checksum(fix_src, 42)
+  good = again == randomized
+  check("checksum: same seed is deterministic", good, str(again == randomized))
+  ok = ok and good
+
+  # (4) All failing samples keep the original addition chain unchanged.
+  broken = fix_src.replace(b"    v__chk = 0\n", b"    v__chk = 0 // 0\n", 1)
+  kept = mod.randomize_checksum(broken, 42)
+  good = kept == broken
+  check("checksum: failing samples keep the addition chain", good, kept.decode("utf-8"))
+  ok = ok and good
+
+  # (5) The recalibrated literal is bounded and the patched main parses.
+  import re
+
+  literal_ok = re.search(
+    r"_in_check_chksum\((-?\d{1,1000}), r\)", randomized.decode("utf-8")
+  )
+  good = literal_ok is not None and len(literal_ok.group(1)) <= 1000
+  check("checksum: literal bounded and parseable", good, str(literal_ok))
+  ok = ok and good
+
+  # (6) Well-definedness is guarded by construction: `//` and `%` set
+  # their divisor's lowest bit (`y | 1` is never zero), and `**`,
+  # `<<` and `>>` clamp their second operand into 0..64.
+  good = (
+    mod._checksum_wrap("//", "pa0") == "// (pa0 | 1)"
+    and mod._checksum_wrap("%", "v__chk") == "% (v__chk | 1)"
+    and mod._checksum_wrap("<<", "_rd(v0, 0)") == "<< min(max(_rd(v0, 0), 0), 64)"
+    and mod._checksum_wrap(">>", "pa2") == ">> min(max(pa2, 0), 64)"
+    and mod._checksum_wrap("+", "pa0") == "+ pa0"
+    and mod._checksum_wrap("**", "pa0") == "** min(max(pa0, 0), 64)"
+  )
+  check("checksum: zero and shift guards wrap the chain", good, str(good))
+  ok = ok and good
+
+  # (7) Edge case: rysmith's original checksum can be negative, so the
+  # recalibration reads and rewrites it alike.
+  negative = fix_src.replace(
+    b"_in_check_chksum(123, r)", b"_in_check_chksum(-123, r)", 1
+  )
+  random_negative = mod.randomize_checksum(negative, 42)
+  returncode = run_module(random_negative)
+  good = returncode == 0
+  check("checksum: negative original constant recalibrates", good, str(returncode))
+  ok = ok and good
+
+  # (8) The accumulator leads every chain step (chk op x), whatever the
+  # original order: mixed-order fixtures ship uniformly.
+  swap_src = fix_src.replace(
+    b"    v__chk = (v__chk + pa1)\n", b"    v__chk = (pa1 + v__chk)\n", 1
+  )
+  swapped = mod.randomize_checksum(swap_src, 42)
+  swap_tree = ast.parse(swapped)
+  swap_leaf, _ = ccommon.find_python_leaf_function(swap_tree, swapped)
+  leads = True
+  for stmt in ast.walk(swap_leaf):
+    if (
+      isinstance(stmt, ast.Assign)
+      and len(stmt.targets) == 1
+      and isinstance(stmt.targets[0], ast.Name)
+      and stmt.targets[0].id.startswith("v__")
+      and isinstance(stmt.value, ast.BinOp)
+    ):
+      checked = False
+      if (
+        isinstance(stmt.value.left, ast.Name)
+        and stmt.value.left.id == stmt.targets[0].id
+      ):
+        checked = True
+      if not checked:
+        leads = False
+  good = leads and run_module(swapped) == 0
+  check(
+    "checksum: the accumulator leads every chain step", good, swapped.decode("utf-8")
+  )
+  ok = ok and good
+
+  # (8) Edge case: the clamp keeps the second operand inside 0..64, so a
+  # negative exponent yields 1 (never a float) and a huge count stays
+  # small.
+  good = (
+    eval(f"2 {mod._checksum_wrap('**', '-3')}") == 1
+    and isinstance(eval(f"2 {mod._checksum_wrap('**', '-3')}"), int)
+    and eval(f"1 {mod._checksum_wrap('<<', '10**18')}") == 1 << 64
+    and eval(f"1 {mod._checksum_wrap('>>', '-7')}") == 1
+    and eval(f"7 {mod._checksum_wrap('**', '2')}") == 49
+  )
+  check("checksum: clamp bounds the second operand", good, str(good))
+  ok = ok and good
+
+  return ok
+
+
 def main():
   if len(sys.argv) < 3:
     print("usage: run_codoku_tests.py <codoku.py> <rysmith>")
@@ -1964,6 +2115,7 @@ def main():
   budget_split_unit_tests_pass(ccommon, chk_mod)
   sentinel_unit_tests_pass(ccommon, chk_mod)
   fine_grained_unit_tests_pass(ccommon, chk_mod, mod)
+  checksum_unit_tests_pass(ccommon, chk_mod, mod)
 
   with tempfile.TemporaryDirectory(prefix="codoku_gen_") as workdir:
     # Mirror the image layout: codoku + vendored modules + rysmith in one dir.
