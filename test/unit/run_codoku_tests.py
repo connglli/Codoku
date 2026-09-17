@@ -2308,7 +2308,7 @@ def checksum_unit_tests_pass(ccommon, chk_mod, mod) -> bool:
 
 def multi_example_tests_pass(ccommon, chk_mod) -> bool:
   """The @main harness replays the leaf once per example (rysmith
-  --n-examples 3): each replay carries its own `_in_check_chksum(<expected>,
+  --n-examples 5): each replay carries its own `_in_check_chksum(<expected>,
   r)` call, and the prescribed run traces the leaf path once per example."""
   ok = True
 
@@ -2957,6 +2957,197 @@ def checksum_replay_distinct_tests_pass(ccommon, chk_mod, mod) -> bool:
   return ok
 
 
+def example_count_tests_pass(ccommon, chk_mod, mod) -> bool:
+  """rysmith's example count is a generator-input knob owned by the profile:
+  like the other volume knobs it samples from an IntRange, the sampled
+  config lifts it, the rysmith command reads it from the config, and a
+  range outside the per-example letter budget is rejected fail-loudly."""
+  ok = True
+  from dataclasses import fields, replace
+
+  direct = mod.GeneratorConfig(
+    n_bbls=3,
+    n_stmts=2,
+    min_loop_iter=1,
+    max_ptr_depth=0,
+    p_backedge=0.4,
+    p_branch=0.5,
+    n_vars=6,
+    n_params=2,
+    lift_consts=False,
+  )
+
+  # (1) Every profile owns the count as an IntRange inside the per-example
+  # letter budget: tuning a profile's range is free, only bounds are fixed.
+  bad_profiles = [
+    name
+    for name, p in mod.PROFILES.items()
+    if not (
+      getattr(p, "n_examples", None) is not None
+      and 1 <= p.n_examples.minimum
+      and p.n_examples.maximum <= 26
+    )
+  ]
+  check(
+    "example count: profiles own a bounded n_examples range",
+    not bad_profiles,
+    str(bad_profiles),
+  )
+  ok = ok and not bad_profiles
+
+  # (2) The config field sits right below n_params, like the profile's.
+  field_names = [f.name for f in fields(mod.GeneratorConfig)]
+  good = field_names.index("n_examples") == field_names.index("n_params") + 1
+  check(
+    "example count: the config field sits below n_params",
+    good,
+    str(field_names),
+  )
+  ok = ok and good
+
+  # (3) A direct config carries the default too.
+  good = getattr(direct, "n_examples", None) == 5
+  check("example count: a direct config carries the default", good, str(good))
+  ok = ok and good
+
+  # (4) The sampled config lifts the profile's sampled count: whatever the
+  # profile tunes, the config draws from its range.
+  config = mod.sample_config(mod.PROFILES["medium"], random.Random(42))
+  profile_range = getattr(mod.PROFILES["medium"], "n_examples", None)
+  profile_lo = getattr(profile_range, "minimum", None)
+  profile_hi = getattr(profile_range, "maximum", None)
+  count = getattr(config, "n_examples", None)
+  good = (
+    None not in (count, profile_lo, profile_hi) and profile_lo <= count <= profile_hi
+  )
+  check("example count: sample_config lifts the profile's count", good, str(count))
+  ok = ok and good
+
+  # (5) The rysmith command reads --n-examples from the config.
+  cmd = mod.build_rysmith_command(config, 42, ".", "rysmith")
+  good = cmd[cmd.index("--n-examples") + 1] == str(getattr(config, "n_examples", "?5"))
+  check(
+    "example count: the rysmith command reads the config",
+    good,
+    str(cmd[cmd.index("--n-examples") + 1]),
+  )
+  ok = ok and good
+
+  # (6) Edge: the range bounds to the per-example letter budget rysmith
+  # draws from (a..z), so a profile outside [1, 26] is rejected.
+  for bad in (0, 27):
+    raised = None
+    try:
+      replace(mod.PROFILES["medium"], n_examples=mod.IntRange(bad, bad)).validate(
+        "medium-bad"
+      )
+    except Exception as exc:  # noqa: BLE001
+      raised = exc
+    good = isinstance(raised, ValueError)
+    check(
+      f"example count: a profile with n_examples [{bad}, {bad}] is rejected",
+      good,
+      repr(raised),
+    )
+    ok = ok and good
+
+  return ok
+
+
+def examples_complexity_tests_pass(cmod, mod) -> bool:
+  """The example count is a realized property of the puzzle file: the
+  metrics measure the harness's anchor count, the trace axis scales with
+  it, and the profile's own example-count range answers to the shipped
+  harness."""
+  ok = True
+
+  def harness_file(n_examples: int) -> str:
+    replay = ""
+    for i in range(n_examples):
+      replay += f"    r = func_t({3 - i})\n"
+      replay += f"    r = _in_check_chksum({11 * i + 123}, r)\n"
+    return (
+      "#//@ EXEC_PATH: entry -> exit\n"
+      "def _in_check_chksum(expected, actual):\n"
+      "    if expected != actual:\n"
+      "        raise ValueError('@check_chksum mismatch')\n"
+      "    return actual\n"
+      "\n"
+      "def func_t(pa):\n"
+      "    return (pa + 1)\n"
+      "\n"
+      "def main():\n" + replay + "    return 0\n"
+      "\n"
+      'if __name__ == "__main__":\n'
+      "    import sys\n"
+      "    sys.exit(main())\n"
+    )
+
+  profile = mod.GenerationProfile(
+    n_bbls=mod.IntRange(2, 4),
+    n_stmts=mod.IntRange(2, 3),
+    min_loop_iter=mod.IntRange(0, 1),
+    p_mask_lhs_vars=mod.FloatRange(0.1, 0.1),
+    p_mask_rhs_vars=mod.FloatRange(0.75, 0.75),
+    p_mask_ops=mod.FloatRange(0.75, 0.75),
+    p_mask_funcs=mod.FloatRange(1.0, 1.0),
+    p_mask_consts=mod.FloatRange(0.75, 0.75),
+    max_ptr_depth=mod.IntRange(0, 0),
+    p_backedge=mod.FloatRange(0.1, 0.3),
+    p_branch=mod.FloatRange(0.3, 0.5),
+    n_vars=mod.IntRange(6, 10),
+    n_params=mod.IntRange(2, 3),
+    n_examples=mod.IntRange(3, 5),
+  )
+
+  tmpdir = tempfile.mkdtemp(prefix="codoku_examples_")
+  try:
+    outdir = Path(tmpdir) / "out"
+    outdir.mkdir(parents=True)
+    (outdir / "puzzle.py").write_text(harness_file(3))
+    (Path(tmpdir) / "in_range.py").write_text(harness_file(5))
+    (Path(tmpdir) / "out_of_range.py").write_text(harness_file(2))
+    analyzed = cmod.analyze_puzzle(outdir / "puzzle.py")
+    in_range = cmod.analyze_puzzle(Path(tmpdir) / "in_range.py")
+    out_of_range = cmod.analyze_puzzle(Path(tmpdir) / "out_of_range.py")
+
+    # (1) The metrics measure the harness anchor count.
+    good = getattr(analyzed, "n_examples", None) == 3
+    check("examples: metrics measure the harness anchor count", good, str(good))
+    ok = ok and good
+
+    # (2) flattened() carries n_examples.
+    good = analyzed.flattened().get("n_examples") == 3
+    check("examples: flattened carries n_examples", good, str(good))
+    ok = ok and good
+
+    # (3) The trace axis multiplies the per-example dynamics by the count.
+    est = cmod.estimate_complexity(analyzed)
+    per_example = 0.6 * analyzed.exec_path_length + 0.5 * analyzed.loop_iterations_avg
+    good = est.dynamic_trace == round(
+      getattr(analyzed, "n_examples", 0) * per_example, 2
+    )
+    check("examples: the trace axis counts examples", good, str(est))
+    ok = ok and good
+
+    # (4) The profile's own example-count range answers profile_accepts.
+    accepted_hi, hi_failures = mod.profile_accepts(profile, in_range)
+    accepted_lo, lo_failures = mod.profile_accepts(profile, out_of_range)
+    good = (
+      accepted_hi and not accepted_lo and any("n_examples=2" in f for f in lo_failures)
+    )
+    check(
+      "examples: profile_accepts considers the example count",
+      good,
+      f"hi={accepted_hi}{hi_failures} lo={accepted_lo}{lo_failures}",
+    )
+    ok = ok and good
+  finally:
+    shutil.rmtree(tmpdir, ignore_errors=True)
+
+  return ok
+
+
 def main():
   if len(sys.argv) < 3:
     print("usage: run_codoku_tests.py <codoku.py> <rysmith>")
@@ -2971,6 +3162,7 @@ def main():
   goto_flag_unit_tests_pass(ccommon, chk_mod)
   sir_extractor_tests_pass(ccommon, chk_mod)
   complexity_unit_tests_pass(import_codoku_complexity(codoku_src))
+  examples_complexity_tests_pass(import_codoku_complexity(codoku_src), mod)
   disabled_masks_unit_tests(ccommon, mod)
   trusted_layout_unit_tests_pass(ccommon)
   budget_split_unit_tests_pass(ccommon, chk_mod)
@@ -2983,6 +3175,7 @@ def main():
   multi_example_tests_pass(ccommon, chk_mod)
   multi_example_checksum_tests_pass(ccommon, chk_mod, mod)
   checksum_replay_distinct_tests_pass(ccommon, chk_mod, mod)
+  example_count_tests_pass(ccommon, chk_mod, mod)
 
   with tempfile.TemporaryDirectory(prefix="codoku_gen_") as workdir:
     # Mirror the image layout: codoku + vendored modules + rysmith in one dir.
@@ -3031,6 +3224,23 @@ def main():
       "generate lifts chain coefficients",
       re.search(r"v__\w+ = \(v__\w+ [^\n]*\d+ \* \(", ptext) is not None,
       re.search(r"    v__\w+ = .*\n    v__\w+ = .*\n", ptext),
+    )
+
+    # (1c) The profile owns the example count: the @main harness carries one
+    # checksum anchor per profile example, and every shipped anchor stays
+    # distinct from its neighbours.
+    with open(manifest) as f:
+      profile_examples = json.load(f)["generator_config"]["n_examples"]
+    anchors = re.findall(r"_in_check_chksum\(-?\d+\s*,\s*r\)", ptext)
+    check(
+      "generate carries one checksum anchor per profile example",
+      len(anchors) == profile_examples and profile_examples >= 1,
+      f"anchors={len(anchors)} profile={profile_examples}",
+    )
+    check(
+      "generate keeps every anchor distinct",
+      len(set(anchors)) == len(anchors),
+      str(anchors),
     )
 
     check(
@@ -3098,6 +3308,12 @@ def main():
       and "static_structure" not in complexity
     )
     check("manifest records realized metrics", ok_metrics, str(meta))
+
+    # (5b) The manifest records the realized example count, answering to the
+    # profile's own range, and the trace axis scales with it.
+    profile_examples = meta["generator_config"]["n_examples"]
+    good = metrics.get("n_examples") == profile_examples and profile_examples >= 1
+    check("generate records the realized example count", good, str(meta))
 
     # (6) Invalid profile is rejected.
     r = run_codoku(codoku_bin, ["create", "--profile", "bogus"], workdir)

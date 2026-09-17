@@ -26,6 +26,7 @@ from codoku_common import (
   INTERNAL_HELPER_FUNCS,
   UNARY_OP_SPANS,
   collect_python_leaf_locals,
+  count_harness_examples,
   find_python_leaf_function,
 )
 
@@ -58,7 +59,8 @@ class PuzzleMetrics:
   dep_max_degree: int = 0  # max per-node in + out degree
   dep_density: float = 0.0  # |E| / (|V| * (|V| - 1))
 
-  # Dynamic execution (from the EXEC_PATH)
+  # Dynamic execution (the prescribed path, replayed once per example)
+  n_examples: int = 0  # one `_in_check_chksum` anchor per harness example
   exec_path_length: int = 0  # blocks executed on the path (incl. repeats)
   unique_path_blocks: int = 0  # distinct blocks visited on the path
   repeated_block_visits: int = 0  # extra visits beyond the first for each path block
@@ -87,6 +89,7 @@ class PuzzleMetrics:
 
   def flattened(self) -> dict[str, float]:
     result: dict[str, float] = {
+      "n_examples": self.n_examples,
       "cfg_nodes": self.cfg_nodes,
       "cfg_edges": self.cfg_edges,
       "cyclomatic": self.cyclomatic,
@@ -617,6 +620,7 @@ def analyze_puzzle(path: Path, gt_path: Path | None = None) -> PuzzleMetrics:
   """
   text = path.read_text()
   lines = text.splitlines()
+  n_examples = count_harness_examples(text)
 
   cfg_edges: list[tuple[str, str]] = []
   path_blocks: list[str] = []
@@ -719,6 +723,7 @@ def analyze_puzzle(path: Path, gt_path: Path | None = None) -> PuzzleMetrics:
     cfg_nodes=node_count,
     cfg_edges=edge_count,
     cyclomatic=cyclomatic,
+    n_examples=n_examples,
     exec_path_length=len(path_blocks),
     unique_path_blocks=unique_path_blocks,
     repeated_block_visits=repeated_visits,
@@ -776,11 +781,14 @@ def estimate_complexity(metrics: PuzzleMetrics) -> ComplexityEstimate:
     checksum-style accumulator).
 
   - dynamic_trace: how long the prescribed execution must be followed.
-      dynamic_trace = 0.6 * exec_path_length + 0.5 * loop_iterations_avg
-    Path length is the primary term and already carries the repetition
-    volume (every iteration re-executes its body on the path).  The average
-    loop depth adds a small bonus because many consecutive passes through
-    one loop are harder to track than the same number of blocks spread over
+      dynamic_trace = n_examples * (0.6 * exec_path_length + 0.5 * loop_iterations_avg)
+    The @main harness replays the leaf once per example, so the measured
+    anchor count multiplies the per-example trace: the checker follows the
+    path once per anchor.  Path length is the primary per-example term and
+    already carries the repetition volume (every iteration re-executes its
+    body on the path).  The average loop depth adds a small bonus because
+    many consecutive passes through one loop are harder to track than the
+    same number of blocks spread over
     distinct code; it is body-size-independent and sees every loop, unlike
     the previous max_block_visits term, which conflated loop depth with
     loop-body size and ignored all but the hottest loop.
@@ -813,7 +821,9 @@ def estimate_complexity(metrics: PuzzleMetrics) -> ComplexityEstimate:
     + 2.0 * metrics.dep_avg_degree
     + 1.0 * metrics.dep_max_degree
   )
-  dynamic_trace = 0.6 * metrics.exec_path_length + 0.5 * metrics.loop_iterations_avg
+  dynamic_trace = metrics.n_examples * (
+    0.6 * metrics.exec_path_length + 0.5 * metrics.loop_iterations_avg
+  )
   masking = sum(
     MASK_WEIGHTS.get(kind, 1.0) * count for kind, count in metrics.masks_by_kind.items()
   )

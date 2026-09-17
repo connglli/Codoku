@@ -359,7 +359,8 @@ class GeneratorConfig:
   p_branch: float
   n_vars: int
   n_params: int
-  lift_consts: bool
+  n_examples: int = 5
+  lift_consts: bool = False
   livedead_const_budget: bool = False
   p_mask_lhs_vars: float = 0.1
   p_mask_rhs_vars: float = 0.75
@@ -386,6 +387,8 @@ class GeneratorConfig:
       raise ValueError("n_vars must be at least 1")
     if self.n_params < 1:
       raise ValueError("n_params must be at least 1")
+    if not 1 <= self.n_examples <= 26:
+      raise ValueError("n_examples must be in [1, 26]")
     for name in (
       "p_mask_lhs_vars",
       "p_mask_rhs_vars",
@@ -419,6 +422,7 @@ class GenerationProfile:
   p_branch: FloatRange
   n_vars: IntRange
   n_params: IntRange
+  n_examples: IntRange = IntRange(3, 3)
   lift_consts: bool = False
   livedead_const_budget: bool = False
   features: tuple[str, ...] = ()
@@ -434,6 +438,11 @@ class GenerationProfile:
     self.p_branch.validate(f"{name}.p_branch")
     self.n_vars.validate(f"{name}.n_vars")
     self.n_params.validate(f"{name}.n_params")
+    self.n_examples.validate(f"{name}.n_examples")
+    # rysmith draws one letter per example (a..z) and clamps --n-examples
+    # into [1, 26]: the profile bounds the range fail-loudly instead.
+    if self.n_examples.minimum < 1 or self.n_examples.maximum > 26:
+      raise ValueError(f"{name}.n_examples must be within [1, 26]")
     for range_name in (
       "p_mask_lhs_vars",
       "p_mask_rhs_vars",
@@ -487,6 +496,7 @@ PROFILES: dict[str, GenerationProfile] = {
     p_branch=FloatRange(0.3, 0.5),
     n_vars=IntRange(6, 10),
     n_params=IntRange(2, 3),
+    n_examples=IntRange(3, 5),
     lift_consts=False,
     livedead_const_budget=False,
     features=(
@@ -500,6 +510,7 @@ PROFILES: dict[str, GenerationProfile] = {
       "total_masks": (10, 90),
       "mask_<fill_ctrl>": (0, 4),
       "cyclomatic": (2, 6),
+      "n_examples": (3, 5),
     },
   ),
   # A loop-driven function where most statement is masked and constants must match a budget.
@@ -517,6 +528,7 @@ PROFILES: dict[str, GenerationProfile] = {
     p_branch=FloatRange(0.4, 0.6),
     n_vars=IntRange(10, 16),
     n_params=IntRange(3, 4),
+    n_examples=IntRange(5, 7),
     lift_consts=False,
     livedead_const_budget=False,
     features=(
@@ -528,6 +540,7 @@ PROFILES: dict[str, GenerationProfile] = {
       "total_masks": (50, 400),
       "mask_<fill_ctrl>": (0, 6),
       "cyclomatic": (2, 10),
+      "n_examples": (5, 7),
     },
   ),
   # A large branching function with deep loops, nothing visible but the skeleton, and a tight constant budget.
@@ -545,6 +558,7 @@ PROFILES: dict[str, GenerationProfile] = {
     p_branch=FloatRange(0.5, 0.7),
     n_vars=IntRange(14, 20),
     n_params=IntRange(4, 5),
+    n_examples=IntRange(7, 10),
     lift_consts=False,
     livedead_const_budget=False,
     features=(),
@@ -553,6 +567,7 @@ PROFILES: dict[str, GenerationProfile] = {
       "total_masks": (150, 2147483647),
       "mask_<fill_ctrl>": (0, 2147483647),
       "cyclomatic": (3, 2147483647),
+      "n_examples": (7, 10),
     },
   ),
   # ---- by types ----
@@ -757,6 +772,15 @@ def profile_accepts(
     value = values[metric_name]
     if not minimum <= value <= maximum:
       failures.append(f"{metric_name}={value} is outside [{minimum}, {maximum}]")
+  # The realized anchor count answers to the profile's own example-count
+  # range as well: the profile owns the knob, and a shipped harness that
+  # drifts from the sampled count rejects the candidate.
+  examples = values["n_examples"]
+  if not profile.n_examples.minimum <= examples <= profile.n_examples.maximum:
+    failures.append(
+      f"n_examples={examples} is outside "
+      f"[{profile.n_examples.minimum}, {profile.n_examples.maximum}]"
+    )
   return not failures, failures
 
 
@@ -776,7 +800,7 @@ def build_rysmith_command(
     "--n-inits",
     "1",
     "--n-examples",
-    "3",
+    str(config.n_examples),
     "--no-crc32",
     "--emit-main",
     "--target",
@@ -1394,6 +1418,7 @@ def sample_config(profile: GenerationProfile, rng: random.Random) -> GeneratorCo
     p_branch=round(profile.p_branch.sample(rng), 4),
     n_vars=profile.n_vars.sample(rng),
     n_params=profile.n_params.sample(rng),
+    n_examples=profile.n_examples.sample(rng),
     lift_consts=profile.lift_consts,
     livedead_const_budget=profile.livedead_const_budget,
     features=profile.features,
