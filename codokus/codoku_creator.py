@@ -364,8 +364,8 @@ class GeneratorConfig:
   p_branch: float
   n_vars: int
   n_params: int
-  n_examples: int = 5
-  chksum_every: int = 3
+  n_examples: int
+  chksum_every: int
   lift_consts: bool = False
   livedead_const_budget: bool = False
   p_mask_lhs_vars: float = 0.1
@@ -430,8 +430,8 @@ class GenerationProfile:
   p_branch: FloatRange
   n_vars: IntRange
   n_params: IntRange
-  n_examples: IntRange = IntRange(3, 3)
-  chksum_every: IntRange = IntRange(3, 3)
+  n_examples: IntRange
+  chksum_every: IntRange
   lift_consts: bool = False
   livedead_const_budget: bool = False
   features: tuple[str, ...] = ()
@@ -600,6 +600,8 @@ PROFILES: dict[str, GenerationProfile] = {
     p_branch=FloatRange(0.50, 0.70),
     n_vars=IntRange(10, 14),
     n_params=IntRange(3, 5),
+    n_examples=IntRange(3, 3),
+    chksum_every=IntRange(3, 3),
     lift_consts=True,
     livedead_const_budget=False,
     # We consider constants, variables, and control flows.
@@ -628,6 +630,8 @@ PROFILES: dict[str, GenerationProfile] = {
     p_branch=FloatRange(0.50, 0.70),
     n_vars=IntRange(10, 14),
     n_params=IntRange(3, 5),
+    n_examples=IntRange(3, 3),
+    chksum_every=IntRange(3, 3),
     lift_consts=True,
     livedead_const_budget=False,
     # We consider constants, operators, and control flows.
@@ -656,6 +660,8 @@ PROFILES: dict[str, GenerationProfile] = {
     p_branch=FloatRange(0.50, 0.70),
     n_vars=IntRange(10, 14),
     n_params=IntRange(3, 5),
+    n_examples=IntRange(3, 3),
+    chksum_every=IntRange(3, 3),
     # We consider variables, operators, and control flows.
     disabled_masks=frozenset({"<FILL_CONST>"}),
     lift_consts=True,
@@ -687,6 +693,8 @@ PROFILES: dict[str, GenerationProfile] = {
     p_branch=FloatRange(0.40, 0.60),
     n_vars=IntRange(6, 10),
     n_params=IntRange(3, 4),
+    n_examples=IntRange(3, 3),
+    chksum_every=IntRange(3, 3),
     lift_consts=False,
     livedead_const_budget=False,
     features=(
@@ -717,6 +725,8 @@ PROFILES: dict[str, GenerationProfile] = {
     p_branch=FloatRange(0.40, 0.60),
     n_vars=IntRange(6, 10),
     n_params=IntRange(3, 4),
+    n_examples=IntRange(3, 3),
+    chksum_every=IntRange(3, 3),
     lift_consts=False,
     livedead_const_budget=False,
     features=(
@@ -746,6 +756,8 @@ PROFILES: dict[str, GenerationProfile] = {
     p_branch=FloatRange(0.50, 0.70),
     n_vars=IntRange(8, 12),
     n_params=IntRange(3, 4),
+    n_examples=IntRange(3, 3),
+    chksum_every=IntRange(3, 3),
     lift_consts=False,
     livedead_const_budget=False,
     features=(),
@@ -779,6 +791,11 @@ class GeneratedCandidate:
 def profile_accepts(
   profile: GenerationProfile, metrics: PuzzleMetrics
 ) -> tuple[bool, list[str]]:
+  """Gate a candidate on the realized metrics per its acceptance bounds.
+
+  The knob ranges only bound what rysmith is asked for, and rysmith's own
+  realization is approximate, so the shipped bounds come from acceptance
+  alone."""
   values = metrics.flattened()
   failures: list[str] = []
   for metric_name, (minimum, maximum) in profile.acceptance.items():
@@ -787,15 +804,6 @@ def profile_accepts(
     value = values[metric_name]
     if not minimum <= value <= maximum:
       failures.append(f"{metric_name}={value} is outside [{minimum}, {maximum}]")
-  # The realized anchor count answers to the profile's own example-count
-  # range as well: the profile owns the knob, and a shipped harness that
-  # drifts from the sampled count rejects the candidate.
-  examples = values["n_examples"]
-  if not profile.n_examples.minimum <= examples <= profile.n_examples.maximum:
-    failures.append(
-      f"n_examples={examples} is outside "
-      f"[{profile.n_examples.minimum}, {profile.n_examples.maximum}]"
-    )
   return not failures, failures
 
 

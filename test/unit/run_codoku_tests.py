@@ -1249,6 +1249,8 @@ def disabled_masks_unit_tests(ccommon, mod) -> bool:
         p_branch=mod.FloatRange(0.3, 0.5),
         n_vars=mod.IntRange(6, 10),
         n_params=mod.IntRange(2, 3),
+        n_examples=mod.IntRange(3, 3),
+        chksum_every=mod.IntRange(3, 3),
         lift_consts=False,
         features=("--no-fp", "--no-vec", "--no-ptrarith", "--no-intrinsics"),
         disabled_masks=frozenset({kind}),
@@ -2024,6 +2026,8 @@ def fine_grained_unit_tests_pass(ccommon, chk_mod, mod) -> bool:
     p_branch=0.5,
     n_vars=4,
     n_params=2,
+    n_examples=1,
+    chksum_every=1,
     lift_consts=False,
   )
   good = (
@@ -2046,6 +2050,8 @@ def fine_grained_unit_tests_pass(ccommon, chk_mod, mod) -> bool:
     p_branch=0.5,
     n_vars=4,
     n_params=2,
+    n_examples=1,
+    chksum_every=1,
     lift_consts=False,
   )
   bad_ok = False
@@ -3131,22 +3137,26 @@ def global_chksum_tests_pass(ccommon, chk_mod, mod) -> bool:
   ok = ok and good
 
   # (3) The stride is a profile-owned knob: profiles carry a bounded
-  # chksum_every range (minimum at least 1), a direct config carries the
-  # default, sample_config lifts the sampled stride, and a zero range is
-  # rejected fail-loudly.
-  direct_cfg = mod.GeneratorConfig(
-    n_bbls=2,
-    n_stmts=2,
-    min_loop_iter=1,
-    max_ptr_depth=0,
-    p_backedge=0.5,
-    p_branch=0.5,
-    n_vars=4,
-    n_params=2,
-  )
-  good = getattr(direct_cfg, "chksum_every", None) == 3
-  check("gchk: a direct config carries the default stride", good, str(direct_cfg))
-  ok = ok and good
+  # chksum_every range (minimum at least 1), a direct config must state
+  # its stride, sample_config lifts the sampled stride, and a zero range
+  # is rejected fail-loudly.
+  stride_required = False
+  try:
+    mod.GeneratorConfig(
+      n_bbls=2,
+      n_stmts=2,
+      min_loop_iter=1,
+      max_ptr_depth=0,
+      p_backedge=0.5,
+      p_branch=0.5,
+      n_vars=4,
+      n_params=2,
+      n_examples=3,
+    )
+  except TypeError:
+    stride_required = True
+  check("gchk: a direct config requires its stride", stride_required)
+  ok = ok and stride_required
 
   from dataclasses import fields as dc_fields
   from dataclasses import replace as dc_replace
@@ -3446,18 +3456,6 @@ def example_count_tests_pass(ccommon, chk_mod, mod) -> bool:
   ok = True
   from dataclasses import fields, replace
 
-  direct = mod.GeneratorConfig(
-    n_bbls=3,
-    n_stmts=2,
-    min_loop_iter=1,
-    max_ptr_depth=0,
-    p_backedge=0.4,
-    p_branch=0.5,
-    n_vars=6,
-    n_params=2,
-    lift_consts=False,
-  )
-
   # (1) Every profile owns the count as an IntRange inside the per-example
   # letter budget: tuning a profile's range is free, only bounds are fixed.
   bad_profiles = [
@@ -3486,10 +3484,25 @@ def example_count_tests_pass(ccommon, chk_mod, mod) -> bool:
   )
   ok = ok and good
 
-  # (3) A direct config carries the default too.
-  good = getattr(direct, "n_examples", None) == 5
-  check("example count: a direct config carries the default", good, str(good))
-  ok = ok and good
+  # (3) The config field is required: a direct config must state its ask.
+  ask_required = False
+  try:
+    mod.GeneratorConfig(
+      n_bbls=3,
+      n_stmts=2,
+      min_loop_iter=1,
+      max_ptr_depth=0,
+      p_backedge=0.4,
+      p_branch=0.5,
+      n_vars=6,
+      n_params=2,
+      chksum_every=1,
+      lift_consts=False,
+    )
+  except TypeError:
+    ask_required = True
+  check("example count: a direct config requires its ask", ask_required)
+  ok = ok and ask_required
 
   # (4) The sampled config lifts the profile's sampled count: whatever the
   # profile tunes, the config draws from its range.
@@ -3583,6 +3596,7 @@ def examples_complexity_tests_pass(cmod, mod) -> bool:
     n_vars=mod.IntRange(6, 10),
     n_params=mod.IntRange(2, 3),
     n_examples=mod.IntRange(3, 5),
+    chksum_every=mod.IntRange(3, 3),
   )
 
   tmpdir = tempfile.mkdtemp(prefix="codoku_examples_")
@@ -3615,16 +3629,36 @@ def examples_complexity_tests_pass(cmod, mod) -> bool:
     check("examples: the trace axis counts examples", good, str(est))
     ok = ok and good
 
-    # (4) The profile's own example-count range answers profile_accepts.
-    accepted_hi, hi_failures = mod.profile_accepts(profile, in_range)
-    accepted_lo, lo_failures = mod.profile_accepts(profile, out_of_range)
+    # (4) The realized example count answers only the acceptance range a
+    # profile lists: the knob bounds the ask to rysmith, and rysmith's own
+    # realization is approximate, so an unlisted profile gates nothing.
+    accepted_hi, _ = mod.profile_accepts(profile, in_range)
+    accepted_lo, silent_failures = mod.profile_accepts(profile, out_of_range)
+    good = accepted_hi and accepted_lo and silent_failures == []
+    check(
+      "examples: an unlisted count gates nothing",
+      good,
+      f"hi={accepted_hi} lo={accepted_lo}{silent_failures}",
+    )
+    ok = ok and good
+
+    # (5) A listed count gates once with the flat failure message.
+    from dataclasses import replace as dc_replace
+
+    listed = dc_replace(profile, acceptance={"n_examples": (3, 5)})
+    listed_hi, listed_hi_failures = mod.profile_accepts(listed, in_range)
+    listed_lo, listed_failures = mod.profile_accepts(listed, out_of_range)
     good = (
-      accepted_hi and not accepted_lo and any("n_examples=2" in f for f in lo_failures)
+      listed_hi
+      and not listed_lo
+      and not listed_hi_failures
+      and len(listed_failures) == 1
+      and listed_failures[0] == "n_examples=2 is outside [3, 5]"
     )
     check(
-      "examples: profile_accepts considers the example count",
+      "examples: a listed count ships one drift message",
       good,
-      f"hi={accepted_hi}{hi_failures} lo={accepted_lo}{lo_failures}",
+      str(listed_failures),
     )
     ok = ok and good
   finally:
@@ -3826,6 +3860,8 @@ def main():
       p_branch=0.5,
       n_vars=6,
       n_params=2,
+      n_examples=5,
+      chksum_every=3,
       lift_consts=False,
       features=("--no-fp", "--no-vec", "--no-ptrarith", "--no-intrinsics"),
     )
