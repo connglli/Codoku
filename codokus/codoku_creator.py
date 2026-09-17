@@ -869,10 +869,12 @@ def extract_cfg_from_sir(sir_path: Path) -> list[tuple[str, str]]:
 
 # ---------------------------------------------------------------------------
 # rysmith's addition-based checksum (--no-crc32) sums the leaf's final
-# locals with `+`; the creator swaps the operator per chain step and
-# recalibrates every harness expectation from a run of the ground truth.
-# Zero divisors, exponents, and shift counts are guarded by construction
-# (_checksum_wrap), and failing samples keep the original chain.
+# locals with `+`; the creator seeds the exit accumulator with a very large
+# random constant, swaps the operator per chain step, lifts a random
+# coefficient into each step's operand, and recalibrates every harness
+# expectation from a run of the ground truth. Zero divisors, exponents, and
+# shift counts are guarded by construction (_checksum_wrap), and failing
+# samples keep the original chain.
 # ---------------------------------------------------------------------------
 
 CHECKSUM_OPS: tuple[bytes, ...] = (
@@ -891,6 +893,39 @@ CHECKSUM_OPS: tuple[bytes, ...] = (
 CHECKSUM_SAMPLE_ATTEMPTS = 20
 CHECKSUM_LITERAL_LIMIT = 1000  # decimal characters of the expected checksum
 CHECKSUM_RUN_TIMEOUT = 5.0  # matches the checker's execution cap
+
+
+def _checksum_init_span(
+  tree, src: bytes, chain_start: int
+) -> tuple[int, int, str] | None:
+  """Byte span of the `v__ = <literal>` initialiser that seeds the checksum
+  chain: the exit block re-seeds the accumulator right above the chain's
+  first step, while the pre-entry let-declaration and every other v__
+  constant sit further up.  None when no such initialiser exists."""
+  leaf, _ = find_python_leaf_function(tree, src)
+  if leaf is None:
+    return None
+  best: tuple[int, int, str] | None = None
+  for stmt in ast.walk(leaf):
+    if not isinstance(stmt, ast.Assign) or len(stmt.targets) != 1:
+      continue
+    target = stmt.targets[0]
+    if not (isinstance(target, ast.Name) and target.id.startswith("v__")):
+      continue
+    if not isinstance(stmt.value, ast.Constant) or not isinstance(
+      stmt.value.value, int
+    ):
+      continue
+    start, end = get_byte_offsets(
+      src,
+      stmt.value.lineno,
+      stmt.value.col_offset,
+      stmt.value.end_lineno,
+      stmt.value.end_col_offset,
+    )
+    if end < chain_start and (best is None or end > best[1]):
+      best = (start, end, target.id)
+  return best
 
 
 def _checksum_wrap(op: str, y: str) -> str:
@@ -991,17 +1026,33 @@ def _run_expected_checksums(src_str: str) -> list[int] | None:
   return values
 
 
+# The exit accumulator seeds a very large random constant: a zero start
+# collapses the chain steps that multiply, so a large nonzero seed keeps
+# every step's operator meaningful.
+CHECKSUM_SEED_MIN = 2**63
+CHECKSUM_SEED_LIMIT = 2**64
+
+# Every chain step lifts a random coefficient into its operand; the range
+# keeps a multiplication-heavy chain's growth small enough for the
+# printable checksum limit.
+CHECKSUM_COEFF_MIN = 2
+CHECKSUM_COEFF_LIMIT = 10**4
+
+
 def randomize_checksum(src_bytes: bytes, seed: int) -> bytes:
-  """Sample one operator per checksum chain step and write the recalibrated
-  constants into the sampled chain, so code and harness cannot drift.  The
-  harness replays the leaf once per example, so every expectation must
-  re-derive from a run.  Failing samples are discarded; with none left the
-  original addition chain stays, whose checksum rysmith already calibrated."""
+  """Sample one operator per checksum chain step, lift a random coefficient
+  into every step's operand (`chk op coeff*x`), seed the exit accumulator
+  with a very large random constant, and write the recalibrated constants
+  into the sampled chain, so code and harness cannot drift.  The harness
+  replays the leaf once per example, so every expectation must re-derive
+  from a run.  Failing samples are discarded; with none left the original
+  addition chain stays, whose checksum rysmith already calibrated."""
   try:
     tree = ast.parse(src_bytes)
   except SyntaxError as e:
     raise RuntimeError(f"rysmith output is not valid Python: {e}") from e
   spans = _checksum_chain(tree, src_bytes)
+  init_span = _checksum_init_span(tree, src_bytes, spans[0][0])
   src_str = src_bytes.decode("utf-8")
   if not HARNESS_CHECK_RE.search(src_str):
     raise RuntimeError("main harness is missing its checksum checks")
@@ -1010,11 +1061,20 @@ def randomize_checksum(src_bytes: bytes, seed: int) -> bytes:
     replacements = []
     for left_start, left_end, right_start, right_end, acc_on_left, acc_id in spans:
       op = rng.choice(CHECKSUM_OPS).decode("ascii")
+      coeff = rng.randrange(CHECKSUM_COEFF_MIN, CHECKSUM_COEFF_LIMIT)
       x_start, x_end = (
         (right_start, right_end) if acc_on_left else (left_start, left_end)
       )
-      chain_text = f"{acc_id} {_checksum_wrap(op, src_str[x_start:x_end])}"
+      # The parentheses keep the lift exact: `//` and `**` outrank `*`, so
+      # an unlifted `chk // coeff*x` would group around the accumulator.
+      chain_text = (
+        f"{acc_id} {_checksum_wrap(op, f'{coeff} * ({src_str[x_start:x_end]})')}"
+      )
       replacements.append((left_start, right_end, chain_text))
+    if init_span is not None:
+      init_start, init_end, _init_id = init_span
+      exit_seed = rng.randrange(CHECKSUM_SEED_MIN, CHECKSUM_SEED_LIMIT)
+      replacements.append((init_start, init_end, str(exit_seed)))
     candidate = apply_replacements(src_bytes, replacements).decode("utf-8")
     values = _run_expected_checksums(candidate)
     if not values or any(len(str(value)) > CHECKSUM_LITERAL_LIMIT for value in values):

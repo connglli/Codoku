@@ -2541,6 +2541,300 @@ def multi_example_checksum_tests_pass(ccommon, chk_mod, mod) -> bool:
   return ok
 
 
+def checksum_seed_tests_pass(ccommon, chk_mod, mod) -> bool:
+  """The exit block seeds the checksum accumulator with a very large random
+  constant instead of zero: zero collapses the first chain steps (`0 * x`
+  stays zero), and the seeding travels inside one recalibration bundle."""
+  ok = True
+
+  def run_module(src_bytes: bytes) -> int:
+    with tempfile.NamedTemporaryFile("wb", suffix=".py", delete=False) as tf:
+      tf.write(src_bytes)
+      path = tf.name
+    try:
+      r = subprocess.run(
+        [sys.executable, path], capture_output=True, text=True, timeout=60
+      )
+      return r.returncode
+    finally:
+      os.unlink(path)
+
+  fix_src = (
+    "def _in_check_chksum(expected, actual):\n"
+    "    if expected != actual:\n"
+    "        raise ValueError('@check_chksum mismatch')\n"
+    "    return actual\n"
+    "\n"
+    "def func_t(pa0, pa1, pa2):\n"
+    "    v__chk = 0\n"
+    "    v__chk = (v__chk + pa0)\n"
+    "    v__chk = (v__chk + pa1)\n"
+    "    v__chk = (v__chk + pa2)\n"
+    "    return v__chk\n"
+    "\n"
+    "def main():\n"
+    "    r = func_t(3, 5, 7)\n"
+    "    r = _in_check_chksum(123, r)\n"
+    "    return 0\n"
+    "\n"
+    'if __name__ == "__main__":\n'
+    "    import sys\n"
+    "    sys.exit(main())\n"
+  ).encode("utf-8")
+
+  # (1) The exit block seeds a very large constant instead of zero: the
+  # initialiser directly above the chain's first step carries the seed.
+  randomized = mod.randomize_checksum(fix_src, 42)
+  init_match = re.search(
+    r"    (v__\w+) = (\d+)\n    \1 = \(", randomized.decode("utf-8")
+  )
+  good = init_match is not None and int(init_match.group(2)) >= 2**63
+  check(
+    "checksum: the exit block seeds a very large constant",
+    good,
+    randomized.decode("utf-8"),
+  )
+  ok = ok and good
+
+  # (2) The accumulator's let-declaration keeps its zero: only the exit
+  # block's initialiser carries the seed.
+  decl_fixture = (
+    "def _in_check_chksum(expected, actual):\n"
+    "    if expected != actual:\n"
+    "        raise ValueError('@check_chksum mismatch')\n"
+    "    return actual\n"
+    "\n"
+    "def func_t(pa0):\n"
+    "    v__chk = 0\n"
+    "    # ^entry\n"
+    "    v1 = (pa0 + 1)\n"
+    "    # ^exit\n"
+    "    v__chk = 0\n"
+    "    v__chk = (v__chk + v1)\n"
+    "    v__chk = (v__chk + pa0)\n"
+    "    return v__chk\n"
+    "\n"
+    "def main():\n"
+    "    r = func_t(7)\n"
+    "    r = _in_check_chksum(123, r)\n"
+    "    return 0\n"
+    "\n"
+    'if __name__ == "__main__":\n'
+    "    import sys\n"
+    "    sys.exit(main())\n"
+  ).encode("utf-8")
+  randomized = mod.randomize_checksum(decl_fixture, 42)
+  text = randomized.decode("utf-8")
+  init_match = re.search(r"    # \^exit\n    (v__\w+) = (\d+)\n", text)
+  good = (
+    "    v__chk = 0\n    # ^entry\n" in text
+    and init_match is not None
+    and int(init_match.group(2)) >= 2**63
+  )
+  check("checksum: the declaration keeps its zero, the exit block seeds", good, text)
+  ok = ok and good
+
+  # (3) The multi-example recalibration covers the seed: every example's
+  # expectation re-derives from a run of the seeded chain.
+  multi_fixture = (
+    "def _in_check_chksum(expected, actual):\n"
+    "    if expected != actual:\n"
+    "        raise ValueError('@check_chksum mismatch')\n"
+    "    return actual\n"
+    "\n"
+    "def func_t(pa0, pa1, pa2):\n"
+    "    v__chk = 0\n"
+    "    v__chk = (v__chk + pa0)\n"
+    "    v__chk = (v__chk + pa1)\n"
+    "    v__chk = (v__chk + pa2)\n"
+    "    return v__chk\n"
+    "\n"
+    "def main():\n"
+    "    r = func_t(3, 5, 7)\n"
+    "    r = _in_check_chksum(123, r)\n"
+    "    r = func_t(-2, 6, 5)\n"
+    "    r = _in_check_chksum(134, r)\n"
+    "    r = func_t(-7, 7, 3)\n"
+    "    r = _in_check_chksum(145, r)\n"
+    "    return 0\n"
+    "\n"
+    'if __name__ == "__main__":\n'
+    "    import sys\n"
+    "    sys.exit(main())\n"
+  ).encode("utf-8")
+  randomized = mod.randomize_checksum(multi_fixture, 42)
+  init_match = re.search(
+    r"    (v__\w+) = (\d+)\n    \1 = \(", randomized.decode("utf-8")
+  )
+  good = (
+    init_match is not None
+    and int(init_match.group(2)) >= 2**63
+    and run_module(randomized) == 0
+  )
+  check(
+    "checksum: the seed recalibrates every example (3 checks)",
+    good,
+    f"rc={run_module(randomized)}\n{randomized.decode('utf-8')}",
+  )
+  ok = ok and good
+
+  # (4) The seed varies with the master seed.
+  a_init_match = re.search(
+    r"    (v__\w+) = (\d+)\n",
+    mod.randomize_checksum(fix_src, 42).decode("utf-8"),
+  )
+  b_init_match = re.search(
+    r"    (v__\w+) = (\d+)\n",
+    mod.randomize_checksum(fix_src, 43).decode("utf-8"),
+  )
+  good = (
+    a_init_match is not None
+    and b_init_match is not None
+    and a_init_match.group(2) != b_init_match.group(2)
+    and int(a_init_match.group(2)) >= 2**63
+    and int(b_init_match.group(2)) >= 2**63
+  )
+  check(
+    "checksum: the seed varies with the master seed",
+    good,
+    f"{a_init_match and a_init_match.group(2)} vs "
+    f"{b_init_match and b_init_match.group(2)}",
+  )
+  ok = ok and good
+
+  # (5) Edge case: a non-constant exit initialiser seeds no span, so only
+  # the operator rewrite applies, and the recalibration still holds.
+  no_init = (
+    "def _in_check_chksum(expected, actual):\n"
+    "    if expected != actual:\n"
+    "        raise ValueError('@check_chksum mismatch')\n"
+    "    return actual\n"
+    "\n"
+    "def func_t(pa0, pa1):\n"
+    "    v__chk = (0 // 1)\n"
+    "    v__chk = (v__chk + pa0)\n"
+    "    v__chk = (v__chk + pa1)\n"
+    "    return v__chk\n"
+    "\n"
+    "def main():\n"
+    "    r = func_t(3, 5)\n"
+    "    r = _in_check_chksum(123, r)\n"
+    "    return 0\n"
+    "\n"
+    'if __name__ == "__main__":\n'
+    "    import sys\n"
+    "    sys.exit(main())\n"
+  ).encode("utf-8")
+  randomized = mod.randomize_checksum(no_init, 42)
+  good = (
+    "    v__chk = (0 // 1)\n" in randomized.decode("utf-8")
+    and randomized != no_init
+    and run_module(randomized) == 0
+  )
+  check(
+    "checksum: a non-constant exit initialiser keeps only the operator rewrite",
+    good,
+    str(randomized.decode("utf-8")),
+  )
+  ok = ok and good
+
+  return ok
+
+
+def checksum_coeff_tests_pass(ccommon, chk_mod, mod) -> bool:
+  """Every chain step lifts a random coefficient into its other operand
+  (`chk op coeff*x`): more randomization breadth per step, and the
+  wrapped operators keep their guards around the lifted operand."""
+  ok = True
+
+  def run_module(src_bytes: bytes) -> int:
+    with tempfile.NamedTemporaryFile("wb", suffix=".py", delete=False) as tf:
+      tf.write(src_bytes)
+      path = tf.name
+    try:
+      r = subprocess.run(
+        [sys.executable, path], capture_output=True, text=True, timeout=60
+      )
+      return r.returncode
+    finally:
+      os.unlink(path)
+
+  fix_src = (
+    "def _in_check_chksum(expected, actual):\n"
+    "    if expected != actual:\n"
+    "        raise ValueError('@check_chksum mismatch')\n"
+    "    return actual\n"
+    "\n"
+    "def func_t(pa0, pa1, pa2):\n"
+    "    v__chk = 0\n"
+    "    v__chk = (v__chk + pa0)\n"
+    "    v__chk = (v__chk + pa1)\n"
+    "    v__chk = (v__chk + pa2)\n"
+    "    return v__chk\n"
+    "\n"
+    "def main():\n"
+    "    r = func_t(3, 5, 7)\n"
+    "    r = _in_check_chksum(123, r)\n"
+    "    return 0\n"
+    "\n"
+    'if __name__ == "__main__":\n'
+    "    import sys\n"
+    "    sys.exit(main())\n"
+  ).encode("utf-8")
+
+  # (1) Every chain step lifts a coefficient: each step's operand is
+  # `<coeff> * (<atom>)`.
+  randomized = mod.randomize_checksum(fix_src, 42)
+  coeff_matches = re.findall(r"(\d+) \* \(pa\d\)", randomized.decode("utf-8"))
+  good = len(coeff_matches) == 3
+  check("checksum: every chain step lifts a coefficient", good, str(coeff_matches))
+  ok = ok and good
+
+  # (2) Each coefficient stays in its declared range.
+  good = all(2 <= int(c) < 10**4 for c in coeff_matches)
+  check("checksum: the coefficient stays in range", good, str(coeff_matches))
+  ok = ok and good
+
+  # (3) The lifted chain recalibrates: main's check passes.
+  good = coeff_matches and run_module(randomized) == 0
+  check(
+    "checksum: the lifted chain recalibrates and passes",
+    good,
+    str(run_module(randomized)),
+  )
+  ok = ok and good
+
+  # (4) The coefficients vary with the master seed.
+  a_coeffs = re.findall(
+    r"(\d+) \* \(pa\d\)", mod.randomize_checksum(fix_src, 42).decode("utf-8")
+  )
+  b_coeffs = re.findall(
+    r"(\d+) \* \(pa\d\)", mod.randomize_checksum(fix_src, 43).decode("utf-8")
+  )
+  good = a_coeffs and b_coeffs and a_coeffs != b_coeffs
+  check(
+    "checksum: the coefficient varies with the master seed",
+    good,
+    f"{a_coeffs} vs {b_coeffs}",
+  )
+  ok = ok and good
+
+  # (5) Edge case: the wrapped operators keep the lifted operand inside
+  # their guard shapes, so the guards stay well-defined.
+  lifted = "3 * (pa0)"
+  good = (
+    mod._checksum_wrap("//", lifted) == "// (3 * (pa0) | 1)"
+    and mod._checksum_wrap("%", lifted) == "% (3 * (pa0) | 1)"
+    and mod._checksum_wrap("**", lifted) == "** min(max(3 * (pa0), 0), 64)"
+    and mod._checksum_wrap("<<", lifted) == "<< min(max(3 * (pa0), 0), 64)"
+    and mod._checksum_wrap("+", lifted) == "+ 3 * (pa0)"
+  )
+  check("checksum: wrap guards wrap the lifted operand", good, str(good))
+  ok = ok and good
+
+  return ok
+
+
 def main():
   if len(sys.argv) < 3:
     print("usage: run_codoku_tests.py <codoku.py> <rysmith>")
@@ -2562,6 +2856,8 @@ def main():
   sentinel_unit_tests_pass(ccommon, chk_mod)
   fine_grained_unit_tests_pass(ccommon, chk_mod, mod)
   checksum_unit_tests_pass(ccommon, chk_mod, mod)
+  checksum_seed_tests_pass(ccommon, chk_mod, mod)
+  checksum_coeff_tests_pass(ccommon, chk_mod, mod)
   multi_example_tests_pass(ccommon, chk_mod)
   multi_example_checksum_tests_pass(ccommon, chk_mod, mod)
 
@@ -2598,6 +2894,21 @@ def main():
     # (2) The puzzle uses <FILL_XXX> tokens and the codoku check command.
     with open(puzzle) as f:
       ptext = f.read()
+
+    # (1b) The shipped puzzle's exit block seeds the checksum with a very
+    # large constant instead of zero, and every chain step lifts a random
+    # coefficient into its operand.
+    seed_match = re.search(r"    v__\w+ = (\d{10,})\n", ptext)
+    check(
+      "generate seeds the exit checksum",
+      seed_match is not None and int(seed_match.group(1)) >= 2**63,
+      seed_match and seed_match.group(1),
+    )
+    check(
+      "generate lifts chain coefficients",
+      re.search(r"v__\w+ = \(v__\w+ [^\n]*\d+ \* \(", ptext) is not None,
+      re.search(r"    v__\w+ = .*\n    v__\w+ = .*\n", ptext),
+    )
 
     check(
       "puzzle uses <FILL_XXX> tokens",
