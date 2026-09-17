@@ -873,8 +873,9 @@ def extract_cfg_from_sir(sir_path: Path) -> list[tuple[str, str]]:
 # random constant, swaps the operator per chain step, lifts a random
 # coefficient into each step's operand, and recalibrates every harness
 # expectation from a run of the ground truth. Zero divisors, exponents, and
-# shift counts are guarded by construction (_checksum_wrap), and failing
-# samples keep the original chain.
+# shift counts are guarded by construction (_checksum_wrap), failing
+# samples keep the original chain, and a case whose replay checksums
+# duplicate or overflow is rejected.
 # ---------------------------------------------------------------------------
 
 CHECKSUM_OPS: tuple[bytes, ...] = (
@@ -891,7 +892,7 @@ CHECKSUM_OPS: tuple[bytes, ...] = (
   b">>",
 )
 CHECKSUM_SAMPLE_ATTEMPTS = 20
-CHECKSUM_LITERAL_LIMIT = 1000  # decimal characters of the expected checksum
+CHECKSUM_LITERAL_LIMIT = 32  # decimal characters of the expected checksum
 CHECKSUM_RUN_TIMEOUT = 5.0  # matches the checker's execution cap
 
 
@@ -1039,14 +1040,27 @@ CHECKSUM_COEFF_MIN = 2
 CHECKSUM_COEFF_LIMIT = 10**4
 
 
-def randomize_checksum(src_bytes: bytes, seed: int) -> bytes:
+def _accept_checksum_values(values: list[int]) -> bool:
+  """Every expected checksum is printable and unique: one harness replay
+  that collapses onto a neighbour's checksum shrinks the case below its
+  example count, and a too large value overflows the `_in_check_chksum`
+  literal, so either budget breach rejects the case."""
+  if any(len(str(value)) > CHECKSUM_LITERAL_LIMIT for value in values):
+    return False
+  return len(set(values)) == len(values)
+
+
+def randomize_checksum(src_bytes: bytes, seed: int) -> bytes | None:
   """Sample one operator per checksum chain step, lift a random coefficient
   into every step's operand (`chk op coeff*x`), seed the exit accumulator
   with a very large random constant, and write the recalibrated constants
   into the sampled chain, so code and harness cannot drift.  The harness
   replays the leaf once per example, so every expectation must re-derive
-  from a run.  Failing samples are discarded; with none left the original
-  addition chain stays, whose checksum rysmith already calibrated."""
+  from a run, and every replay's checksum must stay distinct.  Failing
+  samples are discarded; with none left the original addition chain stays,
+  whose checksum rysmith already calibrated, when its own replay checksums
+  pass the same budget gate — a case whose replay checksums duplicate or
+  overflow rejects the case (the caller drops the candidate)."""
   try:
     tree = ast.parse(src_bytes)
   except SyntaxError as e:
@@ -1077,7 +1091,7 @@ def randomize_checksum(src_bytes: bytes, seed: int) -> bytes:
       replacements.append((init_start, init_end, str(exit_seed)))
     candidate = apply_replacements(src_bytes, replacements).decode("utf-8")
     values = _run_expected_checksums(candidate)
-    if not values or any(len(str(value)) > CHECKSUM_LITERAL_LIMIT for value in values):
+    if not values or not _accept_checksum_values(values):
       continue
     # re.sub walks the harness in replay order, so one expectation per
     # example lands at the replay that produced it.
@@ -1086,6 +1100,14 @@ def randomize_checksum(src_bytes: bytes, seed: int) -> bytes:
       lambda _match, nxt=recalibrated: f"r = _in_check_chksum({next(nxt)}, r)",
       candidate,
     ).encode("utf-8")
+  # No sampled chain survived: the original addition chain keeps
+  # rysmith's calibration, and its own run passes the same budget gate.
+  # A calibration that cannot run keeps the chain as before.
+  fallback_values = _run_expected_checksums(src_str)
+  if fallback_values is not None and not _accept_checksum_values(fallback_values):
+    # rysmith's calibration does not keep every replay distinct either,
+    # so a fallback that collapses two replays rejects the case.
+    return None
   return src_bytes
 
 
@@ -1478,6 +1500,11 @@ def generate_candidate(
   src_raw = py_path.read_bytes()
   src = strip_refractir_prefix(swap_preamble(src_raw))
   src = randomize_checksum(src, used_seed)
+  if src is None:
+    # A replay checksum that duplicates a neighbour's ships fewer anchors
+    # than the harness examples, so the case is rejected and the caller
+    # tries another attempt.
+    raise RuntimeError("checksum replay values duplicate or overflow")
   try:
     tree = ast.parse(src)
   except Exception as e:

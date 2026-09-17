@@ -2835,6 +2835,128 @@ def checksum_coeff_tests_pass(ccommon, chk_mod, mod) -> bool:
   return ok
 
 
+def checksum_replay_distinct_tests_pass(ccommon, chk_mod, mod) -> bool:
+  """Every harness replay carries its own checksum: one replay whose value
+  collapses onto a neighbour's shrinks the n-examples strap below its
+  example count, so the creator rejects such a case instead of shipping
+  fewer anchors than examples.  The printable budget and the fallback
+  follow the same gate."""
+  ok = True
+
+  def run_module(src_bytes: bytes) -> int:
+    with tempfile.NamedTemporaryFile("wb", suffix=".py", delete=False) as tf:
+      tf.write(src_bytes)
+      path = tf.name
+    try:
+      r = subprocess.run(
+        [sys.executable, path], capture_output=True, text=True, timeout=60
+      )
+      return r.returncode
+    finally:
+      os.unlink(path)
+
+  def harness(chain_operand: str, replays: list[tuple[int, int]]) -> bytes:
+    replay = ""
+    for i, (a0, a1) in enumerate(replays):
+      replay += f"    r = func_t({a0}, {a1})\n"
+      # The originals are stale guesses, as in the generated flow: the
+      # recalibration re-derives each from a run.
+      replay += f"    r = _in_check_chksum({11 * i + 123}, r)\n"
+    return (
+      "def _in_check_chksum(expected, actual):\n"
+      "    if expected != actual:\n"
+      "        raise ValueError('@check_chksum mismatch')\n"
+      "    return actual\n"
+      "\n"
+      "def func_t(pa0, pa1):\n"
+      "    v__chk = 0\n"
+      f"    v__chk = (v__chk + {chain_operand})\n"
+      "    return v__chk\n"
+      "\n"
+      "def main():\n" + replay + "    return 0\n"
+      "\n"
+      'if __name__ == "__main__":\n'
+      "    import sys\n"
+      "    sys.exit(main())\n"
+    ).encode("utf-8")
+
+  # (1) A chain that ignores the differing parameter coordinate collapses
+  # every replay onto one checksum: the case is rejected, never kept.
+  duplicate = harness("pa1", [(3, 5), (7, 5)])
+  got = mod.randomize_checksum(duplicate, 42)
+  good = got is None
+  check(
+    "checksum: a case whose replay checksums duplicate is rejected",
+    good,
+    f"returned {type(got).__name__}",
+  )
+  ok = ok and good
+
+  # (2) A chain that follows the differing coordinate spans distinct
+  # values: the sampled rewrite applies, and the recalibrated literals
+  # stay pairwise distinct.
+  varying = harness("pa0", [(3, 5), (7, 5)])
+  got = mod.randomize_checksum(varying, 42)
+  literals = re.findall(
+    r"_in_check_chksum\((-?\d+), r\)", got.decode("utf-8") if got else ""
+  )
+  rc = run_module(got) if got is not None else -1
+  distinct_literals = len(literals) == 2 and literals[0] != literals[1]
+  good = (got is not None) and (rc == 0) and distinct_literals
+  check(
+    "checksum: a distinct chain recalibrates pairwise-distinct literals",
+    good,
+    f"rc={rc} literals={literals}",
+  )
+  ok = ok and good
+
+  # (3) Two replays that share the leaf inputs land on the same value
+  # under any chain: with three examples the case is rejected too.
+  identical = harness("pa0", [(3, 5), (3, 5), (7, 5)])
+  got = mod.randomize_checksum(identical, 42)
+  good = got is None
+  check(
+    "checksum: identical replays among three reject the case",
+    good,
+    f"returned {type(got).__name__}",
+  )
+  ok = ok and good
+
+  # (4) The printable budget gates the fallback too: with every sampled
+  # value overflowing the limit, an original whose own values overflow
+  # rejects the case where it used to keep the chain.
+  overflow_src = harness("pa0", [(10**32, 5)])
+  saved_ops = mod.CHECKSUM_OPS
+  mod.CHECKSUM_OPS = (b"**",)
+  try:
+    got = mod.randomize_checksum(overflow_src, 42)
+  finally:
+    mod.CHECKSUM_OPS = saved_ops
+  good = got is None
+  check(
+    "checksum: an overflow-only fallback rejects the case",
+    good,
+    f"returned {type(got).__name__}",
+  )
+  ok = ok and good
+
+  # (5) Edge case: a leaf the calibration cannot run keeps the original
+  # addition chain, whose literals rysmith calibrated.
+  broken = harness("pa1", [(3, 5), (7, 5)]).replace(
+    b"    v__chk = 0\n", b"    v__chk = 0 // 0\n", 1
+  )
+  kept = mod.randomize_checksum(broken, 42)
+  good = kept == broken
+  check(
+    "checksum: a failing calibration keeps the addition chain",
+    good,
+    str(kept == broken),
+  )
+  ok = ok and good
+
+  return ok
+
+
 def main():
   if len(sys.argv) < 3:
     print("usage: run_codoku_tests.py <codoku.py> <rysmith>")
@@ -2860,6 +2982,7 @@ def main():
   checksum_coeff_tests_pass(ccommon, chk_mod, mod)
   multi_example_tests_pass(ccommon, chk_mod)
   multi_example_checksum_tests_pass(ccommon, chk_mod, mod)
+  checksum_replay_distinct_tests_pass(ccommon, chk_mod, mod)
 
   with tempfile.TemporaryDirectory(prefix="codoku_gen_") as workdir:
     # Mirror the image layout: codoku + vendored modules + rysmith in one dir.
