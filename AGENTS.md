@@ -29,7 +29,7 @@ Like [README.md](./README.md), this project centers on Codoku. The RefractIR par
 
 ## Puzzle at a Glance
 
-+ A puzzle is a generated leaf: a random Python function from `rysmith --target python`, wrapped in a fixed `@main` harness that replays the leaf once per example and checks each replay's checksum, and carry the guarded memory model from [codokus/codoku_preamble.py](./codokus/codoku_preamble.py).
++ A puzzle is a generated leaf: a random Python function from `rysmith --target python`, wrapped in a fixed `@main` harness that replays the leaf once per example, checks each replay's checksum, and carrying the guarded memory model from [codokus/codoku_preamble.py](./codokus/codoku_preamble.py). When the `^exit` checksum extracts into one `_in_global_chksum` function, the harness also checks one accumulated global checksum (`_g`) at the end of `main` (called mid-path and at the leaf's exit).
 + Cells: masking is a lossy, token-level rewrite; each cell stands for a *kind* of element, not a specific one:
 
 | Cell | What it hides |
@@ -80,7 +80,11 @@ rysmith --target python
   ↓
 swap_preamble (guarded memory model) + strip refractir_ prefix
   ↓
-randomize_checksum (a large exit seed + per-step operator and coefficient sample + expected-value recalibration)
+collect_global_chk_operands (the exit chain's operand texts)
+  ↓
+randomize_checksum (the `^exit` extraction into one `_in_global_chksum` function + a large seed + per-step operator and coefficient sample + expected-value recalibration)
+  ↓
+insert_global_chksum (one `_in_global_chksum` call at each distinct K-th visited block + an end-of-main global check, recalibrated from a run; `chksum_every` is a profile knob; visit order counts entry and exit toward K but never instruments them; degrades to no global check when the exit checksum keeps its addition chain)
   ↓
 mask_puzzle: cells ← per-element rolls (p_mask_ops, p_mask_lhs_vars, p_mask_rhs_vars, p_mask_funcs, p_mask_consts; ctrl and goto tokens always) → filter_disabled_masks
   ↓
@@ -96,6 +100,7 @@ install: puzzle.py + INSTRUCTION.md + oracle/
 ```text
 basics (markers, unfilled cells) → parse → re-mask skeleton match → compile
   → CFG topology vs declared edges → timed run → path trace → checksum output
+  (per-example anchors plus the global `_g` check when present ride the exit-code gate)
   → constant budget (total count or live/dead split)
 ```
 

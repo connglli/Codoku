@@ -2162,6 +2162,10 @@ def checksum_unit_tests_pass(ccommon, chk_mod, mod) -> bool:
   discarded, and all failing samples keep the addition chain."""
   ok = True
   fix_src = (
+    "def _cast_int(v, m):\n"
+    "    v &= (1 << m) - 1\n"
+    "    return v - (1 << m) if v >= 1 << (m - 1) else v\n"
+    "\n"
     "def _in_check_chksum(expected, actual):\n"
     "    return 0 if expected == actual else 1\n"
     "\n"
@@ -2320,6 +2324,10 @@ def multi_example_tests_pass(ccommon, chk_mod) -> bool:
       # The leaf returns (pa + 1) + 2 on the prescribed path.
       replay += f"    r = _in_check_chksum({arg + 3}, r)\n"
     return (
+      "def _cast_int(v, m):\n"
+      "    v &= (1 << m) - 1\n"
+      "    return v - (1 << m) if v >= 1 << (m - 1) else v\n"
+      "\n"
       "def _in_check_chksum(expected, actual):\n"
       "    if expected != actual:\n"
       "        raise ValueError('@check_chksum mismatch')\n"
@@ -2395,6 +2403,10 @@ def multi_example_tests_pass(ccommon, chk_mod) -> bool:
       "    r = _in_check_chksum(-7, r)\n"
     )
     return (
+      "def _cast_int(v, m):\n"
+      "    v &= (1 << m) - 1\n"
+      "    return v - (1 << m) if v >= 1 << (m - 1) else v\n"
+      "\n"
       "def _in_check_chksum(expected, actual):\n"
       "    if expected != actual:\n"
       "        raise ValueError('@check_chksum mismatch')\n"
@@ -2488,6 +2500,10 @@ def multi_example_checksum_tests_pass(ccommon, chk_mod, mod) -> bool:
       # recalibration re-derives each from a run.
       replay += f"    r = _in_check_chksum({11 * i + 123}, r)\n"
     return (
+      "def _cast_int(v, m):\n"
+      "    v &= (1 << m) - 1\n"
+      "    return v - (1 << m) if v >= 1 << (m - 1) else v\n"
+      "\n"
       "def _in_check_chksum(expected, actual):\n"
       "    if expected != actual:\n"
       "        raise ValueError('@check_chksum mismatch')\n"
@@ -2560,6 +2576,10 @@ def checksum_seed_tests_pass(ccommon, chk_mod, mod) -> bool:
       os.unlink(path)
 
   fix_src = (
+    "def _cast_int(v, m):\n"
+    "    v &= (1 << m) - 1\n"
+    "    return v - (1 << m) if v >= 1 << (m - 1) else v\n"
+    "\n"
     "def _in_check_chksum(expected, actual):\n"
     "    if expected != actual:\n"
     "        raise ValueError('@check_chksum mismatch')\n"
@@ -2583,12 +2603,12 @@ def checksum_seed_tests_pass(ccommon, chk_mod, mod) -> bool:
   ).encode("utf-8")
 
   # (1) The exit block seeds a very large constant instead of zero: the
-  # initialiser directly above the chain's first step carries the seed.
+  # extracted function's initializer carries the seed.
   randomized = mod.randomize_checksum(fix_src, 42)
   init_match = re.search(
-    r"    (v__\w+) = (\d+)\n    \1 = \(", randomized.decode("utf-8")
+    r"def _in_global_chksum\([^)]*\):\n    y = (\d+)\n", randomized.decode("utf-8")
   )
-  good = init_match is not None and int(init_match.group(2)) >= 2**63
+  good = init_match is not None and int(init_match.group(1)) >= 2**63
   check(
     "checksum: the exit block seeds a very large constant",
     good,
@@ -2599,6 +2619,10 @@ def checksum_seed_tests_pass(ccommon, chk_mod, mod) -> bool:
   # (2) The accumulator's let-declaration keeps its zero: only the exit
   # block's initialiser carries the seed.
   decl_fixture = (
+    "def _cast_int(v, m):\n"
+    "    v &= (1 << m) - 1\n"
+    "    return v - (1 << m) if v >= 1 << (m - 1) else v\n"
+    "\n"
     "def _in_check_chksum(expected, actual):\n"
     "    if expected != actual:\n"
     "        raise ValueError('@check_chksum mismatch')\n"
@@ -2625,11 +2649,11 @@ def checksum_seed_tests_pass(ccommon, chk_mod, mod) -> bool:
   ).encode("utf-8")
   randomized = mod.randomize_checksum(decl_fixture, 42)
   text = randomized.decode("utf-8")
-  init_match = re.search(r"    # \^exit\n    (v__\w+) = (\d+)\n", text)
+  init_match = re.search(r"def _in_global_chksum\([^)]*\):\n    y = (\d+)\n", text)
   good = (
     "    v__chk = 0\n    # ^entry\n" in text
     and init_match is not None
-    and int(init_match.group(2)) >= 2**63
+    and int(init_match.group(1)) >= 2**63
   )
   check("checksum: the declaration keeps its zero, the exit block seeds", good, text)
   ok = ok and good
@@ -2637,6 +2661,10 @@ def checksum_seed_tests_pass(ccommon, chk_mod, mod) -> bool:
   # (3) The multi-example recalibration covers the seed: every example's
   # expectation re-derives from a run of the seeded chain.
   multi_fixture = (
+    "def _cast_int(v, m):\n"
+    "    v &= (1 << m) - 1\n"
+    "    return v - (1 << m) if v >= 1 << (m - 1) else v\n"
+    "\n"
     "def _in_check_chksum(expected, actual):\n"
     "    if expected != actual:\n"
     "        raise ValueError('@check_chksum mismatch')\n"
@@ -2664,11 +2692,12 @@ def checksum_seed_tests_pass(ccommon, chk_mod, mod) -> bool:
   ).encode("utf-8")
   randomized = mod.randomize_checksum(multi_fixture, 42)
   init_match = re.search(
-    r"    (v__\w+) = (\d+)\n    \1 = \(", randomized.decode("utf-8")
+    r"def _in_global_chksum\([^)]*\):\n    y = (\d+)\n",
+    randomized.decode("utf-8"),
   )
   good = (
     init_match is not None
-    and int(init_match.group(2)) >= 2**63
+    and int(init_match.group(1)) >= 2**63
     and run_module(randomized) == 0
   )
   check(
@@ -2680,31 +2709,35 @@ def checksum_seed_tests_pass(ccommon, chk_mod, mod) -> bool:
 
   # (4) The seed varies with the master seed.
   a_init_match = re.search(
-    r"    (v__\w+) = (\d+)\n",
+    r"def _in_global_chksum\([^)]*\):\n    y = (\d+)\n",
     mod.randomize_checksum(fix_src, 42).decode("utf-8"),
   )
   b_init_match = re.search(
-    r"    (v__\w+) = (\d+)\n",
+    r"def _in_global_chksum\([^)]*\):\n    y = (\d+)\n",
     mod.randomize_checksum(fix_src, 43).decode("utf-8"),
   )
   good = (
     a_init_match is not None
     and b_init_match is not None
-    and a_init_match.group(2) != b_init_match.group(2)
-    and int(a_init_match.group(2)) >= 2**63
-    and int(b_init_match.group(2)) >= 2**63
+    and a_init_match.group(1) != b_init_match.group(1)
+    and int(a_init_match.group(1)) >= 2**63
+    and int(b_init_match.group(1)) >= 2**63
   )
   check(
     "checksum: the seed varies with the master seed",
     good,
-    f"{a_init_match and a_init_match.group(2)} vs "
-    f"{b_init_match and b_init_match.group(2)}",
+    f"{a_init_match and a_init_match.group(1)} vs "
+    f"{b_init_match and b_init_match.group(1)}",
   )
   ok = ok and good
 
   # (5) Edge case: a non-constant exit initialiser seeds no span, so only
   # the operator rewrite applies, and the recalibration still holds.
   no_init = (
+    "def _cast_int(v, m):\n"
+    "    v &= (1 << m) - 1\n"
+    "    return v - (1 << m) if v >= 1 << (m - 1) else v\n"
+    "\n"
     "def _in_check_chksum(expected, actual):\n"
     "    if expected != actual:\n"
     "        raise ValueError('@check_chksum mismatch')\n"
@@ -2760,6 +2793,10 @@ def checksum_coeff_tests_pass(ccommon, chk_mod, mod) -> bool:
       os.unlink(path)
 
   fix_src = (
+    "def _cast_int(v, m):\n"
+    "    v &= (1 << m) - 1\n"
+    "    return v - (1 << m) if v >= 1 << (m - 1) else v\n"
+    "\n"
     "def _in_check_chksum(expected, actual):\n"
     "    if expected != actual:\n"
     "        raise ValueError('@check_chksum mismatch')\n"
@@ -2783,9 +2820,9 @@ def checksum_coeff_tests_pass(ccommon, chk_mod, mod) -> bool:
   ).encode("utf-8")
 
   # (1) Every chain step lifts a coefficient: each step's operand is
-  # `<coeff> * (<atom>)`.
+  # `<coeff> * (cN)` inside the extracted function.
   randomized = mod.randomize_checksum(fix_src, 42)
-  coeff_matches = re.findall(r"(\d+) \* \(pa\d\)", randomized.decode("utf-8"))
+  coeff_matches = re.findall(r"(\d+) \* \(c\d+\)", randomized.decode("utf-8"))
   good = len(coeff_matches) == 3
   check("checksum: every chain step lifts a coefficient", good, str(coeff_matches))
   ok = ok and good
@@ -2806,10 +2843,10 @@ def checksum_coeff_tests_pass(ccommon, chk_mod, mod) -> bool:
 
   # (4) The coefficients vary with the master seed.
   a_coeffs = re.findall(
-    r"(\d+) \* \(pa\d\)", mod.randomize_checksum(fix_src, 42).decode("utf-8")
+    r"(\d+) \* \(c\d+\)", mod.randomize_checksum(fix_src, 42).decode("utf-8")
   )
   b_coeffs = re.findall(
-    r"(\d+) \* \(pa\d\)", mod.randomize_checksum(fix_src, 43).decode("utf-8")
+    r"(\d+) \* \(c\d+\)", mod.randomize_checksum(fix_src, 43).decode("utf-8")
   )
   good = a_coeffs and b_coeffs and a_coeffs != b_coeffs
   check(
@@ -2863,6 +2900,10 @@ def checksum_replay_distinct_tests_pass(ccommon, chk_mod, mod) -> bool:
       # recalibration re-derives each from a run.
       replay += f"    r = _in_check_chksum({11 * i + 123}, r)\n"
     return (
+      "def _cast_int(v, m):\n"
+      "    v &= (1 << m) - 1\n"
+      "    return v - (1 << m) if v >= 1 << (m - 1) else v\n"
+      "\n"
       "def _in_check_chksum(expected, actual):\n"
       "    if expected != actual:\n"
       "        raise ValueError('@check_chksum mismatch')\n"
@@ -2952,6 +2993,446 @@ def checksum_replay_distinct_tests_pass(ccommon, chk_mod, mod) -> bool:
     good,
     str(kept == broken),
   )
+  ok = ok and good
+
+  return ok
+
+
+GLOBAL_CHKSUM_SRC = (
+  "class RefractIRTrap(Exception):\n"
+  "    pass\n"
+  "\n"
+  "_UNDEF = ['undef']\n"
+  "_PAD = ['pad']\n"
+  "\n"
+  "def _cast_int(v, m):\n"
+  "    v &= (1 << m) - 1\n"
+  "    return v - (1 << m) if v >= 1 << (m - 1) else v\n"
+  "\n"
+  "def _rd(buf, off):\n"
+  "    v = buf[off]\n"
+  "    if v is _UNDEF:\n"
+  "        raise RefractIRTrap('read of undef value')\n"
+  "    if v is _PAD:\n"
+  "        raise RefractIRTrap('access to the interior of a value')\n"
+  "    return v\n"
+  "\n"
+  "def _in_check_chksum(expected, actual):\n"
+  "    if expected != actual:\n"
+  "        raise RefractIRTrap('@check_chksum mismatch')\n"
+  "    return actual\n"
+  "\n"
+  "def func_t(pa0):\n"
+  "    v0 = 5\n"
+  "    v1 = -3\n"
+  "    t0 = [_UNDEF, _PAD]\n"
+  "    v__chk = 0\n"
+  "    while True:\n"
+  "        # ^entry\n"
+  "        v1 = (v1 + pa0)\n"
+  "        # ^b0\n"
+  "        v1 = (v1 + 2)\n"
+  "        # ^b1\n"
+  "        v9 = (v0 + 1)\n"
+  "        v1 = (v1 - 1)\n"
+  "        # ^b2\n"
+  "        t0[0] = (v1 + v9)\n"
+  "        # ^b3\n"
+  "        v1 = (v1 - 2)\n"
+  "        # ^exit\n"
+  "        v__chk = (v__chk + _cast_int(v0, 32))\n"
+  "        v__chk = (v__chk + _cast_int(v1, 32))\n"
+  "        v__chk = (v__chk + _cast_int(v9, 32))\n"
+  "        v__chk = (v__chk + _rd(t0, 0))\n"
+  "        v__chk = (v__chk + pa0)\n"
+  "        return v__chk\n"
+  "\n"
+  "def main():\n"
+  "    r = func_t(1)\n"
+  "    r = _in_check_chksum(14, r)\n"
+  "    r = func_t(2)\n"
+  "    r = _in_check_chksum(17, r)\n"
+  "    return 0\n"
+  "\n"
+  'if __name__ == "__main__":\n'
+  "    import sys\n"
+  "    sys.exit(main())\n"
+).encode("utf-8")
+
+GLOBAL_CHKSUM_OPERANDS = [
+  "_cast_int(v0, 32)",
+  "_cast_int(v1, 32)",
+  "_cast_int(v9, 32)",
+  "_rd(t0, 0)",
+  "pa0",
+]
+
+
+def global_chksum_tests_pass(ccommon, chk_mod, mod) -> bool:
+  """The global checksum reuses the exit checksum's arithmetic: mid-path
+  `_g[0] = _cast_int(_g[0] <op> coeffs * (operand), 64)` chain steps at
+  every K-th visited block (K is the profile-owned `chksum_every` knob),
+  and main checks the accumulated total once with the existing
+  `_in_check_chksum`. The scaffold stays visible: the step statements are
+  skipped by the maskable scan, their operands draw from the exit-chain
+  operands' normalization, and the fold reuses `_checksum_wrap`,
+  `CHECKSUM_OPS`, and the coefficient range the exit chain samples."""
+  ok = True
+
+  def run_module(src_bytes: bytes) -> int:
+    with tempfile.NamedTemporaryFile("wb", suffix=".py", delete=False) as tf:
+      tf.write(src_bytes)
+      path = tf.name
+    try:
+      r = subprocess.run(
+        [sys.executable, path], capture_output=True, text=True, timeout=60
+      )
+      return r.returncode
+    finally:
+      os.unlink(path)
+
+  # (1) The checksum call statements are creator-shaped scaffold: the
+  # maskable scan skips them, so the call's operands stay visible while
+  # every other statement still masks.
+  fix_src = GLOBAL_CHKSUM_SRC
+  call_line = (
+    b"        _g[0] = _cast_int(_in_global_chksum(_g[0], _cast_int(v0, 32), pa0), 64)\n"
+  )
+  instr_src = fix_src.replace(b"        # ^b1\n", call_line + b"        # ^b1\n", 1)
+  instr_tree = ast.parse(instr_src)
+  instr_leaf, _ = ccommon.find_python_leaf_function(instr_tree, instr_src)
+  instr_maskable, instr_entry, _ = ccommon.get_python_maskable_statements(
+    instr_leaf, instr_src
+  )
+  chk_stmts = [s for s in instr_maskable if ccommon._is_global_chksum_call(s)]
+  instr_repls: list = []
+  for stmt in instr_maskable:
+    ccommon.collect_python_replacements(
+      stmt,
+      instr_src,
+      stmt.lineno > instr_entry,
+      instr_repls,
+      ccommon.collect_python_leaf_locals(instr_leaf),
+      set(),
+    )
+  instr_masked = ccommon.apply_replacements(instr_src, instr_repls).decode("utf-8")
+  good = (
+    not chk_stmts
+    and len(instr_maskable) > 3
+    and "_g[0] = _cast_int(_in_global_chksum(_g[0], _cast_int(v0, 32), pa0), 64)"
+    in instr_masked
+    and "<FILL_VAR>" in instr_masked
+  )
+  check(
+    "gchk: the maskable scan skips checksum calls",
+    good,
+    f"chk_stmts={len(chk_stmts)}\n{instr_masked[-1200:]}",
+  )
+  ok = ok and good
+
+  # (3) The stride is a profile-owned knob: profiles carry a bounded
+  # chksum_every range (minimum at least 1), a direct config carries the
+  # default, sample_config lifts the sampled stride, and a zero range is
+  # rejected fail-loudly.
+  direct_cfg = mod.GeneratorConfig(
+    n_bbls=2,
+    n_stmts=2,
+    min_loop_iter=1,
+    max_ptr_depth=0,
+    p_backedge=0.5,
+    p_branch=0.5,
+    n_vars=4,
+    n_params=2,
+  )
+  good = getattr(direct_cfg, "chksum_every", None) == 3
+  check("gchk: a direct config carries the default stride", good, str(direct_cfg))
+  ok = ok and good
+
+  from dataclasses import fields as dc_fields
+  from dataclasses import replace as dc_replace
+
+  missing = [
+    name
+    for name, prof in mod.PROFILES.items()
+    if "chksum_every" not in {f.name for f in dc_fields(prof)}
+  ]
+  underbounded = [
+    name for name, prof in mod.PROFILES.items() if prof.chksum_every.minimum < 1
+  ]
+  bad_strides = []
+  for name, prof in mod.PROFILES.items():
+    prof.validate(name)
+    rng = random.Random(3)
+    for _ in range(20):
+      sampled_cfg = mod.sample_config(prof, rng)
+      stride = getattr(sampled_cfg, "chksum_every", None)
+      if not (prof.chksum_every.minimum <= stride <= prof.chksum_every.maximum):
+        bad_strides.append(f"{name}:{stride}")
+        break
+  good = not missing and not underbounded and not bad_strides
+  check(
+    "gchk: profiles own the bounded chksum_every stride",
+    good,
+    f"missing={missing} underbounded={underbounded} bad={bad_strides}",
+  )
+  ok = ok and good
+
+  zero_ok = False
+  try:
+    dc_replace(mod.PROFILES["medium"], chksum_every=mod.IntRange(0, 0)).validate(
+      "medium-bad-stride"
+    )
+  except ValueError:
+    zero_ok = True
+  except Exception as exc:  # noqa: BLE001
+    check("gchk: a zero stride range is rejected", False, repr(exc))
+    return ok
+  check("gchk: a zero stride range is rejected", zero_ok)
+  ok = ok and zero_ok
+
+  # (4) Extraction: the exit checksum computation becomes ONE function.
+  # `randomize_checksum` splices `_in_global_chksum` (a very large seed plus
+  # one guarded, coefficient-lifted fold per positional parameter, folded
+  # into the `_g` box) and rewrites the leaf's exit block to call it with
+  # the same operand texts the inline chain read. Insertion then calls it
+  # at every K-th visited mid-path block where ALL operands are available.
+  try:
+    operands = mod.collect_global_chk_operands(fix_src)
+  except Exception as exc:  # noqa: BLE001
+    operands = []
+    check("gchk: exit-chain operands extract", False, str(exc))
+    return ok
+  good = operands == GLOBAL_CHKSUM_OPERANDS
+  check(
+    "gchk: exit-chain operands extract in chain order",
+    good,
+    f"got {operands}, want {GLOBAL_CHKSUM_OPERANDS}",
+  )
+  ok = ok and good
+
+  try:
+    extracted = mod.randomize_checksum(fix_src, 42)
+  except Exception as exc:  # noqa: BLE001
+    check("gchk: exit checksum extracted into a function", False, str(exc))
+    return ok
+  if extracted is None:
+    check("gchk: exit checksum extracted into a function", False, "returned None")
+    return ok
+  text = extracted.decode("utf-8")
+  seed_match = re.search(r"def _in_global_chksum\([^)]*\):\n    y = (\d+)", text)
+  good = (
+    text.count("def _in_global_chksum") == 1
+    and text.count("_g = [0]") == 1
+    and seed_match is not None
+    and int(seed_match.group(1)) >= 2**63
+    # The exit block calls the function (first parameter: the checksum to
+    # compute, a fresh 0 there) with the same operand texts; the leaf's
+    # per-example checksum stays in v__chk, separate from `_g`.
+    and "        v__chk = _in_global_chksum(0, "
+    + "_cast_int(v0, 32), _cast_int(v1, 32), "
+    "_cast_int(v9, 32), _rd(t0, 0), pa0)\n"
+    "        return v__chk\n"
+    in text
+    and "    return addend + y" in text
+    and "_g[0] = _cast_int(_g[0] + y, 64)" not in text
+  )
+  fold_steps = re.findall(
+    r"    y = \(y \S+ \d+ \* \(c\d+\)"
+    r"|    y = \(y \S+ \(\d+ \* \(c\d+\) \| 1\)\)"
+    r"|    y = \(y \S+ min\(max\(\d+ \* \(c\d+\), 0\), 64\)\)\)",
+    text,
+  )
+  good = good and len(fold_steps) == 5
+  check(
+    "gchk: the exit checksum extracts into one function",
+    good,
+    f"fold_steps={len(fold_steps)}\n{text[-1400:]}",
+  )
+  ok = ok and good
+  rc = run_module(extracted)
+  good = rc == 0
+  check("gchk: the extracted module runs clean", good, f"rc={rc}")
+  ok = ok and good
+
+  # K=2 chooses b0 and b2, where not every operand is available (v9 unbound
+  # at b0; t0's slot still `_UNDEF` at both): no mid-path call, but the end
+  # anchor still checks the exit calls' accumulated total.
+  try:
+    instrumented = mod.insert_global_chksum(
+      extracted, "entry -> b0 -> b1 -> b2 -> b3 -> exit", 2, operands
+    )
+  except Exception as exc:  # noqa: BLE001
+    check("gchk: instrumented module built", False, str(exc))
+    return ok
+  if instrumented is None:
+    check("gchk: instrumented module built", False, "returned None")
+    return ok
+  itext = instrumented.decode("utf-8")
+  call_sites = re.findall(r"_g\[0\] = _cast_int\(_in_global_chksum\(_g\[0\], ", itext)
+  global_anchor = re.findall(r"_in_check_chksum\(-?\d+, _g\[0\]\)", itext)
+  harness_anchors = chk_mod.count_harness_examples(itext)
+  good = (
+    len(call_sites) == 0
+    and len(global_anchor) == 1
+    and harness_anchors == 2
+    and len(re.findall(r"    r = _in_check_chksum\(-?\d+, r\)", itext)) == 2
+  )
+  check(
+    "gchk: no qualifying block keeps the end-of-main check alone",
+    good,
+    f"calls={len(call_sites)} anchor={global_anchor} harness={harness_anchors}",
+  )
+  ok = ok and good
+
+  # (5) Behavior: the instrumented module (no qualifying block under K=2,
+  # so only the end-of-main anchor) exits 0 and the sampling is
+  # deterministic. A module whose checksum randomization kept the
+  # addition chain degrades untouched.
+  anchor_match = re.search(r"_in_check_chksum\((-?\d+), _g\[0\]\)", itext)
+  rc = run_module(instrumented)
+  good = anchor_match is not None and rc == 0
+  check(
+    "gchk: the instrumented module runs clean",
+    good,
+    f"rc={rc} anchor={anchor_match and anchor_match.group(1)}",
+  )
+  ok = ok and good
+
+  again = mod.insert_global_chksum(
+    extracted, "entry -> b0 -> b1 -> b2 -> b3 -> exit", 2, operands
+  )
+  good = again == instrumented
+  check("gchk: repeated insertion is deterministic", good, str(again == instrumented))
+  ok = ok and good
+
+  degrades = mod.insert_global_chksum(
+    fix_src, "entry -> b0 -> b1 -> b2 -> b3 -> exit", 2, operands
+  )
+  good = degrades == fix_src
+  check(
+    "gchk: a module without the checksum function degrades",
+    good,
+    (degrades or b"")[:400].decode("utf-8", errors="ignore"),
+  )
+  ok = ok and good
+
+  # (6) Edge cases: a K=1 stride reaches b3, where all operands are
+  # finally available (t0's slot concrete after its b2 store); a zero
+  # stride and a missing harness anchor fail closed; leaf extraction
+  # keeps helper/builtin callees out of the operand leaves.
+  every_visit = mod.insert_global_chksum(
+    extracted, "entry -> b0 -> b1 -> b2 -> b3 -> exit", 1, operands
+  )
+  every_text = every_visit.decode("utf-8") if every_visit else ""
+  every_calls = len(
+    re.findall(r"_g\[0\] = _cast_int\(_in_global_chksum\(_g\[0\], ", every_text)
+  )
+  good = (
+    every_calls == 1
+    and every_text.count("_rd(t0, 0)") == 2
+    and len(re.findall(r"_in_check_chksum\(-?\d+, _g\[0\]\)", every_text)) == 1
+  )
+  check(
+    "gchk: a K=1 stride calls the function at every visited block",
+    good,
+    f"calls={every_calls}",
+  )
+  ok = ok and good
+
+  for stride in (0, -1):
+    zero_raise = False
+    try:
+      mod.insert_global_chksum(extracted, "entry -> b0 -> exit", stride, operands)
+    except RuntimeError:
+      zero_raise = True
+    except Exception as exc:  # noqa: BLE001
+      check(f"gchk: a stride of {stride} fails closed", False, repr(exc))
+      ok = False
+      break
+    check(f"gchk: a stride of {stride} fails closed", zero_raise)
+    ok = ok and zero_raise
+
+  missing_anchor = extracted.replace(b"    r = _in_check_chksum(", b"    r = _in_nope(")
+  anchor_raise = False
+  try:
+    mod.insert_global_chksum(
+      missing_anchor, "entry -> b0 -> b1 -> b2 -> b3 -> exit", 2, operands
+    )
+  except RuntimeError:
+    anchor_raise = True
+  except Exception as exc:  # noqa: BLE001
+    check("gchk: a missing harness anchor fails closed", False, repr(exc))
+    ok = False
+  check("gchk: a missing harness anchor fails closed", anchor_raise)
+  ok = ok and anchor_raise
+
+  good = (
+    mod._operand_leaves("_cast_int(_rd(v0, 0), 32)") == (set(), {("v0", 0)})
+    and mod._operand_leaves("_rd(vec1.lanes, 2)") == (set(), {("vec1", 2)})
+    and mod._operand_leaves("_in_max(pa0, pa1)") == ({"pa0", "pa1"}, set())
+    and mod._operand_leaves("v9") == ({"v9"}, set())
+    and mod._operand_leaves("0 // 1") == (set(), set())
+    and mod._operand_leaves("_load(p0)") is None
+    and mod._operand_leaves("_rd(t0, pa0)") is None
+  )
+  check("gchk: operand leaves keep helpers out and slots concrete", good, str(good))
+  ok = ok and good
+
+  # (7) Shape and indentation edge cases: an empty step list fails loud
+  # instead of rendering a dangling signature, the shaped signature carries
+  # one positional parameter per step, and the end-of-main anchor indents
+  # from the last harness check's own line rather than a hardcoded
+  # 4-space body.
+  empty_raise = False
+  try:
+    mod._exit_chksum_function(7, [])
+  except RuntimeError:
+    empty_raise = True
+  except Exception as exc:  # noqa: BLE001
+    check("gchk: an empty step list fails loud", False, repr(exc))
+    return ok
+  check("gchk: an empty step list fails loud", empty_raise)
+  ok = ok and empty_raise
+
+  shaped = mod._exit_chksum_function(7, [("+", 3, "pa0")])
+  good = (
+    "def _in_global_chksum(addend, c0):\n    y = 7\n    y = (y + 3 * (c0))" in shaped
+    and "    return addend + y" in shaped
+  )
+  check("gchk: the shaped signature carries one parameter per step", good, shaped)
+  ok = ok and good
+
+  anchors4 = re.findall(r"\n[ ]*_in_check_chksum\(-?\d+, _g\[0\]\)", itext)
+  good = len(anchors4) == 1 and anchors4[0].startswith("\n    _")
+  check("gchk: the shipped harness keeps its 4-space anchor", good, str(anchors4))
+  ok = ok and good
+
+  # A main harness indented by 6 spaces carries its end anchor at 6 spaces
+  # and the instrumented module runs clean.
+  indented = (
+    GLOBAL_CHKSUM_SRC.replace(b"    r = func_t", b"      r = func_t")
+    .replace(b"    r = _in_check_chksum", b"      r = _in_check_chksum")
+    .replace(b"    return 0\n", b"      return 0\n")
+  )
+  try:
+    indented_extracted = mod.randomize_checksum(indented, 42)
+  except Exception as exc:  # noqa: BLE001
+    check("gchk: a 6-space main harness extracts", False, str(exc))
+    return ok
+  if indented_extracted is None:
+    check("gchk: a 6-space main harness extracts", False, "returned None")
+    return ok
+  indented_instrumented = mod.insert_global_chksum(
+    indented_extracted, "entry -> b0 -> b1 -> b2 -> b3 -> exit", 2, operands
+  )
+  iitext = indented_instrumented.decode("utf-8") if indented_instrumented else ""
+  anchors6 = re.findall(r"\n[ ]*_in_check_chksum\(-?\d+, _g\[0\]\)", iitext)
+  good = len(anchors6) == 1 and anchors6[0].startswith("\n      _")
+  check("gchk: the end anchor indents like the last harness check", good, str(anchors6))
+  ok = ok and good
+  rc = run_module(indented_instrumented) if indented_instrumented else 1
+  good = rc == 0
+  check("gchk: a 6-space harness runs clean", good, f"rc={rc}")
   ok = ok and good
 
   return ok
@@ -3068,6 +3549,10 @@ def examples_complexity_tests_pass(cmod, mod) -> bool:
       replay += f"    r = _in_check_chksum({11 * i + 123}, r)\n"
     return (
       "#//@ EXEC_PATH: entry -> exit\n"
+      "def _cast_int(v, m):\n"
+      "    v &= (1 << m) - 1\n"
+      "    return v - (1 << m) if v >= 1 << (m - 1) else v\n"
+      "\n"
       "def _in_check_chksum(expected, actual):\n"
       "    if expected != actual:\n"
       "        raise ValueError('@check_chksum mismatch')\n"
@@ -3175,6 +3660,7 @@ def main():
   multi_example_tests_pass(ccommon, chk_mod)
   multi_example_checksum_tests_pass(ccommon, chk_mod, mod)
   checksum_replay_distinct_tests_pass(ccommon, chk_mod, mod)
+  global_chksum_tests_pass(ccommon, chk_mod, mod)
   example_count_tests_pass(ccommon, chk_mod, mod)
 
   with tempfile.TemporaryDirectory(prefix="codoku_gen_") as workdir:
@@ -3211,10 +3697,12 @@ def main():
     with open(puzzle) as f:
       ptext = f.read()
 
-    # (1b) The shipped puzzle's exit block seeds the checksum with a very
-    # large constant instead of zero, and every chain step lifts a random
-    # coefficient into its operand.
-    seed_match = re.search(r"    v__\w+ = (\d{10,})\n", ptext)
+    # (1b) The shipped puzzle's exit checksum lives in the extracted
+    # function: it seeds a very large constant instead of zero, and every
+    # fold step lifts a random coefficient into its positional parameter.
+    seed_match = re.search(
+      r"def _in_global_chksum\([^)]*\):\n    y = (\d{10,})\n", ptext
+    )
     check(
       "generate seeds the exit checksum",
       seed_match is not None and int(seed_match.group(1)) >= 2**63,
@@ -3222,8 +3710,8 @@ def main():
     )
     check(
       "generate lifts chain coefficients",
-      re.search(r"v__\w+ = \(v__\w+ [^\n]*\d+ \* \(", ptext) is not None,
-      re.search(r"    v__\w+ = .*\n    v__\w+ = .*\n", ptext),
+      re.search(r"    y = \(y [^\n]*\d+ \* \(c0\)", ptext) is not None,
+      re.search(r"def _in_global_chksum\([^)]*\):\n(?:.*\n){3}", ptext),
     )
 
     # (1c) The profile owns the example count: the @main harness carries one

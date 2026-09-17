@@ -25,6 +25,7 @@ from codoku_common import (
   IFEXP_KEYWORDS,
   INTERNAL_HELPER_FUNCS,
   UNARY_OP_SPANS,
+  _is_global_chksum_call,
   collect_python_leaf_locals,
   count_harness_examples,
   find_python_leaf_function,
@@ -242,11 +243,26 @@ def _trace_subtree_ids(leaf: ast.FunctionDef) -> set[int]:
   return ids
 
 
+def _chksum_call_ids(leaf: ast.FunctionDef) -> set[int]:
+  """Ids of every node under a global-checksum call statement.
+
+  Mirrors the scaffold exclusion in codoku_common's maskable-statement
+  walk: the creator-shaped `_in_global_chksum(...)` calls are harness, so
+  vocabulary measurement skips them.
+  """
+  ids: set[int] = set()
+  for node in ast.walk(leaf):
+    if _is_global_chksum_call(node):
+      for sub in ast.walk(node):
+        ids.add(id(sub))
+  return ids
+
+
 def compute_halstead(leaf: ast.FunctionDef) -> HalsteadMetrics:
   """Count Halstead operators/operands over the leaf function subtree."""
   operator_counts: Counter[str] = Counter()
   operand_counts: Counter[str] = Counter()
-  skip = _trace_subtree_ids(leaf)
+  skip = _trace_subtree_ids(leaf) | _chksum_call_ids(leaf)
   for node in ast.walk(leaf):
     if id(node) in skip or isinstance(node, _HALSTEAD_SKIP):
       continue
@@ -285,7 +301,8 @@ def compute_halstead(leaf: ast.FunctionDef) -> HalsteadMetrics:
 
 
 class _DepCollector(ast.NodeVisitor):
-  """Collect (defs, uses) per statement in source order; skips nested scopes."""
+  """Collect (defs, uses) per statement in source order; skips nested scopes,
+  trace guards, and global-checksum calls (creator scaffold, not content)."""
 
   def __init__(self) -> None:
     self.stmts: list[tuple[set[str], set[str]]] = []
@@ -304,6 +321,8 @@ class _DepCollector(ast.NodeVisitor):
     return defs
 
   def visit_Assign(self, node: ast.Assign) -> None:
+    if _is_global_chksum_call(node):
+      return
     uses = self._names(node.value)
     for target in node.targets:
       if isinstance(target, ast.Subscript):
@@ -311,6 +330,8 @@ class _DepCollector(ast.NodeVisitor):
     self.stmts.append((self._target_defs(node.targets), uses))
 
   def visit_AugAssign(self, node: ast.AugAssign) -> None:
+    if _is_global_chksum_call(node):
+      return
     if isinstance(node.target, ast.Subscript):
       # Whole-variable granularity (as for Assign): the base object is
       # redefined while the slice is read.
@@ -321,6 +342,8 @@ class _DepCollector(ast.NodeVisitor):
     self.stmts.append((set(touched), self._names(node.value) | set(touched)))
 
   def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+    if _is_global_chksum_call(node):
+      return
     self.stmts.append((self._names(node.target), self._names(node.value)))
 
   def visit_For(self, node: ast.For) -> None:

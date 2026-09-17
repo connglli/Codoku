@@ -20,6 +20,9 @@ from pathlib import Path
 # locates them inside byte slices; helper/function names are text.
 # ---------------------------------------------------------------------------
 
+# The instrumented checksum function every puzzle splices in.
+GLOBAL_CHKSUM_FUNC = "_in_global_chksum"
+
 # File-internal functions never masked as <FILL_FUNC>. The pointer/memory
 # model helpers and ``_cast_int`` are excluded on purpose: a masked puzzle
 # is a module a third party fills in, so their calls stay visible and the
@@ -30,6 +33,7 @@ INTERNAL_HELPER_FUNCS: frozenset[str] = frozenset(
     "_crc32_update_i32",
     "_check_chksum_i32",
     "_in_check_chksum",
+    GLOBAL_CHKSUM_FUNC,
     "_trap",
     "_f32",
     "_cast_int",
@@ -119,6 +123,38 @@ IFEXP_KEYWORDS: tuple[bytes, ...] = (b"if", b"else")
 
 # Control keywords masked as <FILL_CTRL>.
 CONTROL_FLOW_KEYWORDS: tuple[str, ...] = ("break", "continue")
+
+# ---------------------------------------------------------------------------
+# Global checksum scaffold
+# ---------------------------------------------------------------------------
+
+
+def leftmost_base_name(node) -> str | None:
+  """Name of the leftmost base of a target/operand expression.
+
+  ``t0[4]`` resolves to ``t0``; ``vec1.lanes[0]`` to ``vec1``; a plain
+  ``Name`` to itself; a non-name expression (call, constant) to None.
+  """
+  base = node
+  while isinstance(base, (ast.Subscript, ast.Attribute)):
+    base = base.value
+  return base.id if isinstance(base, ast.Name) else None
+
+
+def _is_global_chksum_call(node) -> bool:
+  """True for an instrumented checksum call: either a bare
+  ``_in_global_chksum(...)`` expression statement or an assignment whose
+  value calls it (mid-path accumulates the running checksum back) --
+  wrapped or not."""
+  if not isinstance(node, (ast.Expr, ast.Assign, ast.AugAssign, ast.AnnAssign)):
+    return False
+  return any(
+    isinstance(n, ast.Call)
+    and isinstance(n.func, ast.Name)
+    and n.func.id == GLOBAL_CHKSUM_FUNC
+    for n in ast.walk(node.value if isinstance(node, ast.Expr) else node)
+  )
+
 
 # ---------------------------------------------------------------------------
 # Prefix Stripping
@@ -668,6 +704,10 @@ def get_python_maskable_statements(
     # Skip trace blocks
     if _is_dump_trace_guard(node):
       return
+    # Skip the global-checksum instrumentation: its operand arguments are
+    # creator-shaped scaffold, not puzzle content.
+    if _is_global_chksum_call(node):
+      return
     # Flag setters/resets are maskable in any block: a revealed setter next
     # to masked guards would answer the blank.
     if isinstance(node, (ast.Assign, ast.Expr)) and mentions_go_flag(node):
@@ -793,12 +833,16 @@ def collect_python_replacements(
       replacements.append((start, end, flag_mask))
       return
 
-  def get_py_leftmost_base(n):
+  # Subscripts mask whole (`t0[0]` is one VAR cell); attributes recurse so
+  # only their base masks (`vec1` in `vec1.lanes`). This stops at Attribute
+  # on purpose, unlike leftmost_base_name which resolves through both for
+  # binding analysis.
+  def get_py_subscript_base(n):
     if isinstance(n, ast.Subscript):
-      return get_py_leftmost_base(n.value)
+      return get_py_subscript_base(n.value)
     return n
 
-  leftmost = get_py_leftmost_base(node)
+  leftmost = get_py_subscript_base(node)
 
   if isinstance(node, ast.Assign):
     if not is_body:

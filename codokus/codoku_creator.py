@@ -16,6 +16,7 @@ import ast
 import json
 import os
 import random
+import re
 import secrets
 import shutil
 import subprocess
@@ -26,9 +27,11 @@ from pathlib import Path
 from typing import Mapping, NamedTuple
 
 from codoku_common import (
+  GLOBAL_CHKSUM_FUNC,
   HARNESS_CHECK_RE,
   ConstBudget,
   apply_replacements,
+  block_label_for_line,
   build_python_cfg,
   collect_canonical_cells,
   collect_python_leaf_locals,
@@ -38,6 +41,7 @@ from codoku_common import (
   get_byte_offsets,
   get_line_indent,
   get_python_maskable_statements,
+  leftmost_base_name,
   merge_const_split,
   stmt_is_on_live_path,
   strip_refractir_prefix,
@@ -72,6 +76,7 @@ That also said, avoid generating the solution file before you solve the puzzle s
 1. Read the puzzle file. Pay attention to:
    - The **CFG** (control-flow graph, `#//@ CFG_EDGE: ...`) at the top - shows which basic blocks exist and how they connect
    - The **execution path** (`#//@ EXEC_PATH: ...`) - the exact sequence of basic blocks that must execute
+   - The **global checksum** - the accumulated checksum of some visited internal states
    {{BUDGET_READ}}
    - The **mask marks**: `<FILL_VAR>`, `<FILL_CONST>`, `<FILL_OP>`, `<FILL_TYPE>`, `<FILL_LABEL>`, `<FILL_FUNC>`, `<FILL_FIELD>`, `<FILL_CTRL>`
 
@@ -360,6 +365,7 @@ class GeneratorConfig:
   n_vars: int
   n_params: int
   n_examples: int = 5
+  chksum_every: int = 3
   lift_consts: bool = False
   livedead_const_budget: bool = False
   p_mask_lhs_vars: float = 0.1
@@ -389,6 +395,8 @@ class GeneratorConfig:
       raise ValueError("n_params must be at least 1")
     if not 1 <= self.n_examples <= 26:
       raise ValueError("n_examples must be in [1, 26]")
+    if self.chksum_every < 1:
+      raise ValueError("chksum_every must be at least 1")
     for name in (
       "p_mask_lhs_vars",
       "p_mask_rhs_vars",
@@ -423,6 +431,7 @@ class GenerationProfile:
   n_vars: IntRange
   n_params: IntRange
   n_examples: IntRange = IntRange(3, 3)
+  chksum_every: IntRange = IntRange(3, 3)
   lift_consts: bool = False
   livedead_const_budget: bool = False
   features: tuple[str, ...] = ()
@@ -439,6 +448,9 @@ class GenerationProfile:
     self.n_vars.validate(f"{name}.n_vars")
     self.n_params.validate(f"{name}.n_params")
     self.n_examples.validate(f"{name}.n_examples")
+    self.chksum_every.validate(f"{name}.chksum_every")
+    if self.chksum_every.minimum < 1:
+      raise ValueError(f"{name}.chksum_every minimum must be at least 1")
     # rysmith draws one letter per example (a..z) and clamps --n-examples
     # into [1, 26]: the profile bounds the range fail-loudly instead.
     if self.n_examples.minimum < 1 or self.n_examples.maximum > 26:
@@ -497,6 +509,7 @@ PROFILES: dict[str, GenerationProfile] = {
     n_vars=IntRange(6, 10),
     n_params=IntRange(2, 3),
     n_examples=IntRange(3, 5),
+    chksum_every=IntRange(2, 3),
     lift_consts=False,
     livedead_const_budget=False,
     features=(
@@ -529,6 +542,7 @@ PROFILES: dict[str, GenerationProfile] = {
     n_vars=IntRange(10, 16),
     n_params=IntRange(3, 4),
     n_examples=IntRange(5, 7),
+    chksum_every=IntRange(2, 4),
     lift_consts=False,
     livedead_const_budget=False,
     features=(
@@ -559,6 +573,7 @@ PROFILES: dict[str, GenerationProfile] = {
     n_vars=IntRange(14, 20),
     n_params=IntRange(4, 5),
     n_examples=IntRange(7, 10),
+    chksum_every=IntRange(2, 5),
     lift_consts=False,
     livedead_const_budget=False,
     features=(),
@@ -923,10 +938,10 @@ CHECKSUM_RUN_TIMEOUT = 5.0  # matches the checker's execution cap
 def _checksum_init_span(
   tree, src: bytes, chain_start: int
 ) -> tuple[int, int, str] | None:
-  """Byte span of the `v__ = <literal>` initialiser that seeds the checksum
-  chain: the exit block re-seeds the accumulator right above the chain's
-  first step, while the pre-entry let-declaration and every other v__
-  constant sit further up.  None when no such initialiser exists."""
+  """Byte span of the `v__ = <literal>` initialiser statement that seeds the
+  checksum chain: the exit block re-seeds the accumulator right above the
+  chain's first step, while the pre-entry let-declaration and every other
+  v__ constant sit further up.  None when no such initialiser exists."""
   leaf, _ = find_python_leaf_function(tree, src)
   if leaf is None:
     return None
@@ -942,13 +957,9 @@ def _checksum_init_span(
     ):
       continue
     start, end = get_byte_offsets(
-      src,
-      stmt.value.lineno,
-      stmt.value.col_offset,
-      stmt.value.end_lineno,
-      stmt.value.end_col_offset,
+      src, stmt.lineno, stmt.col_offset, stmt.end_lineno, stmt.end_col_offset
     )
-    if end < chain_start and (best is None or end > best[1]):
+    if end <= chain_start and (best is None or end > best[1]):
       best = (start, end, target.id)
   return best
 
@@ -1011,6 +1022,30 @@ def _checksum_chain(tree, src: bytes) -> list[tuple[int, int, int, int, bool, st
   return spans
 
 
+def _run_module_output(src_str: str, timeout: float) -> tuple[int, str] | None:
+  """Run *src_str* as a module; return (returncode, stdout) or None on a
+  syntax failure, a timeout, or an incomplete process."""
+  try:
+    ast.parse(src_str)
+  except SyntaxError:
+    return None
+  with tempfile.NamedTemporaryFile("wb", suffix=".py", delete=False) as tf:
+    tf.write(src_str.encode("utf-8"))
+    path = tf.name
+  try:
+    r = subprocess.run(
+      [sys.executable, path],
+      capture_output=True,
+      text=True,
+      timeout=timeout,
+    )
+  except subprocess.TimeoutExpired:
+    return None
+  finally:
+    os.unlink(path)
+  return r.returncode, r.stdout
+
+
 def _run_expected_checksums(src_str: str) -> list[int] | None:
   """Run *src_str* with every checksum check patched to a print; the leaf's
   return value lands one line per harness example in replay order, or None
@@ -1019,27 +1054,10 @@ def _run_expected_checksums(src_str: str) -> list[int] | None:
   if not harness:
     return None
   patched = HARNESS_CHECK_RE.sub("print(r)", src_str)
-  try:
-    ast.parse(patched)
-  except SyntaxError:
+  run = _run_module_output(patched, CHECKSUM_RUN_TIMEOUT)
+  if run is None or run[0] != 0:
     return None
-  with tempfile.NamedTemporaryFile("wb", suffix=".py", delete=False) as tf:
-    tf.write(patched.encode("utf-8"))
-    path = tf.name
-  try:
-    r = subprocess.run(
-      [sys.executable, path],
-      capture_output=True,
-      text=True,
-      timeout=CHECKSUM_RUN_TIMEOUT,
-    )
-  except subprocess.TimeoutExpired:
-    return None
-  finally:
-    os.unlink(path)
-  if r.returncode != 0:
-    return None
-  lines = r.stdout.strip().splitlines()
+  lines = run[1].strip().splitlines()
   if len(lines) != harness:
     return None
   values: list[int] = []
@@ -1075,56 +1093,72 @@ def _accept_checksum_values(values: list[int]) -> bool:
 
 
 def randomize_checksum(src_bytes: bytes, seed: int) -> bytes | None:
-  """Sample one operator per checksum chain step, lift a random coefficient
-  into every step's operand (`chk op coeff*x`), seed the exit accumulator
-  with a very large random constant, and write the recalibrated constants
-  into the sampled chain, so code and harness cannot drift.  The harness
-  replays the leaf once per example, so every expectation must re-derive
-  from a run, and every replay's checksum must stay distinct.  Failing
-  samples are discarded; with none left the original addition chain stays,
-  whose checksum rysmith already calibrated, when its own replay checksums
-  pass the same budget gate — a case whose replay checksums duplicate or
-  overflow rejects the case (the caller drops the candidate)."""
+  """Extract the `^exit` checksum into one spliced function and randomize
+  it.
+
+  The leaf's exit block calls the function with the chain's operand texts
+  (computing `v__chk` via a fresh 0 there); ops, coefficients, and the
+  seed sample per step, and every harness expectation recalibrates from a
+  run. Failing samples are discarded; with none left the original
+  addition chain stays (no function — the global mechanism degrades);
+  a case whose replay checksums duplicate or overflow rejects."""
   try:
     tree = ast.parse(src_bytes)
   except SyntaxError as e:
     raise RuntimeError(f"rysmith output is not valid Python: {e}") from e
+  leaf, _ = find_python_leaf_function(tree, src_bytes)
+  if leaf is None:
+    raise RuntimeError("no leaf function in rysmith output")
   spans = _checksum_chain(tree, src_bytes)
-  init_span = _checksum_init_span(tree, src_bytes, spans[0][0])
+  exit_span = _exit_chksum_span(tree, src_bytes)
+  if exit_span is None:
+    raise RuntimeError("addition-based checksum chain is missing")
+  main_fn = next(
+    (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "main"),
+    None,
+  )
+  if main_fn is None:
+    raise RuntimeError("main harness is missing its checksum checks")
+  main_start, _ = get_byte_offsets(
+    src_bytes, main_fn.lineno, main_fn.col_offset, main_fn.lineno, main_fn.col_offset
+  )
   src_str = src_bytes.decode("utf-8")
   if not HARNESS_CHECK_RE.search(src_str):
     raise RuntimeError("main harness is missing its checksum checks")
   rng = random.Random(seed)
   for _ in range(CHECKSUM_SAMPLE_ATTEMPTS):
-    replacements = []
-    for left_start, left_end, right_start, right_end, acc_on_left, acc_id in spans:
+    steps = []
+    for left_start, left_end, right_start, right_end, acc_on_left, _acc_id in spans:
       op = rng.choice(CHECKSUM_OPS).decode("ascii")
       coeff = rng.randrange(CHECKSUM_COEFF_MIN, CHECKSUM_COEFF_LIMIT)
       x_start, x_end = (
         (right_start, right_end) if acc_on_left else (left_start, left_end)
       )
-      # The parentheses keep the lift exact: `//` and `**` outrank `*`, so
-      # an unlifted `chk // coeff*x` would group around the accumulator.
-      chain_text = (
-        f"{acc_id} {_checksum_wrap(op, f'{coeff} * ({src_str[x_start:x_end]})')}"
-      )
-      replacements.append((left_start, right_end, chain_text))
-    if init_span is not None:
-      init_start, init_end, _init_id = init_span
-      exit_seed = rng.randrange(CHECKSUM_SEED_MIN, CHECKSUM_SEED_LIMIT)
-      replacements.append((init_start, init_end, str(exit_seed)))
-    candidate = apply_replacements(src_bytes, replacements).decode("utf-8")
+      steps.append((op, coeff, src_str[x_start:x_end]))
+    exit_seed = rng.randrange(CHECKSUM_SEED_MIN, CHECKSUM_SEED_LIMIT)
+    indent = get_line_indent(src_bytes, exit_span[2])
+    call_text = (
+      f"{indent}v__chk = _in_global_chksum(0, {', '.join(step[2] for step in steps)})\n"
+      f"{indent}return v__chk"
+    )
+    candidate = apply_replacements(
+      src_bytes,
+      [
+        (exit_span[0], exit_span[1], call_text),
+        (main_start, main_start, _exit_chksum_function(exit_seed, steps)),
+      ],
+    ).decode("utf-8")
     values = _run_expected_checksums(candidate)
     if not values or not _accept_checksum_values(values):
       continue
-    # re.sub walks the harness in replay order, so one expectation per
-    # example lands at the replay that produced it.
+    # re.sub walks the harness in replay order, so one expectation
+    # lands at the replay that produced it.
     recalibrated = iter(values)
     return HARNESS_CHECK_RE.sub(
       lambda _match, nxt=recalibrated: f"r = _in_check_chksum({next(nxt)}, r)",
       candidate,
     ).encode("utf-8")
-  # No sampled chain survived: the original addition chain keeps
+  # No sampled extraction survived: the original addition chain keeps
   # rysmith's calibration, and its own run passes the same budget gate.
   # A calibration that cannot run keeps the chain as before.
   fallback_values = _run_expected_checksums(src_str)
@@ -1133,6 +1167,433 @@ def randomize_checksum(src_bytes: bytes, seed: int) -> bytes | None:
     # so a fallback that collapses two replays rejects the case.
     return None
   return src_bytes
+
+
+# ---------------------------------------------------------------------------
+# Global checksum instrumentation
+#
+# One checksum function carries the exit checksum's arithmetic; the leaf's
+# exit call and the mid-path calls pass in the checksum to compute as the
+# first parameter, so `v__chk` and `_g` stay separate. Visible scaffold:
+# the calls never mask (the shared maskable-scan skip) and their operands
+# are not budgeted.
+# ---------------------------------------------------------------------------
+
+GLOBAL_CHKSUM_HELPER_TEMPLATE = (
+  "\n\n_g = [0]\n\n\ndef _in_global_chksum(addend, {{PARAMS}}):\n"
+  "    y = {{SEED}}\n"
+  "{{FOLDS}}"
+  "    return addend + y\n\n\n"
+)
+
+
+def _exit_chksum_function(seed: int, steps: list[tuple[str, int, str]]) -> str:
+  """Shape checksum function: the exit chain's sampled, guarded folds over
+  positional parameters after a very large seed; the addend is the
+  checksum to compute (0 for the leaf's `v__chk`, `_g[0]` mid-path)."""
+  # An empty list would render a dangling `def _in_global_chksum(addend, ):`
+  # signature, so it fails loud instead.
+  if not steps:
+    raise RuntimeError("checksum chain carries no steps")
+  params = [f"c{index}" for index in range(len(steps))]
+  folds = []
+  for index, (op, coeff, _operand) in enumerate(steps):
+    param = params[index]
+    folds.append(f"    y = (y {_checksum_wrap(op, f'{coeff} * ({param})')})\n")
+  return (
+    GLOBAL_CHKSUM_HELPER_TEMPLATE.replace("{{PARAMS}}", ", ".join(params))
+    .replace("{{SEED}}", str(seed))
+    .replace("{{FOLDS}}", "".join(folds))
+  )
+
+
+def _exit_chksum_span(tree, src: bytes) -> tuple[int, int, int] | None:
+  """Byte span of the inline exit checksum run (the seed initialiser above
+  the first folded step through the accumulator's return), plus the run's
+  statement byte for indent reads."""
+  leaf, _ = find_python_leaf_function(tree, src)
+  if leaf is None:
+    return None
+  spans = _checksum_chain(tree, src)
+  acc_id = spans[0][5]
+  first_step = min(left_start for left_start, _l, _r, _re, _on_left, _acc in spans)
+  step_stmt_start = None
+  step_hint = None
+  for stmt in ast.walk(leaf):
+    if (
+      isinstance(stmt, ast.Assign)
+      and len(stmt.targets) == 1
+      and isinstance(stmt.targets[0], ast.Name)
+      and stmt.targets[0].id.startswith("v__")
+    ):
+      hint_start, end = get_byte_offsets(
+        src, stmt.lineno, stmt.col_offset, stmt.end_lineno, stmt.end_col_offset
+      )
+      if hint_start <= first_step < end:
+        # The run replaces whole lines; the hint byte stays after the
+        # indent for later indent reads.
+        step_stmt_start = get_byte_offsets(src, stmt.lineno, 0, stmt.lineno, 0)[0]
+        step_hint = hint_start
+        break
+  if step_stmt_start is None:
+    return None
+  start, hint = step_stmt_start, step_hint
+  init_span = _checksum_init_span(tree, src, first_step)
+  if init_span is not None:
+    init_start, init_end, _init_id = init_span
+    gap = src[init_end:step_stmt_start]
+    if not gap.strip():
+      # The adjacent seed initialiser leaves with the extraction.
+      start = init_start - len(get_line_indent(src, init_start))
+      hint = init_start
+  ret_end = None
+  for node in ast.walk(leaf):
+    if (
+      isinstance(node, ast.Return)
+      and isinstance(node.value, ast.Name)
+      and node.value.id == acc_id
+    ):
+      _, ret_end = get_byte_offsets(
+        src, node.lineno, node.col_offset, node.end_lineno, node.end_col_offset
+      )
+      break
+  if ret_end is None:
+    return None
+  return start, ret_end, hint
+
+
+# Distinct from every per-example anchor, so the harness regexes never
+# touch it.
+GLOBAL_CHKSUM_PLACEHOLDER_RE = re.compile(r"_in_check_chksum\(0\s*,\s*_g\[0\]\s*\)")
+
+# Builtins an operand may call without carrying a leaf value itself.
+_GLOBAL_NON_ROOT_NAMES = frozenset(
+  {"int", "float", "bool", "str", "len", "min", "max", "abs"}
+)
+
+# Helpers whose reads the leaf model cannot resolve (loads through
+# pointers, vector reads): operands using them are excluded rather folded.
+_GLOBAL_MUTABLE_HELPERS: frozenset[str] = frozenset(
+  {"_load", "_vrd", "_store", "_padd", "_pdiff", "_peq", "_prel", "_pidx", "_pfield"}
+)
+
+
+def collect_global_chk_operands(src_bytes: bytes) -> list[str]:
+  """The exit chain's operand texts, in chain order: the extracted
+  function takes exactly these at every call site, so its values carry
+  the exit block's normalization."""
+  try:
+    tree = ast.parse(src_bytes)
+  except SyntaxError as e:
+    raise RuntimeError(f"rysmith output is not valid Python: {e}") from e
+  leaf, _ = find_python_leaf_function(tree, src_bytes)
+  if leaf is None:
+    raise RuntimeError("no leaf function in rysmith output")
+  spans = _checksum_chain(tree, src_bytes)
+  src_str = src_bytes.decode("utf-8")
+  operands: list[str] = []
+  for left_start, left_end, right_start, right_end, acc_on_left, _acc_id in spans:
+    start, end = (right_start, right_end) if acc_on_left else (left_start, left_end)
+    operands.append(src_str[start:end])
+  return operands
+
+
+def _operand_leaves(text: str) -> tuple[set[str], set[tuple[str, int]]] | None:
+  """(names, (root, slot) reads) of an exit-chain operand, or None when the
+  model cannot resolve it: a fold never reads an `_UNDEF`/`_PAD` slot."""
+  try:
+    expr = ast.parse(text, mode="eval").body
+  except SyntaxError:
+    return None
+  names: set[str] = set()
+  slots: set[tuple[str, int]] = set()
+
+  def walk(node) -> bool:
+    if isinstance(node, ast.Call):
+      func = node.func
+      if isinstance(func, ast.Name):
+        if func.id in _GLOBAL_MUTABLE_HELPERS:
+          return False
+        if func.id == "_rd":
+          if node.keywords:
+            return False
+          index = node.args[1] if len(node.args) == 2 else None
+          if isinstance(index, ast.Constant) and type(index.value) is int:
+            root = leftmost_base_name(node.args[0])
+            if root is not None:
+              slots.add((root, index.value))
+              return True
+          return False
+      for arg in node.args:
+        if not walk(arg):
+          return False
+      for keyword in node.keywords:
+        if not walk(keyword.value):
+          return False
+      if not isinstance(func, ast.Name):
+        # A method or attribute callee reads its receiver (for example
+        # `obj.method(x)` reads `obj`); reject what the model cannot see.
+        if not walk(func):
+          return False
+      return True
+    if isinstance(node, ast.Subscript):
+      index = node.slice
+      if isinstance(index, ast.Constant) and type(index.value) is int:
+        root = leftmost_base_name(node.value)
+        if root is not None:
+          slots.add((root, index.value))
+          return True
+      return False
+    if isinstance(node, (ast.Attribute, ast.Starred)):
+      return False
+    if isinstance(node, ast.Name):
+      if not node.id.startswith("_") and node.id not in _GLOBAL_NON_ROOT_NAMES:
+        names.add(node.id)
+      return True
+    if isinstance(node, ast.Constant):
+      return True
+    return all(walk(child) for child in ast.iter_child_nodes(node))
+
+  if not walk(expr):
+    return None
+  return names, slots
+
+
+def _run_expected_global(src_str: str) -> int | None:
+  """Run *src_str* with every checksum check patched to a print; the last
+  stdout line is the accumulated `_g` total."""
+  harness = count_harness_examples(src_str)
+  if not harness:
+    return None
+  patched = HARNESS_CHECK_RE.sub("print(r)", src_str)
+  patched = GLOBAL_CHKSUM_PLACEHOLDER_RE.sub("print(_g[0])", patched)
+  run = _run_module_output(patched, CHECKSUM_RUN_TIMEOUT)
+  if run is None or run[0] != 0:
+    return None
+  lines = run[1].strip().splitlines()
+  if len(lines) != harness + 1:
+    return None
+  try:
+    return int(lines[-1])
+  except ValueError:
+    return None
+
+
+def _global_chksum_targets(
+  tree, src_bytes: bytes
+) -> tuple[ast.FunctionDef, ast.FunctionDef, list, int] | None:
+  """Locate the leaf, main, the leaf's block comments, and the entry line,
+  or None when the leaf carries no entry comment."""
+  leaf, _ = find_python_leaf_function(tree, src_bytes)
+  if leaf is None:
+    raise RuntimeError("no leaf function in rysmith output")
+  main_fn = next(
+    (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "main"),
+    None,
+  )
+  if main_fn is None:
+    raise RuntimeError("main harness is missing from rysmith output")
+  comments = [
+    comment
+    for comment in find_python_block_comments(src_bytes)
+    if leaf.lineno <= comment[3] <= leaf.end_lineno
+  ]
+  entry_lines = [comment[3] for comment in comments if comment[2] == "entry"]
+  if not entry_lines:
+    return None
+  return leaf, main_fn, comments, min(entry_lines)
+
+
+def _global_chksum_bounds(
+  leaf: ast.FunctionDef, comments: list, entry_line: int
+) -> tuple[
+  set[str],
+  set[str],
+  set[tuple[str, int]],
+  dict[str, set[str]],
+  dict[str, set[tuple[str, int]]],
+]:
+  """Whole-name and slot binding inputs: a name binds from a parameter, a
+  seedless pre-entry declaration, or any store; a slot binds from a real
+  seed entry or an earlier store never seeded `_UNDEF`/`_PAD`."""
+  args: list = leaf.args.posonlyargs + leaf.args.args + leaf.args.kwonlyargs
+  params = {arg.arg for arg in args}
+  if leaf.args.vararg is not None:
+    params.add(leaf.args.vararg.arg)
+  if leaf.args.kwarg is not None:
+    params.add(leaf.args.kwarg.arg)
+
+  def is_real(entry) -> bool:
+    return not (isinstance(entry, ast.Name) and entry.id in ("_UNDEF", "_PAD"))
+
+  def box_seed(value):
+    """The literal entry list a box initializer seeds its slots with."""
+    if isinstance(value, ast.List):
+      return value
+    if (
+      isinstance(value, ast.Call)
+      and isinstance(value.func, ast.Name)
+      and value.func.id.startswith("_vec_")
+      and value.args
+      and isinstance(value.args[0], ast.List)
+    ):
+      return value.args[0]
+    return None
+
+  named: set[str] = set()
+  slots: set[tuple[str, int]] = set()
+  block_names: dict[str, set[str]] = {}
+  block_slots: dict[str, set[tuple[str, int]]] = {}
+  for stmt in ast.walk(leaf):
+    if not isinstance(stmt, (ast.Assign, ast.AugAssign)):
+      continue
+    targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+    seed = box_seed(stmt.value) if isinstance(stmt, ast.Assign) else None
+    concrete = isinstance(stmt, ast.AugAssign) or not any(
+      isinstance(node, ast.Name) and node.id in ("_UNDEF", "_PAD")
+      for node in ast.walk(stmt.value)
+    )
+    if stmt.lineno < entry_line:
+      for target in targets:
+        name = leftmost_base_name(target)
+        if name is None:
+          continue
+        if seed is not None:
+          for index, entry in enumerate(seed.elts):
+            if is_real(entry):
+              slots.add((name, index))
+        elif concrete:
+          named.add(name)
+      continue
+    label = block_label_for_line(comments, stmt.lineno)
+    if label is None:
+      continue
+    for target in targets:
+      index = target.slice if isinstance(target, ast.Subscript) else None
+      if isinstance(index, ast.Constant) and type(index.value) is int:
+        root = leftmost_base_name(target)
+        if root is not None:
+          block_slots.setdefault(label, set()).add((root, index.value))
+      else:
+        name = leftmost_base_name(target)
+        if name is not None:
+          block_names.setdefault(label, set()).add(name)
+  return params, named, slots, block_names, block_slots
+
+
+def insert_global_chksum(
+  src_bytes: bytes,
+  path_str: str,
+  chksum_every: int,
+  operands: list[str],
+) -> bytes | None:
+  """Insert mid-path calls and the end-of-main global check.
+
+  The stride counts every visited block toward K (entry and exit count but
+  are never instrumented); each distinct label is instrumented at most once
+  and its call runs on every visit. A block qualifies only when ALL exit
+  operands are available there; each call passes the running `_g[0]` in, so
+  every call adds all the findable variables without ever reading an
+  `_UNDEF`/`_PAD` slot. Return None when the instrumented ground truth
+  cannot run; degrades to *src_bytes* when the checksum randomization kept
+  the addition chain (no function)."""
+  if chksum_every < 1:
+    raise RuntimeError("chksum_every must be at least 1")
+  if not operands:
+    return src_bytes
+  visited = [block.strip() for block in path_str.split("->") if block.strip()]
+  if not visited:
+    return src_bytes
+  try:
+    tree = ast.parse(src_bytes)
+  except SyntaxError as e:
+    raise RuntimeError(f"rysmith output is not valid Python: {e}") from e
+  if not any(
+    isinstance(stmt, ast.FunctionDef) and stmt.name == GLOBAL_CHKSUM_FUNC
+    for stmt in tree.body
+  ):
+    # The addition chain stayed: no function, no global mechanism.
+    return src_bytes
+  located = _global_chksum_targets(tree, src_bytes)
+  if located is None:
+    return src_bytes
+  leaf, main_fn, comments, entry_line = located
+
+  chosen: list[str] = []
+  inserted: set[str] = set()
+  for index, label in enumerate(visited, start=1):
+    if index % chksum_every != 0:
+      continue
+    if label in ("entry", "exit") or label in inserted:
+      continue
+    inserted.add(label)
+    chosen.append(label)
+
+  params, named, slot_state, block_names, block_slots = _global_chksum_bounds(
+    leaf, comments, entry_line
+  )
+  first_comment: dict[str, tuple[int, int, int]] = {}
+  for start_byte, end_byte, label, line in comments:
+    if label not in first_comment or line < first_comment[label][2]:
+      first_comment[label] = (start_byte, end_byte, line)
+
+  replacements: list = []
+  first_visit: dict[str, int] = {}
+  for position, label in enumerate(visited):
+    if label not in first_visit:
+      first_visit[label] = position
+  for label in chosen:
+    if label not in first_comment:
+      continue
+    bound_names = set(params) | named
+    bound_slots = set(slot_state)
+    # The call is static so it runs on every visit including the first;
+    # the state before the first visit must already bind every operand.
+    for previous in visited[: first_visit[label]]:
+      bound_names |= block_names.get(previous, set())
+      bound_slots |= block_slots.get(previous, set())
+    if not all(
+      (leaves := _operand_leaves(text)) is not None
+      and leaves[0] <= bound_names
+      and leaves[1] <= bound_slots
+      for text in operands
+    ):
+      # The function takes the full operand set.
+      continue
+    start_byte, end_byte, _line = first_comment[label]
+    indent = get_line_indent(src_bytes, start_byte)
+    call_text = (
+      f"\n{indent}_g[0] = _cast_int("
+      f"_in_global_chksum(_g[0], {', '.join(operands)}), 64)"
+    )
+    replacements.append((end_byte, end_byte, call_text))
+
+  src_str = src_bytes.decode("utf-8")
+  harness_checks = list(HARNESS_CHECK_RE.finditer(src_str))
+  if not harness_checks:
+    raise RuntimeError("main harness is missing its checksum checks")
+  anchor_indent = get_line_indent(src_bytes, harness_checks[-1].start())
+  replacements.append(
+    (
+      harness_checks[-1].end(),
+      harness_checks[-1].end(),
+      f"\n{anchor_indent}_in_check_chksum(0, _g[0])",
+    )
+  )
+  candidate = apply_replacements(src_bytes, replacements).decode("utf-8")
+
+  expected = _run_expected_global(candidate)
+  if expected is None or len(str(expected)) > CHECKSUM_LITERAL_LIMIT:
+    return None
+  final, anchored = GLOBAL_CHKSUM_PLACEHOLDER_RE.subn(
+    f"_in_check_chksum({expected}, _g[0])", candidate, count=1
+  )
+  if anchored != 1:
+    return None
+  run = _run_module_output(final, CHECKSUM_RUN_TIMEOUT)
+  if run is None or run[0] != 0:
+    return None
+  return final.encode("utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -1419,6 +1880,7 @@ def sample_config(profile: GenerationProfile, rng: random.Random) -> GeneratorCo
     n_vars=profile.n_vars.sample(rng),
     n_params=profile.n_params.sample(rng),
     n_examples=profile.n_examples.sample(rng),
+    chksum_every=profile.chksum_every.sample(rng),
     lift_consts=profile.lift_consts,
     livedead_const_budget=profile.livedead_const_budget,
     features=profile.features,
@@ -1524,12 +1986,27 @@ def generate_candidate(
 
   src_raw = py_path.read_bytes()
   src = strip_refractir_prefix(swap_preamble(src_raw))
+  # Capture before randomize_checksum rewrites the chain's operators.
+  global_operands = collect_global_chk_operands(src)
   src = randomize_checksum(src, used_seed)
   if src is None:
     # A replay checksum that duplicates a neighbour's ships fewer anchors
     # than the harness examples, so the case is rejected and the caller
     # tries another attempt.
     raise RuntimeError("checksum replay values duplicate or overflow")
+
+  # rysmith's generated banner is trusted as written: the puzzle banner
+  # embeds the adjacency and PATH comments verbatim.
+  cfg_edges = extract_cfg_from_sir(sir_path)
+  path_str = extract_path_from_sir(sir_path)
+  live_blocks = frozenset(
+    block.strip() for block in path_str.split("->") if block.strip()
+  )
+  src = insert_global_chksum(src, path_str, config.chksum_every, global_operands)
+  if src is None:
+    # An instrumented ground truth that traps (an unavailable read, an
+    # _UNDEF slot) or overflows the printable literal rejects the case.
+    raise RuntimeError("global checksum instrumentation failed")
   try:
     tree = ast.parse(src)
   except Exception as e:
@@ -1544,14 +2021,6 @@ def generate_candidate(
 
   local_names = collect_python_leaf_locals(leaf_node)
   defined_funcs = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
-
-  # rysmith's generated banner is trusted as written: the puzzle banner
-  # embeds the adjacency and PATH comments verbatim.
-  cfg_edges = extract_cfg_from_sir(sir_path)
-  path_str = extract_path_from_sir(sir_path)
-  live_blocks = frozenset(
-    block.strip() for block in path_str.split("->") if block.strip()
-  )
 
   probs = MaskProbs(
     p_mask_lhs_vars=config.p_mask_lhs_vars,
