@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -17,6 +18,8 @@
 #include <utility>
 #include <vector>
 
+#include "ast/build.hpp"
+#include "ast/clone.hpp"
 #include "ast/sir_printer.hpp"
 #include "backend/emit.hpp"
 #include "backend/py_vec_lowering.hpp"
@@ -64,6 +67,11 @@ using namespace refractir::reify;
     hiStr = hiStr.substr(1);
   return {std::stoll(loStr), std::stoll(hiStr)};
 }
+
+// Try budget per extra example. A try that duplicates an earlier input or
+// trips UB is rejected by the interpreter replay; a budget that never lands
+// drops the example.
+static constexpr int kExtraExampleTries = 3;
 
 [[nodiscard]] static auto makeSolverFactory() {
   return [](const SymbolicExecutor::Config &cfg) -> std::unique_ptr<smt::ISolver> {
@@ -121,15 +129,17 @@ using namespace refractir::reify;
   }
 }
 
-// One per concretized .sir file. Bundles the on-disk path
-// with the per-init solved values (parameter args, sym values,
-// return value) so consumers (--validate, --emit-desc) don't need
-// to re-parse the SOLVED header. `rz.paramValues` is in declaration
-// order; rysmith --validate flattens it for `symiri ... -- arg0
-// arg1`.
+// One per concretized .sir file: the on-disk path, the certified examples
+// (parameter values in declaration order plus the return each input produces)
+// and the body's sym model values, so consumers (--validate, --emit-desc) read
+// these instead of re-parsing the SOLVED header. `examples[0]` is the
+// concretized solve; extras exist only under `--n-examples > 1`.
 struct ConcreteFile {
   fs::path path;
-  FuncDescriptor::Realization rz;
+  std::vector<FuncDescriptor::Realization::Example> examples;
+  // Sym values of the body's model, in declaration order; one body
+  // substitution serves every example.
+  std::vector<std::pair<std::string, std::string>> symValues;
   // Lasso header (^-prefixed) for --require-nonterm, so the
   // bounded-replay divergence validation knows which block's state must recur,
   // and after how many laps (the orbit's period).
@@ -156,15 +166,57 @@ struct GenerateResult {
   return stem;
 }
 
-// Flatten a realization's declaration-order (name, value) pairs into
-// the bare value list that `symiri --` expects.
+// Flatten a declaration-order (name, value) pair list into the bare value
+// list that `symiri --` expects.
 [[nodiscard]] static std::vector<std::string>
-extractParamArgs(const FuncDescriptor::Realization &rz) {
+extractParamArgs(const std::vector<std::pair<std::string, std::string>> &paramValues) {
   std::vector<std::string> args;
-  args.reserve(rz.paramValues.size());
-  for (const auto &pv: rz.paramValues)
+  args.reserve(paramValues.size());
+  for (const auto &pv: paramValues)
     args.push_back(pv.second);
   return args;
+}
+
+// One solve's parameter values over the entry's parameter list, in
+// declaration order; a param the model lacks gets "0" so the list keeps
+// every declared position. This is the one shape the SOLVED banner, the
+// arming pins, and the symiri positional args all share.
+[[nodiscard]] static std::vector<std::pair<std::string, std::string>> orderedParamValues(
+    const FunDecl &entry,
+    const std::unordered_map<std::string, SymbolicExecutor::Result::ModelVal> &paramModel
+) {
+  std::vector<std::pair<std::string, std::string>> pvs;
+  pvs.reserve(entry.params.size());
+  for (const auto &p: entry.params) {
+    auto it = paramModel.find(p.name.name);
+    pvs.emplace_back(p.name.name, it != paramModel.end() ? formatModelValue(it->second) : "0");
+  }
+  return pvs;
+}
+
+// Run the minimal CRC32 oracle for one set of exit-time values: build it
+// from the rewritten prog, write it beside the output as a temp file, and
+// capture its Result line under symiri on `paramArgs`. nullopt on any
+// failure; the temp file is removed best-effort either way.
+[[nodiscard]] static std::optional<std::string> runCrc32Oracle(
+    const Program &prog, const std::string &funcName, const fs::path &outDir,
+    const std::string &tempName,
+    const std::unordered_map<std::string, SymbolicExecutor::LetExitValue> &letExitValues,
+    const std::vector<std::string> &paramArgs
+) {
+  Program miniProg = buildMiniCrc32Prog(prog, funcName, letExitValues);
+  auto tempPath = outDir / tempName;
+  {
+    std::ofstream tofs(tempPath);
+    if (tofs) {
+      SIRPrinter printer(tofs);
+      printer.print(miniProg);
+    }
+  }
+  auto captured = runSymiriCaptureResult(tempPath, "minimal_" + funcName, paramArgs);
+  std::error_code ec;
+  fs::remove(tempPath, ec); // best-effort; safe to leave on disk
+  return captured;
 }
 
 // Everything a leaf-generation attempt reads that is fixed for the whole run.
@@ -202,6 +254,12 @@ struct LeafGenConfig {
   // independent initializations.
   int maxRetries = 0;
   int nInits = 0;
+
+  // Examples per concretized .sir. Example 1 is the concretized solve; extras
+  // re-solve the template with fresh seeds and derive their output from the
+  // re-solve's own exit-time model, so each is a distinct certified input.
+  // UB-free mode only.
+  int nExamples = 1;
 
   // Output. `genId` is the run's 6-char generation id, which names the
   // per-function descriptor; `emitDesc` writes the rylink-consumable
@@ -292,6 +350,76 @@ static void writePathHeader(
   for (std::size_t k = 0; k < path.size(); k++)
     os << (k == 0 ? " " : " -> ") << path[k];
   os << "\n\n";
+}
+
+// One candidate input for an extra example: the re-solve's params in
+// declaration order plus its own exit-time model and sum-form ret, the
+// independent source the example's return value is derived from below.
+struct ExtraCandidate {
+  std::vector<std::pair<std::string, std::string>> params;
+  std::unordered_map<std::string, SymbolicExecutor::LetExitValue> letExitValues;
+  std::optional<SymbolicExecutor::Result::ModelVal> retModel;
+};
+
+// Arm a trial clone with two splices into the entry block: one EQ require per
+// solved sym pinning it to the value the emitted program embeds, so any SAT
+// model of the armed clone matches the one body by construction, and one
+// exclusion require per collected input, `%paK != v` on a single parameter
+// coordinate, so the solve moves past every input gathered so far. The
+// coordinate rotates with `tryIdx` so a param pinned by the branch conditions
+// cannot starve the try budget.
+static void armTrialClone(
+    Program &trial, const std::string &funcName, const FunDecl &entry,
+    const std::unordered_map<std::string, SymbolicExecutor::Result::ModelVal> &model,
+    const std::vector<std::pair<std::string, std::string>> &primary,
+    const std::vector<ExtraCandidate> &extras, int tryIdx
+) {
+  FunDecl *fun = nullptr;
+  for (auto &f: trial.funs)
+    if (f.name.name == "@" + funcName) {
+      fun = &f;
+      break;
+    }
+  if (!fun || fun->blocks.empty())
+    return;
+
+  auto litExpr = [](bool isFloat, const std::string &text) -> Expr {
+    return isFloat ? buildExpr(buildCoefAtom(Coef{FloatLit{parseFloatLiteral(text), {}}}))
+                   : buildExpr(buildCoefAtom(Coef{IntLit{parseIntegerLiteral(text), {}}}));
+  };
+
+  // Pin every solved sym to the value the emitted program embeds.
+  for (const auto &s: entry.syms) {
+    auto it = model.find(s.name.name);
+    if (it == model.end())
+      continue;
+    const bool isFloat = s.type && std::holds_alternative<FloatType>(s.type->v);
+    RequireInstr req;
+    req.cond.lhs = buildExpr(buildCoefAtom(Coef{LocalOrSymId{SymId{s.name.name, {}}}}));
+    req.cond.op = RelOp::EQ;
+    req.cond.rhs = litExpr(isFloat, formatModelValue(it->second));
+    req.message = "pinned sym";
+    fun->blocks.front().instrs.emplace_back(std::move(req));
+  }
+
+  auto splice = [&](const std::vector<std::pair<std::string, std::string>> &pv, std::size_t coord) {
+    // No parameters: no coordinate to exclude, and no modulo.
+    if (fun->params.empty() || pv.size() < fun->params.size())
+      return;
+    const std::size_t c = coord % fun->params.size();
+    const ParamDecl &pd = fun->params[c];
+    RequireInstr req;
+    req.cond.lhs = buildExpr(buildCoefAtom(Coef{LocalOrSymId{LocalId{pd.name.name, {}}}}));
+    req.cond.op = RelOp::NE;
+    const bool isFloat = pd.type && std::holds_alternative<FloatType>(pd.type->v);
+    req.cond.rhs = litExpr(isFloat, pv[c].second);
+    req.message = "distinct input";
+    fun->blocks.front().instrs.emplace_back(std::move(req));
+  };
+
+  for (std::size_t e = 0; e < extras.size(); ++e)
+    splice(extras[e].params, static_cast<std::size_t>(tryIdx) + e + 1);
+  splice(primary, static_cast<std::size_t>(tryIdx));
 }
 
 [[nodiscard]] static GenerateResult generateLeaf(
@@ -427,6 +555,97 @@ static void writePathHeader(
       }
 
       if (res.sat) {
+        // Init suffix is a lowercase letter a..z so descriptor
+        // consumers (rylink) can address a specific concretization by
+        // `<funcName><letter>`. opts.nInits is clamped to [1, 26] at CLI
+        // parse time, so initIdx is always in range.
+        char letter = static_cast<char>('a' + initIdx);
+        std::string outName = opts.nInits > 1 ? funcName + letter + ".sir" : funcName + ".sir";
+        auto concretePath = opts.outDir / outName;
+
+        // Snapshot every piece of entry metadata we'll need (params, syms)
+        // into owning vectors here, BEFORE any later `prog.funs` mutation:
+        // the optional `@main` push_back below reallocates `funs` and
+        // invalidates `entry`, and reading through it afterward returned
+        // junk that fed wrong CLI args to the validate-time symiri. The
+        // checksum rewrite touches only the exit block, so `entry` stays
+        // valid across it.
+        const FunDecl *entry = nullptr;
+        for (const auto &f: prog.funs) {
+          if (f.name.name == "@" + funcName) {
+            entry = &f;
+            break;
+          }
+        }
+        std::vector<std::pair<std::string, std::string>> paramValuesCaptured;
+        std::vector<std::pair<std::string, std::string>> symValuesCaptured;
+        if (entry) {
+          paramValuesCaptured = orderedParamValues(*entry, res.paramModel);
+          for (const auto &s: entry->syms) {
+            auto it = res.model.find(s.name.name);
+            if (it != res.model.end())
+              symValuesCaptured.emplace_back(s.name.name, formatModelValue(it->second));
+          }
+        }
+
+        // --n-examples > 1: candidates come from solving a distinctness-armed
+        // clone of the template (armTrialClone). This runs before the checksum
+        // rewrite, which turns `@crc32_update` into a non-intrinsic a re-solve
+        // cannot answer. UNSAT or a failed try budget drops the example.
+        std::vector<std::pair<std::string, std::string>> primaryExample(
+            paramValuesCaptured.begin(), paramValuesCaptured.end()
+        );
+        std::vector<ExtraCandidate> extraCandidates;
+        if (opts.nExamples > 1 && entry) {
+          const std::uint32_t slotSeed =
+              baseSeed + static_cast<std::uint32_t>(attempt * 100 + initIdx);
+          for (int j = 1; j < opts.nExamples; ++j) {
+            for (int eTry = 0; eTry < kExtraExampleTries; ++eTry) {
+              Program trialProg = cloneProgram(prog);
+              armTrialClone(
+                  trialProg, funcName, *entry, res.model, primaryExample, extraCandidates, eTry
+              );
+              SymbolicExecutor::Config extraCfg = solverCfg;
+              // Distinct per (example, try): the same seed would re-answer
+              // the primary model instead of proposing another input.
+              extraCfg.seed = slotSeed * (static_cast<std::uint32_t>(opts.nExamples) + 1) +
+                              (static_cast<std::uint32_t>(j) - 1) * kExtraExampleTries +
+                              static_cast<std::uint32_t>(eTry);
+              SymbolicExecutor extraExec(trialProg, extraCfg, makeSolverFactory());
+              SymbolicExecutor::Result extraRes;
+              try {
+                extraRes = extraExec.solve("@" + funcName, pathLabels);
+              } catch (...) {
+                if (opts.verbose)
+                  std::cerr << "[solver] init " << initIdx << " example " << j << ": exception\n";
+                continue;
+              }
+              if (!extraRes.sat) {
+                if (opts.verbose)
+                  std::cerr << "[solver] init " << initIdx << " example " << j << ": "
+                            << (extraRes.unsat ? "UNSAT" : "UNKNOWN") << "\n";
+                continue;
+              }
+              auto pvs = orderedParamValues(*entry, extraRes.paramModel);
+              // Duplicates re-roll: rysmith wants distinct examples.
+              if (pvs == primaryExample)
+                continue;
+              bool dup = false;
+              for (const auto &seen: extraCandidates)
+                if (seen.params == pvs) {
+                  dup = true;
+                  break;
+                }
+              if (dup)
+                continue;
+              extraCandidates.push_back(
+                  {std::move(pvs), std::move(extraRes.letExitValues), std::move(extraRes.retModel)}
+              );
+              break;
+            }
+          }
+        }
+
         // Apply the checksum rewrite while we still hold the in-memory
         // prog. The solver only saw the sum-based `%_chk = %_chk + ...`
         // contract; rewriting now means every downstream consumer
@@ -444,48 +663,6 @@ static void writePathHeader(
         bool rewriteApplied = crcUpdates > 0;
         if (rewriteApplied)
           res.retModel.reset();
-
-        // Init suffix is a lowercase letter a..z so descriptor
-        // consumers (rylink) can address a specific concretization by
-        // `<funcName><letter>`. opts.nInits is clamped to [1, 26] at CLI
-        // parse time, so initIdx is always in range.
-        char letter = static_cast<char>('a' + initIdx);
-        std::string outName = opts.nInits > 1 ? funcName + letter + ".sir" : funcName + ".sir";
-        auto concretePath = opts.outDir / outName;
-
-        // Locate the entry function in the rewritten prog. Snapshot
-        // every piece of metadata we'll need (params, syms) into
-        // owning vectors here, BEFORE any subsequent `prog.funs`
-        // mutation — e.g. the optional `@main` push_back below
-        // invalidates pointers/references into the funs vector when
-        // it reallocates, and reading `entry->params` afterward
-        // returned junk for `cf.rz.paramValues`, which fed the
-        // wrong CLI args to the validate-time symiri.
-        const FunDecl *entry = nullptr;
-        for (const auto &f: prog.funs) {
-          if (f.name.name == "@" + funcName) {
-            entry = &f;
-            break;
-          }
-        }
-        std::vector<std::string> paramVals;
-        std::vector<std::pair<std::string, std::string>> paramValuesCaptured;
-        std::vector<std::pair<std::string, std::string>> symValuesCaptured;
-        if (entry) {
-          paramVals.reserve(entry->params.size());
-          for (const auto &p: entry->params) {
-            auto it = res.paramModel.find(p.name.name);
-            std::string val = it != res.paramModel.end() ? formatModelValue(it->second) : "0";
-            paramVals.push_back(val);
-            if (it != res.paramModel.end())
-              paramValuesCaptured.emplace_back(p.name.name, std::move(val));
-          }
-          for (const auto &s: entry->syms) {
-            auto it = res.model.find(s.name.name);
-            if (it != res.model.end())
-              symValuesCaptured.emplace_back(s.name.name, formatModelValue(it->second));
-          }
-        }
 
         // Capture the post-rewrite CRC32 return value via a MINIMAL
         // oracle program. The oracle:
@@ -513,18 +690,10 @@ static void writePathHeader(
         // as failed: skip the .sir write and try the next init.
         std::string crcRetValue;
         if (rewriteApplied && entry) {
-          Program miniProg = buildMiniCrc32Prog(prog, funcName, res.letExitValues);
-          auto tempPath = opts.outDir / (outName + ".oracle.tmp");
-          {
-            std::ofstream tofs(tempPath);
-            if (tofs) {
-              SIRPrinter printer(tofs);
-              printer.print(miniProg);
-            }
-          }
-          auto captured = runSymiriCaptureResult(tempPath, "minimal_" + funcName, paramVals);
-          [[maybe_unused]] std::error_code ec;
-          fs::remove(tempPath, ec); // best-effort; safe to leave on disk
+          auto captured = runCrc32Oracle(
+              prog, funcName, opts.outDir, outName + ".oracle.tmp", res.letExitValues,
+              extractParamArgs(paramValuesCaptured)
+          );
           if (!captured) {
             if (opts.verbose) {
               std::cerr << "[oracle] init " << initIdx
@@ -549,13 +718,50 @@ static void writePathHeader(
         if (opts.requireNonterm && opts.emitMain && expectedRet.empty())
           expectedRet = std::to_string(static_cast<std::int32_t>(rng()));
 
-        // Now that we have the expected return value we can build a faithful
-        // `@main` wrapper that asserts it via `@check_chksum`. This
-        // push_back invalidates `entry`, but every read we needed
-        // from it has already been snapshotted into paramVals /
-        // paramValuesCaptured / symValuesCaptured above.
+        // The concretized primary example, in file order: more examples
+        // are captured below and appended behind it.
+        std::vector<FuncDescriptor::Realization::Example> examples;
+        examples.emplace_back(
+            FuncDescriptor::Realization::Example{std::move(paramValuesCaptured), expectedRet}
+        );
+
+        // Each extra example's return value is derived from its candidate's
+        // own exit-time model through the same minimal-oracle recipe as the
+        // primary's: an independent source, so the validate-time run of the
+        // full program is a real cross-check for every example. Capture
+        // failure drops the example.
+        for (auto &cand: extraCandidates) {
+          std::string extraRet;
+          if (rewriteApplied) {
+            auto captured = runCrc32Oracle(
+                prog, funcName, opts.outDir, outName + ".oracle.tmp", cand.letExitValues,
+                extractParamArgs(cand.params)
+            );
+            if (!captured) {
+              if (opts.verbose)
+                std::cerr << "[examples] init " << initIdx << ": oracle rejected example "
+                          << examples.size() << "\n";
+              continue;
+            }
+            extraRet = std::move(*captured);
+          } else {
+            // No rewrite: the re-solve's sum model is the expectation, the
+            // same source the primary uses here.
+            extraRet = cand.retModel.has_value() ? formatModelValue(*cand.retModel) : "";
+          }
+          examples.emplace_back(
+              FuncDescriptor::Realization::Example{std::move(cand.params), std::move(extraRet)}
+          );
+        }
+
+        // Replay every example in @main: one entry call plus @check_chksum
+        // each. The push_back invalidates `entry`, already snapshotted.
         if (opts.emitMain && entry) {
-          FunDecl mainFn = buildMainFunction(prog, *entry, paramVals, expectedRet);
+          std::vector<MainExample> mainExamples;
+          mainExamples.reserve(examples.size());
+          for (const auto &ex: examples)
+            mainExamples.emplace_back(extractParamArgs(ex.paramValues), ex.retValue);
+          FunDecl mainFn = buildMainFunction(prog, *entry, mainExamples);
           prog.funs.push_back(std::move(mainFn));
           entry = nullptr; // do not use after realloc
         }
@@ -566,26 +772,22 @@ static void writePathHeader(
             std::cerr << "error: cannot open " << concretePath << "\n";
             continue;
           }
-          // The synthesised param + ret values, so symiri can re-run this
-          // program deterministically via `--main @f <file> -- <p0> <p1>`.
-          writeSolvedHeader(ofs, res.paramModel, expectedRet);
+          // One SOLVED line per example, so symiri can replay any of them
+          // via `--main @f <file> -- <p0> <p1>`.
+          for (const auto &ex: examples)
+            writeSolvedHeader(ofs, ex.paramValues, ex.retValue);
           emitPathHeader(ofs);
           SIRPrinter printer(ofs, res.model);
           printer.print(prog);
         }
 
-        // Use the metadata we snapshotted above (entry may now
-        // be dangling thanks to the @main push_back). Param values
-        // are in declaration order — symiri positional args need that
-        // ordering at validate time. Syms are in declaration order so
-        // the descriptor's top-level `syms` list and the per-realization
-        // `symValues` line up positionally.
+        // entry may dangle after the @main push_back; everything below
+        // reads the snapshots above. `examples[0]` is the concretized
+        // solve; extras are oracle-certified.
         ConcreteFile cf;
         cf.path = concretePath;
-        cf.rz.file = concretePath.filename().string();
-        cf.rz.paramValues = std::move(paramValuesCaptured);
-        cf.rz.symValues = std::move(symValuesCaptured);
-        cf.rz.retValue = expectedRet;
+        cf.examples = std::move(examples);
+        cf.symValues = std::move(symValuesCaptured);
         // The lasso header is the path's final block; the bounded-replay
         // validation asserts its state recurs after the orbit's k laps, which
         // the path spells out as k+1 arrivals at that block.
@@ -599,8 +801,17 @@ static void writePathHeader(
         if (opts.emitDesc) {
           std::vector<FuncDescriptor::Realization> realizations;
           realizations.reserve(produced.size());
-          for (const auto &x: produced)
-            realizations.push_back(x.rz);
+          for (const auto &x: produced) {
+            FuncDescriptor::Realization z;
+            z.file = x.path.filename().string();
+            if (!x.examples.empty()) {
+              z.paramValues = x.examples.front().paramValues;
+              z.retValue = x.examples.front().retValue;
+              z.extraExamples.assign(x.examples.begin() + 1, x.examples.end());
+            }
+            z.symValues = x.symValues;
+            realizations.push_back(std::move(z));
+          }
           auto descPath = opts.outDir / (funcName + ".json");
           FuncDescriptor::Outcome outcome =
               opts.solMode == SolvingMode::RequireUB        ? FuncDescriptor::Outcome::Trap
@@ -690,6 +901,8 @@ static void writePathHeader(
       // Retry/inits
       ("n-inits",           "Concretizations per template (different seeds)",
                             cxxopts::value<int>()->default_value("3"))
+      ("n-examples",        "Input/output examples per concrete .sir; ub-free mode only",
+                            cxxopts::value<int>()->default_value("1"))
       ("max-retries",       "Retry attempts on solver failure",
                             cxxopts::value<int>()->default_value("2"))
       ("max-loop-iter",     "Max loop iterations in the execution path (EP) sample",
@@ -848,7 +1061,7 @@ static void runGenerationLoop(
       for (const auto &cf: genRes.produced) {
         const fs::path &p = cf.path;
         std::string baseFuncName = getBaseFuncName(p);
-        std::vector<std::string> paramArgs = extractParamArgs(cf.rz);
+        std::vector<std::string> paramArgs = extractParamArgs(cf.examples.front().paramValues);
         bool ok =
             validateNontermDiverges(p, baseFuncName, paramArgs, cf.nontermHeader, cf.nontermPeriod);
         std::cout << "  validated: " << (ok ? "OK" : "FAIL") << "(" << p.filename() << ")\n";
@@ -868,52 +1081,56 @@ static void runGenerationLoop(
       for (const auto &cf: genRes.produced) {
         const fs::path &p = cf.path;
         std::string baseFuncName = getBaseFuncName(p);
-        std::vector<std::string> paramArgs = extractParamArgs(cf.rz);
-        // Run the on-disk full program through symiri once. When
-        // validating, its Result is asserted equal to the descriptor's
-        // retValue (captured from the independent minimal oracle at emit
-        // time) — that cross-check exercises the rewriter, the CFG body
-        // execution, and intrinsic dispatch in one shot; exit code 0
-        // alone would only prove symiri didn't crash. When --emit-state
-        // is on, the SAME run also fills the rytwin state profile (see
-        // runSymiriCaptureResult), so profiling costs no extra interpret.
-        // A UB-triggering program (require-ub) traps before producing a
-        // clean trace, so it is validated via the trap and yields no
-        // sidecar.
+        // One symiri run per example, each Result asserted against that
+        // example's own oracle-derived ret value: a real cross-check of
+        // the rewriter, the CFG body, and intrinsic dispatch for every
+        // example. The examples[0] run carries the rytwin state profile;
+        // a trap is validated via the trap alone.
         bool ok = !run.validate; // nothing to fail when only profiling
         std::string mismatchReason;
         if (leafCfg.solMode == SolvingMode::RequireUB) {
           if (run.validate) {
-            ok = validateWithSymiri(p, baseFuncName, paramArgs, leafCfg.verbose, leafCfg.solMode);
+            ok = validateWithSymiri(
+                p, baseFuncName, extractParamArgs(cf.examples.front().paramValues), leafCfg.verbose,
+                leafCfg.solMode
+            );
             if (!ok)
               mismatchReason = "Expected UB but program executed successfully or failed statically";
           }
         } else {
-          StateProfile profile;
-          auto observed = runSymiriCaptureResult(
-              p, baseFuncName, paramArgs, wantProfile ? &profile : nullptr, stGran
-          );
-          if (wantProfile && observed) {
-            std::ofstream sofs(leafCfg.outDir / (p.stem().string() + ".state.json"));
-            if (sofs)
-              writeStateProfileJson(sofs, profile);
-          }
-          if (run.validate) {
-            if (observed) {
-              if (cf.rz.retValue.empty()) {
-                // No oracle to compare against (e.g. the rewrite was
-                // skipped). Fall back to the exit-code check.
-                ok = validateWithSymiri(
-                    p, baseFuncName, paramArgs, leafCfg.verbose, leafCfg.solMode
-                );
-              } else if (*observed == cf.rz.retValue) {
-                ok = true;
-              } else {
-                mismatchReason = "expected=" + cf.rz.retValue + " observed=" + *observed;
-              }
-            } else {
-              mismatchReason = "symiri produced no Result line";
+          for (std::size_t ei = 0; ei < cf.examples.size(); ++ei) {
+            const FuncDescriptor::Realization::Example &ex = cf.examples[ei];
+            std::vector<std::string> paramArgs = extractParamArgs(ex.paramValues);
+            StateProfile profile;
+            auto observed = runSymiriCaptureResult(
+                p, baseFuncName, paramArgs, (wantProfile && ei == 0) ? &profile : nullptr, stGran
+            );
+            if (wantProfile && ei == 0 && observed) {
+              std::ofstream sofs(leafCfg.outDir / (p.stem().string() + ".state.json"));
+              if (sofs)
+                writeStateProfileJson(sofs, profile);
             }
+            if (!run.validate)
+              continue;
+            if (!observed) {
+              ok = false;
+              mismatchReason = "symiri produced no Result line";
+              break;
+            }
+            if (ex.retValue.empty()) {
+              // No oracle to compare against (e.g. the rewrite was
+              // skipped). Fall back to the exit-code check.
+              ok = validateWithSymiri(p, baseFuncName, paramArgs, leafCfg.verbose, leafCfg.solMode);
+              if (!ok)
+                mismatchReason = "symiri exited non-zero";
+              break;
+            }
+            if (*observed != ex.retValue) {
+              ok = false;
+              mismatchReason = "expected=" + ex.retValue + " observed=" + *observed;
+              break;
+            }
+            ok = true;
           }
         }
         if (run.validate) {
@@ -1066,6 +1283,16 @@ int main(int argc, char **argv) {
     std::cerr << "warning: --n-inits clamped to 26 (was " << nInits << ")\n";
     nInits = 26;
   }
+  // Same [1, 26] budget as n-inits: beyond the letter budget the per-example
+  // re-solve and replay cost dominates anyway.
+  int nExamples = result["n-examples"].as<int>();
+  if (nExamples < 1) {
+    std::cerr << "warning: --n-examples clamped to 1 (was " << nExamples << ")\n";
+    nExamples = 1;
+  } else if (nExamples > 26) {
+    std::cerr << "warning: --n-examples clamped to 26 (was " << nExamples << ")\n";
+    nExamples = 26;
+  }
   int maxRetries = result["max-retries"].as<int>();
   double pBranch = result["p-branch"].as<double>();
   double pBackedge = result["p-backedge"].as<double>();
@@ -1085,11 +1312,21 @@ int main(int argc, char **argv) {
   SolvingMode solMode = result.count("require-ub") ? SolvingMode::RequireUB : SolvingMode::UBFree;
   if (requireNonterm)
     solMode = SolvingMode::RequireNonterm;
-  // Wall-clock budget per function: covers all retries × inits plus 50 ms for non-solver overhead
-  // (CFG gen, path sampling, formula construction, SIRPrinter). Compilation runs outside the
-  // thread.
+  // A trap has no output to record and a divergence one certifiable input,
+  // so multi-example generation is UB-free mode only.
+  if (nExamples > 1 && solMode != SolvingMode::UBFree) {
+    std::cerr
+        << "error: --n-examples > 1 requires the default UB-free mode (--require-ub and "
+           "--require-nonterm programs have a single certifiable input and, for diverging ones, "
+           "no output to record)\n";
+    return 2;
+  }
+  // Wall-clock budget per function: retries × inits, including the
+  // kExtraExampleTries re-solves per extra example, plus 50 ms of non-solver
+  // overhead. Compilation runs outside the thread.
+  std::uint32_t perInitSolves = 1u + static_cast<std::uint32_t>(nExamples - 1) * kExtraExampleTries;
   std::uint32_t funcTimeoutMs = static_cast<std::uint32_t>(
-      static_cast<std::uint64_t>(maxRetries + 1) * nInits * timeoutMs + 50
+      static_cast<std::uint64_t>(maxRetries + 1) * nInits * perInitSolves * timeoutMs + 50
   );
   bool keepSymbolic = result.count("keep-symbolic") > 0;
   bool emitDesc = result.count("emit-desc") > 0;
@@ -1204,6 +1441,7 @@ int main(int argc, char **argv) {
   leafCfg.solMode = solMode;
   leafCfg.maxRetries = maxRetries;
   leafCfg.nInits = nInits;
+  leafCfg.nExamples = nExamples;
   leafCfg.outDir = outDir;
   leafCfg.keepSymbolic = keepSymbolic;
   leafCfg.verbose = verbose;

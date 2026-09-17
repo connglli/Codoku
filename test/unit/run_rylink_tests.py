@@ -1163,6 +1163,48 @@ def test_rylink_homogeneous_outcomes(rylink, rysmith):
         )
 
 
+def test_multi_example_pool(rylink, rysmith):
+  """A pool with --n-examples > 1 carries the per-realization `examples`
+  array; the pool loader and rylink consume it unchanged."""
+  with tempfile.TemporaryDirectory() as pool:
+    seed_pool(rysmith, pool, extra_args=["--n-examples", "3"])
+    # Every descriptor parses; the pool loader in rylink parses the same
+    # JSON.
+    descs = [f for f in os.listdir(pool) if f.endswith(".json")]
+    with_examples = 0
+    for fn in descs:
+      d = json.load(open(os.path.join(pool, fn)))
+      for rz in d.get("realizations", []):
+        if len(rz.get("extra_examples", [])) >= 2:
+          with_examples += 1
+          break
+    check(
+      "pool carries multi-example descriptors",
+      with_examples >= 1,
+      f"{with_examples}/{len(descs)} descriptors with >= 2 extra examples",
+    )
+    with tempfile.TemporaryDirectory() as out:
+      r = run(
+        [
+          rylink,
+          "--input-dir",
+          pool,
+          "--n-progs",
+          "2",
+          "--seed",
+          "7",
+          "--validate",
+          "-o",
+          out,
+        ]
+      )
+      check(
+        "rylink over a multi-example pool succeeds and validates",
+        r.returncode == 0 and "validated: OK" in r.stdout,
+        f"rc={r.returncode}, stderr={r.stderr[:300]!r}",
+      )
+
+
 def main():
   if len(sys.argv) != 4:
     print("Usage: python3 -m test.unit.run_rylink_tests <rylink> <rysmith> <symiri>")
@@ -1212,6 +1254,8 @@ def main():
   test_target_python(rylink, rysmith)
   print("=== rylink python --vec-lowering ===")
   test_python_vec_lowering(rylink, rysmith)
+  print("=== rylink over a multi-example pool ===")
+  test_multi_example_pool(rylink, rysmith)
 
   passed = sum(1 for _, ok, _ in results if ok)
   total = len(results)

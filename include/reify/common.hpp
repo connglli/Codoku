@@ -53,9 +53,33 @@ namespace refractir::reify {
   void ensureCheckChksumDecl(Program &prog);
 
   /**
-   * Build a `fun @main() : i32` that calls `entryFn` once on `paramValues`
-   * — decimal-int / hex-float strings, one per parameter in declaration
-   * order, parsed into IntLit / FloatLit atoms.
+   * One input/output example a `@main` wrapper replays: entry parameter
+   * values (decimal-int / hex-float strings, declaration order) and the
+   * expected return value.
+   */
+  using MainExample = std::pair<std::vector<std::string>, std::string>;
+
+  /**
+   * Build a `fun @main() : i32` that calls `entryFn` once per example,
+   * parsing each `MainExample::first` into IntLit / FloatLit atoms and
+   * asserting `retValue` through `@check_chksum(EXPECTED, …)` when
+   * meaningful.
+   *
+   * Every example must be an input/output pair of `entryFn` on the
+   * program the wrapper is appended to, so a mismatch aborts inside
+   * @check_chksum's lowering on the example that disagrees. Empty
+   * `retValue` skips that call's check (no oracle); a float-returning
+   * entry skips every check (@check_chksum is i32-typed, no implicit
+   * FP↔int cast).
+   */
+  [[nodiscard]] FunDecl buildMainFunction(
+      Program &prog, const FunDecl &entryFn, const std::vector<MainExample> &examples
+  );
+
+  /**
+   * Single-example convenience: a `@main` that calls `entryFn` once on
+   * `paramValues` — decimal-int / hex-float strings, one per parameter in
+   * declaration order, parsed into IntLit / FloatLit atoms.
    *
    * `retValue` is the expected return value: when non-empty the wrapper
    * asserts the result via `@check_chksum(EXPECTED, …)`, and appends that

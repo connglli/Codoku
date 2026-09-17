@@ -14,21 +14,33 @@ namespace refractir {
   }
 
   void writeSolvedHeader(
-      std::ostream &out,
-      const std::unordered_map<std::string, SymbolicExecutor::Result::ModelVal> &paramModel,
+      std::ostream &out, const std::vector<std::pair<std::string, std::string>> &paramValues,
       const std::string &retText
   ) {
-    if (paramModel.empty() && retText.empty())
+    if (paramValues.empty() && retText.empty())
       return;
     out << "// SOLVED:";
     bool first = true;
-    for (const auto &[name, val]: paramModel) {
-      out << (first ? " " : ", ") << name << "=" << formatModelValue(val);
+    for (const auto &[name, val]: paramValues) {
+      out << (first ? " " : ", ") << name << "=" << val;
       first = false;
     }
     if (!retText.empty())
       out << (first ? " " : ", ") << "ret=" << retText;
     out << "\n";
+  }
+
+  void writeSolvedHeader(
+      std::ostream &out,
+      const std::unordered_map<std::string, SymbolicExecutor::Result::ModelVal> &paramModel,
+      const std::string &retText
+  ) {
+    // Value format via formatModelValue; line shape via the overload above.
+    std::vector<std::pair<std::string, std::string>> pairs;
+    pairs.reserve(paramModel.size());
+    for (const auto &[name, val]: paramModel)
+      pairs.emplace_back(name, formatModelValue(val));
+    writeSolvedHeader(out, pairs, retText);
   }
 
   std::unordered_map<std::string, std::string> parseSolvedHeader(std::string_view src) {

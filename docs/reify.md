@@ -220,11 +220,14 @@ A region holding a non-intrinsic call is not twinned, since a callee could mutat
 rysmith [OPTIONS]
 ```
 
-The full option list is `rysmith --help`, declared in [src/rysmith.cpp](../src/rysmith.cpp). The knobs group into type control (`--no-fp`, `--max-ptr-depth`, `--max-agg-nest`, …), generation volume (`--n-vars`, `--n-stmts`, `--min-atoms`, `--off-path-multiplier`), operator repertoire (`--no-divmod`, `--no-select`, `--no-intrinsics`, …), CFG shape (`--n-bbls`, `--p-branch`, `--p-backedge`), solver control (`--timeout`, `--seed`, `--max-retries`), and output (`-n`, `--n-inits`, `-o`, `--target`, the `--emit-*` family). The sections below cover the modes whose semantics are not evident from the flag name.
+The full option list is `rysmith --help`, declared in [src/rysmith.cpp](../src/rysmith.cpp). The knobs group into type control (`--no-fp`, `--max-ptr-depth`, `--max-agg-nest`, …), generation volume (`--n-vars`, `--n-stmts`, `--min-atoms`, `--off-path-multiplier`), operator repertoire (`--no-divmod`, `--no-select`, `--no-intrinsics`, …), CFG shape (`--n-bbls`, `--p-branch`, `--p-backedge`), solver control (`--timeout`, `--seed`, `--max-retries`), and output (`-n`, `--n-inits`, `--n-examples`, `-o`, `--target`, the `--emit-*` family). The sections below cover the modes whose semantics are not evident from the flag name.
 
 ```sh
 # 10 functions, 3 concretizations each, all validated
 rysmith -n 10 --n-inits 3 --validate -o out/
+
+# 10 functions, two distinct solved examples per concretization
+rysmith -n 10 --n-examples 2 -o out/
 
 # stress pointers and mixed types, no floats
 rysmith -n 20 --no-fp --max-ptr-depth 2 --max-agg-nest 2 -o out/
@@ -260,6 +263,8 @@ fun @func0(%pa0: i32) : i32 {
 That return value is the expected output `o`. The solver never sees the CRC32 recurrence: it is asked for the cheaper sum-form contract, `%_chk = %_chk + atom`, and a post-solve rewriter replaces each accumulator step with a `@crc32_update` call before the file is written. After lowering to C, the function returns `o` whatever the compiler and optimization level, because the helper carries a function-local `static` table and a `static __attribute__((noinline))` qualifier that stop the optimizer folding the chain ([intrinsics.md](./intrinsics.md) §12.7).
 
 `--emit-main` appends a `@main()` that calls the entry with the solver's parameter values and asserts the return against the captured checksum through `@check_chksum(EXPECTED, %r);`. The C lowering of `@check_chksum` aborts on mismatch, and that externally visible side effect anchors the whole call chain against interprocedural constant propagation, so the body survives `-O3 -flto`.
+
+`--n-examples N` asks for `N` distinct input/output examples per concretized `.sir`. The first is the concretized solve; each further one comes from re-solving a clone of the same symbolic template armed with two splices into the entry block: one `require %?s == v` per solved sym pinning it to the value the emitted program embeds, and one exclusion require per collected input, `%paK != v` on a single parameter coordinate.
 
 ### Generating UB-triggering programs
 

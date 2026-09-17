@@ -74,17 +74,15 @@ namespace refractir::reify {
   }
 
   FunDecl buildMainFunction(
-      Program &prog, const FunDecl &entryFn, const std::vector<std::string> &paramValues,
-      const std::string &retValue
+      Program &prog, const FunDecl &entryFn, const std::vector<MainExample> &examples
   ) {
     FunDecl mainFn;
     mainFn.name = GlobalId{"@main", {}};
     mainFn.retType = buildI32();
 
-    // `%r` holds the entry-function return value. Its declared type matches
-    // entryFn so a float-returning entry doesn't trip the typechecker; the
-    // value is consumed immediately by @check_chksum (when present) or
-    // dropped.
+    // `%r` holds each call's return value, typed like entryFn so a
+    // float-returning entry typechecks; @check_chksum consumes it, or the
+    // next call reassigns it.
     LetDecl letR;
     letR.isMutable = true;
     letR.name = LocalId{"%r", {}};
@@ -95,49 +93,49 @@ namespace refractir::reify {
     Block b;
     b.label = BlockLabel{"^entry", {}};
 
-    // %r = call @entry(arg0, arg1, ...);
-    CallAtom ca;
-    ca.callee = entryFn.name;
-    for (std::size_t i = 0; i < entryFn.params.size() && i < paramValues.size(); ++i) {
-      const auto &p = entryFn.params[i];
-      const std::string &valStr = paramValues[i];
-      Atom arg = p.type && std::holds_alternative<FloatType>(p.type->v)
-                     ? buildCoefAtom(Coef{FloatLit{parseFloatLiteral(valStr), {}}})
-                     : buildCoefAtom(Coef{IntLit{parseIntegerLiteral(valStr), {}}});
-      ca.args.push_back(std::make_shared<Expr>(buildExpr(std::move(arg))));
-    }
-    AssignInstr callAssign;
-    callAssign.lhs = buildLValue("%r");
-    callAssign.rhs = buildExpr(Atom{std::move(ca), {}});
-    b.instrs.push_back(std::move(callAssign));
+    // @check_chksum is i32-typed and no implicit FP<->int cast exists, so
+    // a float-returning entry gets no check at all.
+    const bool intEntry = entryFn.retType && std::holds_alternative<IntType>(entryFn.retType->v);
+    bool anyIntCheck = false;
+    for (const auto &[paramValues, retValue]: examples) {
+      // %r = call @entry(arg0, arg1, ...);
+      CallAtom ca;
+      ca.callee = entryFn.name;
+      for (std::size_t i = 0; i < entryFn.params.size() && i < paramValues.size(); ++i) {
+        const auto &p = entryFn.params[i];
+        const std::string &valStr = paramValues[i];
+        Atom arg = p.type && std::holds_alternative<FloatType>(p.type->v)
+                       ? buildCoefAtom(Coef{FloatLit{parseFloatLiteral(valStr), {}}})
+                       : buildCoefAtom(Coef{IntLit{parseIntegerLiteral(valStr), {}}});
+        ca.args.push_back(std::make_shared<Expr>(buildExpr(std::move(arg))));
+      }
+      AssignInstr callAssign;
+      callAssign.lhs = buildLValue("%r");
+      callAssign.rhs = buildExpr(Atom{std::move(ca), {}});
+      b.instrs.push_back(std::move(callAssign));
 
-    // %r = call @check_chksum(EXPECTED, %r);  (skipped when retValue is
-    // empty — happens for descriptors that the symiri-capture step couldn't
-    // fill in).
-    //
-    // The check is gated on an integer-returning entry: @check_chksum is
-    // i32-typed and RefractIR has no implicit FP↔int cast at call
-    // boundaries. Float-returning entries skip the check; reify's float
-    // oracles already go through the sum/CRC32 path on the RefractIR-side
-    // checksum machinery.
-    if (!retValue.empty() && entryFn.retType &&
-        std::holds_alternative<IntType>(entryFn.retType->v)) {
-      CallAtom check;
-      check.callee = GlobalId{"@check_chksum", {}};
-      check.args.push_back(
-          std::make_shared<Expr>(
-              buildExpr(buildCoefAtom(Coef{IntLit{parseIntegerLiteral(retValue), {}}}))
-          )
-      );
-      check.args.push_back(
-          std::make_shared<Expr>(buildExpr(buildRValAtom(RValue{LocalId{"%r", {}}, {}, {}})))
-      );
-      AssignInstr checkAssign;
-      checkAssign.lhs = buildLValue("%r");
-      checkAssign.rhs = buildExpr(Atom{std::move(check), {}});
-      b.instrs.push_back(std::move(checkAssign));
-      ensureCheckChksumDecl(prog);
+      // %r = call @check_chksum(EXPECTED, %r);  (skipped when retValue is
+      // empty: an example may lack an oracle).
+      if (!retValue.empty() && intEntry) {
+        CallAtom check;
+        check.callee = GlobalId{"@check_chksum", {}};
+        check.args.push_back(
+            std::make_shared<Expr>(
+                buildExpr(buildCoefAtom(Coef{IntLit{parseIntegerLiteral(retValue), {}}}))
+            )
+        );
+        check.args.push_back(
+            std::make_shared<Expr>(buildExpr(buildRValAtom(RValue{LocalId{"%r", {}}, {}, {}})))
+        );
+        AssignInstr checkAssign;
+        checkAssign.lhs = buildLValue("%r");
+        checkAssign.rhs = buildExpr(Atom{std::move(check), {}});
+        b.instrs.push_back(std::move(checkAssign));
+        anyIntCheck = true;
+      }
     }
+    if (anyIntCheck)
+      ensureCheckChksumDecl(prog);
 
     // Always exit with 0 on the happy path. Any mismatch above unwinds
     // through @check_chksum's abort() before this terminator is reached.
@@ -149,6 +147,13 @@ namespace refractir::reify {
     mainFn.blocks.push_back(std::move(b));
 
     return mainFn;
+  }
+
+  FunDecl buildMainFunction(
+      Program &prog, const FunDecl &entryFn, const std::vector<std::string> &paramValues,
+      const std::string &retValue
+  ) {
+    return buildMainFunction(prog, entryFn, {MainExample{paramValues, retValue}});
   }
 
   bool runAnalysisPasses(Program &prog, bool verbose) {

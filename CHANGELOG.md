@@ -23,6 +23,7 @@ Spec: [docs/SPEC_v0.2.3.md](./docs/SPEC_v0.2.3.md), which doubles as the release
 - `rytwin --twin-select interesting`: a selection policy that softmax-tilts each region's twin probability by how hard its twin is to prove equivalent, concentrating twins on the hardest regions.
 - Per-lane vector symbol binding, `symiri --sym '%?v=1,2,3,4'`.
 - Reify pipeline support for the Python target, structured lowering with per-program strategy sweeps, and reducible CFG generation.
+- `rysmith --n-examples`: more than one input/output example per concretized `.sir`.
 - `make install` target.
 
 ### Changed

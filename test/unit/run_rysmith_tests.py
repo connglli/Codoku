@@ -3195,6 +3195,340 @@ def test_target_python_emits_py(rysmith):
 
 
 # ---------------------------------------------------------------------------
+# --n-examples: multiple input/output examples per .sir
+# ---------------------------------------------------------------------------
+#
+# Every example is one `// SOLVED:` line in the banner; under --emit-main
+# they are additionally replayed as one @entry call + @check_chksum pair
+# each in @main. Extra examples re-solve the same template with fresh
+# solver seeds, so examples differ in their parameter values.
+
+_EX_SOLVED_RE = re.compile(r"(%\w+|ret)=(-?\d+(?:\.\d+(?:[eE][-+]?\d+)?)?)")
+
+
+def _ex_solved_lines(text):
+  """Every `// SOLVED:` line of a .sir, stripped of the marker."""
+  return [
+    ln[len("// SOLVED:") :].strip()
+    for ln in text.splitlines()
+    if ln.startswith("// SOLVED:")
+  ]
+
+
+def _ex_parse_sig(text):
+  """(entry name, [param names in declaration order]) from the first `fun`."""
+  m = re.search(r"fun\s+(@\w+)\s*\(([^)]*)\)", text)
+  if not m:
+    return None, []
+  fname = m.group(1)
+  pnames = [p.split(":")[0].strip() for p in m.group(2).split(",") if p.strip()]
+  return fname, pnames
+
+
+def _ex_first_multi_example_run(rysmith, extra_args=None, wanted=2):
+  """Generate a 2-param function with --n-examples 3 over _REPLAY_SEEDS until
+  one run lands >= `wanted` banner examples. Returns (gid, sir_path, tmpdir)
+  or (None, None, None); the caller removes tmpdir."""
+  for seed in _REPLAY_SEEDS:
+    d = tempfile.mkdtemp(prefix="nex_")
+    r = run(
+      [
+        rysmith,
+        "--n-funcs",
+        "1",
+        "--seed",
+        str(seed),
+        "--n-params",
+        "2",
+        "--n-examples",
+        "3",
+        "-o",
+        d,
+      ]
+      + (extra_args or [])
+    )
+    gid = extract_id(r.stdout) if r.returncode == 0 else None
+    if gid:
+      sirs = sorted(
+        f for f in os.listdir(d) if f.startswith(f"func_{gid}_0") and f.endswith(".sir")
+      )
+      for s in sirs:
+        body = open(os.path.join(d, s)).read()
+        if len(set(_ex_solved_lines(body))) >= wanted:
+          return gid, os.path.join(d, s), d
+    shutil.rmtree(d, ignore_errors=True)
+  return None, None, None
+
+
+def test_n_examples_banner_lines(rysmith):
+  """--n-examples 3 puts every example in the banner: one `// SOLVED:`
+  line each, all declared params and a ret valued."""
+  gid, sir_path, d = _ex_first_multi_example_run(rysmith)
+  if gid is None:
+    check(
+      "at least one multi-example .sir in banner mode", False, "no solving seed found"
+    )
+    return
+  try:
+    text = open(sir_path).read()
+    lines = _ex_solved_lines(text)
+    check(
+      "banner carries >= 2 SOLVED lines under --n-examples 3",
+      len(lines) >= 2,
+      f"{len(lines)} lines: {lines}",
+    )
+    if len(lines) < 2:
+      return
+    _, pnames = _ex_parse_sig(text)
+    bad = [
+      ln for ln in lines if any(f"{n}=" not in ln for n in pnames) or "ret=" not in ln
+    ]
+    check(
+      "every SOLVED line values all params and a ret",
+      not bad,
+      f"missing keys in {bad}",
+    )
+  finally:
+    shutil.rmtree(d, ignore_errors=True)
+
+
+def test_n_examples_banner_distinct(rysmith):
+  """Two SOLVED lines never name the same parameter-value tuple."""
+  gid, sir_path, d = _ex_first_multi_example_run(rysmith)
+  if gid is None:
+    check(
+      "at least one multi-example .sir for distinctness", False, "no solving seed found"
+    )
+    return
+  try:
+    lines = _ex_solved_lines(open(sir_path).read())
+    tuples = {ln for ln in lines}
+    check(
+      "SOLVED lines name distinct param tuples",
+      len(tuples) == len(lines),
+      f"{len(lines)} lines collapse to {len(tuples)}: {lines}",
+    )
+  finally:
+    shutil.rmtree(d, ignore_errors=True)
+
+
+def test_n_examples_examples_replay(rysmith, symiri):
+  """Every banner example replays through symiri to its own ret."""
+  gid, sir_path, d = _ex_first_multi_example_run(rysmith)
+  if gid is None:
+    check("at least one multi-example .sir for replay", False, "no solving seed found")
+    return
+  try:
+    text = open(sir_path).read()
+    fname, pnames = _ex_parse_sig(text)
+    lines = _ex_solved_lines(text)
+    if fname is None or len(lines) < 2:
+      check("multi-example .sir parses", False, text[:200])
+      return
+    bad = []
+    for ln in lines:
+      kv = dict(_EX_SOLVED_RE.findall(ln))
+      args = [kv[p] for p in pnames if p in kv]
+      r2 = run([symiri, "--main", fname, sir_path, "--"] + args)
+      if r2.returncode != 0 or f"Result: {kv['ret']}" not in r2.stdout:
+        bad.append((ln, (r2.stdout + r2.stderr).strip()[:120]))
+    check(
+      "every banner example replays to its own ret",
+      not bad,
+      f"{len(bad)} replay mismatches: {bad[:3]}",
+    )
+  finally:
+    shutil.rmtree(d, ignore_errors=True)
+
+
+def test_n_examples_main_multi_calls(rysmith, symiri):
+  """With --emit-main, --n-examples 3 appends a @main with one entry call
+  plus @check_chksum per example, and running it exits 0."""
+  gid, sir_path, d = _ex_first_multi_example_run(
+    rysmith, extra_args=["--emit-main"], wanted=1
+  )
+  if gid is None:
+    check(
+      "at least one multi-example .sir in main mode", False, "no solving seed found"
+    )
+    return
+  try:
+    # `@main` is the last `fun` in the file; join the trailing body.
+    body = open(sir_path).read()
+    main_text = body[body.index("fun @main(") :]
+    n_calls = len(re.findall(r"call @" + re.escape(f"func_{gid}_0") + r"\(", main_text))
+    n_checks = len(re.findall(r"call @check_chksum\(", main_text))
+    check(
+      "@main carries one entry call per example (>= 2)",
+      n_calls >= 2,
+      f"{n_calls} entry calls in @main",
+    )
+    check(
+      "@main carries one @check_chksum per example (>= 2)",
+      n_checks >= 2,
+      f"{n_checks} checks in @main",
+    )
+    r2 = run([symiri, sir_path])
+    check(
+      "executing the multi-call @main via symiri exits 0",
+      r2.returncode == 0 and "Result: 0" in r2.stdout,
+      f"rc={r2.returncode}, stdout={r2.stdout[:200]!r}, stderr={r2.stderr[:200]!r}",
+    )
+  finally:
+    shutil.rmtree(d, ignore_errors=True)
+
+
+def test_n_examples_main_banner_lines(rysmith):
+  """--emit-main does not change the banner: every example is still one
+  SOLVED line, and the line count matches @main's entry calls."""
+  gid, sir_path, d = _ex_first_multi_example_run(
+    rysmith, extra_args=["--emit-main"], wanted=2
+  )
+  if gid is None:
+    check(
+      "at least one multi-example .sir for the banner rule",
+      False,
+      "no solving seed found",
+    )
+    return
+  try:
+    body = open(sir_path).read()
+    lines = _ex_solved_lines(body)
+    n_calls = len(
+      re.findall(
+        r"call @" + re.escape(f"func_{gid}_0") + r"\(",
+        body[body.index("fun @main(") :],
+      )
+    )
+    check(
+      "banner carries one SOLVED line per example under --emit-main",
+      len(lines) >= 2,
+      f"{len(lines)} lines: {lines}",
+    )
+    check(
+      "banner line count matches the @main entry calls",
+      len(lines) == n_calls,
+      f"{len(lines)} lines vs {n_calls} entry calls",
+    )
+  finally:
+    shutil.rmtree(d, ignore_errors=True)
+
+
+def test_n_examples_descriptor_examples(rysmith):
+  """--emit-desc --n-examples 3: the realization's `extra_examples` array
+  carries the banner examples beyond the primary, and the primary is the
+  top-level `params`/`ret`."""
+  for seed in _REPLAY_SEEDS:
+    d = tempfile.mkdtemp(prefix="nexd_")
+    r = run(
+      [
+        rysmith,
+        "--n-funcs",
+        "1",
+        "--seed",
+        str(seed),
+        "--n-params",
+        "2",
+        "--n-examples",
+        "3",
+        "--emit-desc",
+        "-o",
+        d,
+      ]
+    )
+    gid = extract_id(r.stdout) if r.returncode == 0 else None
+    ok = False
+    if gid:
+      for f in os.listdir(d):
+        if f.endswith(".json"):
+          desc = json.load(open(os.path.join(d, f)))
+          rzs = desc.get("realizations") or []
+          if not rzs:
+            continue
+          rz = rzs[0]
+          exs = rz.get("extra_examples") or []
+          if len(exs) < 2:
+            continue
+          check(
+            "descriptor realization carries >= 2 extra examples",
+            len(exs) >= 2,
+            f"{len(exs)} extra examples",
+          )
+          check(
+            "primary example is the top-level params/ret",
+            rz.get("params") is not None and rz.get("ret") is not None,
+            f"top=({rz.get('params')}, {rz.get('ret')})",
+          )
+          decl = [p["name"] for p in desc.get("params", [])]
+          covered = all(all(n in ex.get("params", {}) for n in decl) for ex in exs)
+          check("every extra example values all declared params", covered, str(exs))
+          ok = True
+          break
+    shutil.rmtree(d, ignore_errors=True)
+    if ok:
+      return
+  check(
+    "descriptor examples array emitted under --n-examples 3",
+    False,
+    "no solving seed found",
+  )
+
+
+def test_n_examples_requires_default_mode(rysmith):
+  """--n-examples > 1 is a usage error under --require-ub and
+  --require-nonterm (trap/diverge programs have one certifiable input and
+  no output), and a sub-1 value clamps with a warning."""
+  for extra in (["--require-ub"], ["--require-nonterm"]):
+    d = tempfile.mkdtemp(prefix="nexmode_")
+    r = run([rysmith, "--n-examples", "3", "--n-funcs", "1", "-o", d] + extra)
+    shutil.rmtree(d, ignore_errors=True)
+    check(
+      f"--n-examples 3 {' '.join(extra)} exits non-zero",
+      r.returncode != 0 and "n-examples" in r.stderr,
+      f"rc={r.returncode}, stderr={r.stderr[:200]!r}",
+    )
+  clamps = False
+  ok = False
+  # Single-function runs are seed-fragile (see _REPLAY_SEEDS); the clamp
+  # warns and the run must still produce a concrete .sir.
+  for seed in _REPLAY_SEEDS:
+    d = tempfile.mkdtemp(prefix="nexclamp_")
+    r = run(
+      [rysmith, "--n-examples", "0", "--n-funcs", "1", "--seed", str(seed), "-o", d]
+    )
+    clamps = "warning: --n-examples clamped" in r.stderr
+    ok = r.returncode == 0 and any(f.endswith(".sir") for f in os.listdir(d))
+    shutil.rmtree(d, ignore_errors=True)
+    if clamps and ok:
+      break
+  check("--n-examples 0 clamps to 1 and runs", clamps and ok)
+
+
+def test_n_examples_default_one(rysmith):
+  """The knob defaults to 1: with --emit-main the @main calls the entry
+  exactly once and the banner carries one SOLVED line."""
+  gid, sir_path, d = _first_solved_run(rysmith, ["--emit-main"])
+  if gid is None:
+    check("at least one concrete .sir for default-one", False, "no solving seed found")
+    return
+  try:
+    body = open(sir_path).read()
+    lines = _ex_solved_lines(body)
+    check(
+      "banner carries exactly one SOLVED line by default", len(lines) == 1, str(lines)
+    )
+    main_text = body[body.index("fun @main(") :]
+    n_calls = len(re.findall(r"call @" + re.escape(f"func_{gid}_0") + r"\(", main_text))
+    check(
+      "@main carries exactly one entry call by default",
+      n_calls == 1,
+      f"{n_calls} calls",
+    )
+  finally:
+    shutil.rmtree(d, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
 # Horizontal-reduction intrinsics (@reduce_*) — vector-in / scalar-out
 # ---------------------------------------------------------------------------
 
@@ -3383,6 +3717,23 @@ def main():
   test_structured_lowering_value_validation(rysmith)
   print("=== --structured-lowering: dispatch-free wasm ===")
   test_structured_lowering_wasm(rysmith)
+  print("=== --n-examples: multiple input/output examples per .sir ===")
+  print("=== --n-examples: banner lines ===")
+  test_n_examples_banner_lines(rysmith)
+  print("=== --n-examples: distinct inputs ===")
+  test_n_examples_banner_distinct(rysmith)
+  print("=== --n-examples: every example replays ===")
+  test_n_examples_examples_replay(rysmith, symiri)
+  print("=== --n-examples: --emit-main multi-call main ===")
+  test_n_examples_main_multi_calls(rysmith, symiri)
+  print("=== --n-examples: --emit-main banner keeps one line per example ===")
+  test_n_examples_main_banner_lines(rysmith)
+  print("=== --n-examples: descriptor examples array ===")
+  test_n_examples_descriptor_examples(rysmith)
+  print("=== --n-examples: mode validation ===")
+  test_n_examples_requires_default_mode(rysmith)
+  print("=== --n-examples: default one ===")
+  test_n_examples_default_one(rysmith)
   print("=== @reduce_*: reduction intrinsics generated ===")
   test_reduce_intrinsics_generated(rysmith)
   print("=== @reduce_*: suppressed under --no-vec ===")

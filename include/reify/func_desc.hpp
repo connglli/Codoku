@@ -88,6 +88,13 @@ namespace refractir::reify {
     // rysmith writes into the SOLVED header (decimal ints / hex
     // floats / std::to_string(double) full-precision), so a
     // consumer can hand them straight to `symiri ... -- val0 val1`.
+    //
+    // `paramValues` / `retValue` are the realization's primary example;
+    // `extraExamples` carries the examples beyond it, present only under
+    // `--n-examples > 1`. Each entry is a self-contained (parameter
+    // values, expected return) pair of the same .sir body. JSON records
+    // the primary as the realization's own `params`/`ret` and the rest
+    // under `extra_examples`, written only when there is at least one.
     struct Realization {
       std::string file; // basename only, relative to descriptor dir
       // Parameter values keyed by the parameter's local-id (e.g.
@@ -102,6 +109,18 @@ namespace refractir::reify {
       // Solved value of the `ret` expression on the chosen path.
       // Empty string when the path's terminator is not `ret <expr>;`.
       std::string retValue;
+
+      // One concretized input/output pair of the .sir body.
+      struct Example {
+        // Parameter values keyed by the parameter's local-id.
+        std::vector<std::pair<std::string, std::string>> paramValues;
+        // Expected return value on that input.
+        std::string retValue;
+      };
+
+      // The examples beyond the primary one. Empty unless rysmith ran
+      // with `--n-examples > 1`; the primary is the fields above.
+      std::vector<Example> extraExamples;
     };
 
     std::vector<Realization> realizations;

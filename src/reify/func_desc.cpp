@@ -97,7 +97,27 @@ namespace refractir::reify {
         ofs << "\"" << r.symValues[j].first << "\": \"" << jsonEscape(r.symValues[j].second)
             << "\"";
       }
-      ofs << "}, \"ret\": \"" << jsonEscape(r.retValue) << "\"}";
+      ofs << "}, \"ret\": \"" << jsonEscape(r.retValue) << "\"";
+      // `params`/`ret` are the primary example; `extra_examples` is the
+      // rest, written only when the realization carries at least one.
+      if (!r.extraExamples.empty()) {
+        ofs << ", \"extra_examples\": [";
+        for (size_t j = 0; j < r.extraExamples.size(); ++j) {
+          if (j)
+            ofs << ", ";
+          const auto &ex = r.extraExamples[j];
+          ofs << "{\"params\": {";
+          for (size_t k = 0; k < ex.paramValues.size(); ++k) {
+            if (k)
+              ofs << ", ";
+            ofs << "\"" << ex.paramValues[k].first << "\": \""
+                << jsonEscape(ex.paramValues[k].second) << "\"";
+          }
+          ofs << "}, \"ret\": \"" << jsonEscape(ex.retValue) << "\"}";
+        }
+        ofs << "]";
+      }
+      ofs << "}";
     }
     ofs << "]\n";
     ofs << "}\n";
@@ -451,6 +471,44 @@ namespace refractir::reify {
                 return std::nullopt;
             } else if (k == "ret") {
               if (!p.parseString(rz.retValue))
+                return std::nullopt;
+            } else if (k == "extra_examples") {
+              // The examples beyond the primary; keys in any order, like
+              // the realization itself.
+              if (!p.match('['))
+                return std::nullopt;
+              bool exComma = false;
+              while (!p.peek(']')) {
+                if (exComma && !p.match(','))
+                  return std::nullopt;
+                if (!p.match('{'))
+                  return std::nullopt;
+                FuncDescriptor::Realization::Example ex;
+                bool keyComma = false;
+                while (!p.peek('}')) {
+                  if (keyComma && !p.match(','))
+                    return std::nullopt;
+                  std::string ek;
+                  if (!p.parseString(ek) || !p.match(':'))
+                    return std::nullopt;
+                  if (ek == "params") {
+                    if (!parseStrMap(ex.paramValues))
+                      return std::nullopt;
+                  } else if (ek == "ret") {
+                    if (!p.parseString(ex.retValue))
+                      return std::nullopt;
+                  } else {
+                    if (!p.skipValue())
+                      return std::nullopt;
+                  }
+                  keyComma = true;
+                }
+                if (!p.match('}'))
+                  return std::nullopt;
+                rz.extraExamples.push_back(std::move(ex));
+                exComma = true;
+              }
+              if (!p.match(']'))
                 return std::nullopt;
             } else {
               if (!p.skipValue())
