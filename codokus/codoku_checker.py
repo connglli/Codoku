@@ -172,6 +172,7 @@ def parse_puzzle_requirements(
   const_budget: ConstBudget = {}
   cfg_edges: list[tuple[str, str]] = []
   disabled_masks: set[str] = set()
+  budget_mode: str | None = None
 
   for line in puzzle_text.splitlines():
     if "//@ EXEC_PATH:" in line:
@@ -179,29 +180,55 @@ def parse_puzzle_requirements(
       expected_path = [x.strip() for x in path_part.split("->") if x.strip()]
     elif "//@ <FILL_CONST>:" in line:
       parts = line.split("//@ <FILL_CONST>:", 1)[1].strip().split()
-      if len(parts) != 3:
+      if len(parts) == 2:
+        mode = "total"
+        val = parts[0]
+        try:
+          cnt = int(parts[1])
+        except ValueError:
+          fail(
+            CheckResult.FAIL_PARSE,
+            f"Malformed //@ <FILL_CONST> marker: count "
+            f"'{parts[1]}' is not an integer in '{line}'",
+          )
+        if cnt < 0:
+          fail(
+            CheckResult.FAIL_PARSE,
+            f"Malformed //@ <FILL_CONST> marker: count "
+            f"must not be negative in '{line}'",
+          )
+        const_budget[val] = cnt
+      elif len(parts) == 3:
+        mode = "livedead"
+        val = parts[0]
+        try:
+          live = int(parts[1])
+          dead = int(parts[2])
+        except ValueError:
+          fail(
+            CheckResult.FAIL_PARSE,
+            f"Malformed //@ <FILL_CONST> marker: live/dead counts "
+            f"'{parts[1]}' '{parts[2]}' are not integers in '{line}'",
+          )
+        if live < 0 or dead < 0:
+          fail(
+            CheckResult.FAIL_PARSE,
+            f"Malformed //@ <FILL_CONST> marker: live/dead counts "
+            f"must not be negative in '{line}'",
+          )
+        const_budget[val] = (live, dead)
+      else:
         fail(
           CheckResult.FAIL_PARSE,
-          f"Malformed //@ <FILL_CONST> marker: expected 3 tokens "
-          f"('<value> <live> <dead>'), got {len(parts)} in '{line}'",
+          f"Malformed //@ <FILL_CONST> marker: expected 2 or 3 tokens "
+          f"('<value> <count>' or '<value> <live> <dead>'), got {len(parts)} in '{line}'",
         )
-      val = parts[0]
-      try:
-        live = int(parts[1])
-        dead = int(parts[2])
-      except ValueError:
+      if budget_mode is not None and budget_mode != mode:
         fail(
           CheckResult.FAIL_PARSE,
-          f"Malformed //@ <FILL_CONST> marker: live/dead counts "
-          f"'{parts[1]}' '{parts[2]}' are not integers in '{line}'",
+          f"Malformed //@ <FILL_CONST> marker: mixed 2-token and 3-token budget entries in '{line}'",
         )
-      if live < 0 or dead < 0:
-        fail(
-          CheckResult.FAIL_PARSE,
-          f"Malformed //@ <FILL_CONST> marker: live/dead counts "
-          f"must not be negative in '{line}'",
-        )
-      const_budget[val] = (live, dead)
+      budget_mode = mode
     elif "//@ CFG_EDGE:" in line:
       edge_part = line.split("//@ CFG_EDGE:", 1)[1].strip()
       if "->" not in edge_part:
@@ -449,27 +476,72 @@ def check_fill_const_budget(
   actual_counts: ConstBudget,
   expected_counts: ConstBudget,
 ) -> None:
-  """Verify the FILL_CONST (live, dead) split matches the puzzle budget exactly."""
+  """Verify the FILL_CONST budget matches the puzzle budget exactly.
+
+  Supports both 2-token flat budgets (total count per value) and 3-token
+  live/dead split budgets ((live, dead) tuple per value).
+  """
   if not expected_counts:
     return
 
-  for val, (expected_live, expected_dead) in expected_counts.items():
-    actual_live, actual_dead = actual_counts.get(val, (0, 0))
-    if (actual_live, actual_dead) != (expected_live, expected_dead):
-      fail(
-        CheckResult.FAIL_FILL_CONST,
-        f"<FILL_CONST> count mismatch for '{val}'. "
-        f"Expected live {expected_live} dead {expected_dead}, "
-        f"got live {actual_live} dead {actual_dead}.",
-      )
+  is_split = any(isinstance(v, tuple) for v in expected_counts.values())
 
-  for val, (actual_live, actual_dead) in actual_counts.items():
-    if val not in expected_counts:
-      fail(
-        CheckResult.FAIL_FILL_CONST,
-        f"Off-budget constant in a <FILL_CONST> position: '{val}' "
-        f"(live: {actual_live}, dead: {actual_dead}).",
+  if is_split:
+    for val, expected in expected_counts.items():
+      expected_live, expected_dead = (
+        expected if isinstance(expected, tuple) else (expected, 0)
       )
+      actual_entry = actual_counts.get(val, (0, 0))
+      actual_live, actual_dead = (
+        actual_entry if isinstance(actual_entry, tuple) else (actual_entry, 0)
+      )
+      if (actual_live, actual_dead) != (expected_live, expected_dead):
+        fail(
+          CheckResult.FAIL_FILL_CONST,
+          f"<FILL_CONST> count mismatch for '{val}'. "
+          f"Expected live {expected_live} dead {expected_dead}, "
+          f"got live {actual_live} dead {actual_dead}.",
+        )
+
+    for val, actual_entry in actual_counts.items():
+      if val not in expected_counts:
+        actual_live, actual_dead = (
+          actual_entry if isinstance(actual_entry, tuple) else (actual_entry, 0)
+        )
+        fail(
+          CheckResult.FAIL_FILL_CONST,
+          f"Off-budget constant in a <FILL_CONST> position: '{val}' "
+          f"(live: {actual_live}, dead: {actual_dead}).",
+        )
+  else:
+    for val, expected in expected_counts.items():
+      expected_cnt = (
+        expected if isinstance(expected, int) else (expected[0] + expected[1])
+      )
+      actual_entry = actual_counts.get(val, 0)
+      actual_cnt = (
+        (actual_entry[0] + actual_entry[1])
+        if isinstance(actual_entry, tuple)
+        else actual_entry
+      )
+      if actual_cnt != expected_cnt:
+        fail(
+          CheckResult.FAIL_FILL_CONST,
+          f"<FILL_CONST> count mismatch for '{val}'. "
+          f"Expected {expected_cnt}, got {actual_cnt}.",
+        )
+
+    for val, actual_entry in actual_counts.items():
+      if val not in expected_counts:
+        actual_cnt = (
+          (actual_entry[0] + actual_entry[1])
+          if isinstance(actual_entry, tuple)
+          else actual_entry
+        )
+        fail(
+          CheckResult.FAIL_FILL_CONST,
+          f"Off-budget constant in a <FILL_CONST> position: '{val}' (count: {actual_cnt}).",
+        )
 
 
 # ---------------------------------------------------------------------------

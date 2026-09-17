@@ -22,11 +22,13 @@ import importlib.util
 import json
 import math
 import os
+import random
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 GREEN = "\033[32m"
 RED = "\033[31m"
@@ -1414,13 +1416,199 @@ def budget_split_unit_tests_pass(ccommon, chk_mod) -> bool:
   check("split: parked across the boundary fails on equal totals", parked_ok)
   ok = ok and parked_ok
 
-  legacy_ok = False
+  malformed_ok = False
   try:
-    chk_mod.parse_puzzle_requirements("#//@ <FILL_CONST>: 7 1\n")
+    chk_mod.parse_puzzle_requirements("#//@ <FILL_CONST>: 7\n")
   except chk_mod.CheckFailure as exc:
-    legacy_ok = exc.result == chk_mod.CheckResult.FAIL_PARSE
-  check("split: legacy 2-token lines fail closed at parse", legacy_ok)
-  ok = ok and legacy_ok
+    malformed_ok = exc.result == chk_mod.CheckResult.FAIL_PARSE
+  check("split: malformed budget lines fail closed at parse", malformed_ok)
+  ok = ok and malformed_ok
+
+  return ok
+
+
+def livedead_budget_option_unit_tests_pass(ccommon, chk_mod, mod) -> bool:
+  """livedead_const_budget option in profiles:
+  - Defaults to False on profiles and configs.
+  - When False, render_header produces 2-token budget markers and pairs prose.
+  - When True, render_header produces 3-token budget markers and triples prose.
+  - When 2-token budget is in the puzzle, checker parses and validates
+    regardless of whether constants sit in live or dead blocks.
+  - Total count mismatch and off-budget constants are rejected under 2-token budget.
+  """
+  ok = True
+
+  # 1. Option defaults to False on profiles and GeneratorConfig
+  small_prof = mod.PROFILES["small"]
+  good1 = (
+    hasattr(small_prof, "livedead_const_budget")
+    and small_prof.livedead_const_budget is False
+  )
+  if good1:
+    cfg = mod.sample_config(small_prof, random.Random(0))
+    good1 = hasattr(cfg, "livedead_const_budget") and cfg.livedead_const_budget is False
+  check("livedead_option: defaults to False on profile and sampled config", good1)
+  ok = ok and good1
+
+  # 2. Header rendering with livedead_const_budget=False outputs 2-token lines
+  budget_counts = {"7": (2, 1), "5": (0, 3)}
+  hdr_false = ""
+  try:
+    hdr_false = mod.render_header(
+      "test_leaf",
+      [],
+      "entry -> exit",
+      budget_counts,
+      lift_consts=False,
+      livedead_const_budget=False,
+    )
+  except TypeError:
+    pass
+  good2 = (
+    "#//@ <FILL_CONST>: 7 3\n" in hdr_false
+    and "#//@ <FILL_CONST>: 5 3\n" in hdr_false
+    and '"<value> <count>" pairs' in hdr_false
+    and '"<value> <live> <dead>" triples' not in hdr_false
+  )
+  check("livedead_option: render_header produces 2-token lines when False", good2)
+  ok = ok and good2
+
+  # 3. Header rendering with livedead_const_budget=True outputs 3-token lines
+  hdr_true = ""
+  try:
+    hdr_true = mod.render_header(
+      "test_leaf",
+      [],
+      "entry -> exit",
+      budget_counts,
+      lift_consts=False,
+      livedead_const_budget=True,
+    )
+  except TypeError:
+    pass
+  good3 = (
+    "#//@ <FILL_CONST>: 7 2 1\n" in hdr_true
+    and "#//@ <FILL_CONST>: 5 0 3\n" in hdr_true
+    and '"<value> <live> <dead>" triples' in hdr_true
+    and '"<value> <count>" pairs' not in hdr_true
+  )
+  check("livedead_option: render_header produces 3-token lines when True", good3)
+  ok = ok and good3
+
+  # 4. Checker parses 2-token budget and allows constant placement across regions
+  banner_2tok = (
+    "#//@ CFG_EDGE: entry -> exit\n"
+    "#//@ EXEC_PATH: entry -> exit\n"
+    "#//@ <FILL_CONST>: 7 1\n"
+    "#//@ <FILL_CONST>: 5 1\n"
+  )
+  req_2tok = None
+  try:
+    req_2tok = chk_mod.parse_puzzle_requirements(banner_2tok)
+  except Exception:
+    pass
+  good4 = req_2tok is not None and req_2tok.const_budget == {"7": 1, "5": 1}
+  if good4:
+    try:
+      # Actual: 7 is dead (0, 1), 5 is live (1, 0).
+      chk_mod.check_fill_const_budget({"7": (0, 1), "5": (1, 0)}, req_2tok.const_budget)
+      # Actual: 7 is live (1, 0), 5 is dead (0, 1).
+      chk_mod.check_fill_const_budget({"7": (1, 0), "5": (0, 1)}, req_2tok.const_budget)
+    except chk_mod.CheckFailure:
+      good4 = False
+  check(
+    "livedead_option: checker parses 2-token budget and accepts any valid live/dead distribution",
+    good4,
+  )
+  ok = ok and good4
+
+  # 5. Checker rejects count mismatch and off-budget on 2-token budget
+  good5 = True
+  if req_2tok is not None:
+    mismatch_fail = False
+    try:
+      chk_mod.check_fill_const_budget({"7": (2, 0), "5": (1, 0)}, req_2tok.const_budget)
+    except chk_mod.CheckFailure as exc:
+      mismatch_fail = (
+        exc.result == chk_mod.CheckResult.FAIL_FILL_CONST
+        and "Expected 1, got 2" in str(exc)
+      )
+    offbudget_fail = False
+    try:
+      chk_mod.check_fill_const_budget(
+        {"7": (1, 0), "5": (1, 0), "99": (1, 0)}, req_2tok.const_budget
+      )
+    except chk_mod.CheckFailure as exc:
+      offbudget_fail = (
+        exc.result == chk_mod.CheckResult.FAIL_FILL_CONST
+        and "Off-budget constant in a <FILL_CONST> position: '99' (count: 1)"
+        in str(exc)
+      )
+    good5 = mismatch_fail and offbudget_fail
+  else:
+    good5 = False
+  check(
+    "livedead_option: checker rejects count mismatch and off-budget on 2-token budget",
+    good5,
+  )
+  ok = ok and good5
+
+  # 6. Edge case: mixing 2-token and 3-token lines in the same banner fails closed
+  mixed_banner = (
+    "#//@ CFG_EDGE: a -> b\n"
+    "#//@ EXEC_PATH: a -> b\n"
+    "#//@ <FILL_CONST>: 7 1\n"
+    "#//@ <FILL_CONST>: 5 1 0\n"
+  )
+  mixed_ok = False
+  try:
+    chk_mod.parse_puzzle_requirements(mixed_banner)
+  except chk_mod.CheckFailure as exc:
+    mixed_ok = (
+      exc.result == chk_mod.CheckResult.FAIL_PARSE
+      and "mixed 2-token and 3-token" in str(exc)
+    )
+  check(
+    "livedead_option: mixed 2-token and 3-token markers fail closed at parse", mixed_ok
+  )
+  ok = ok and mixed_ok
+
+  # 7. render_instruction correctly formats 2-token vs 3-token vs free budget
+  inst_false = mod.render_instruction(has_budget=True, livedead_const_budget=False)
+  inst_true = mod.render_instruction(has_budget=True, livedead_const_budget=True)
+  inst_free = mod.render_instruction(has_budget=False)
+  good7 = (
+    "<value> <count>" in inst_false
+    and "<value> <live> <dead>" not in inst_false
+    and "parked in the wrong region" not in inst_false
+    and "<value> <live> <dead>" in inst_true
+    and "parked in the wrong region" in inst_true
+    and "choose any value" in inst_free
+  )
+  check("livedead_option: render_instruction formats 2-token and 3-token modes", good7)
+  ok = ok and good7
+
+  # 8. analyze_puzzle extracts 2-token budget metrics and rejects extra tokens
+  with tempfile.TemporaryDirectory() as tmpdir:
+    p_file = Path(tmpdir) / "puzzle.py"
+    p_file.write_text(
+      "#//@ CFG_EDGE: entry -> exit\n"
+      "#//@ EXEC_PATH: entry -> exit\n"
+      "#//@ <FILL_CONST>: 7 2\n"
+      "#//@ <FILL_CONST>: 5 1\n"
+      "#//@ <FILL_CONST>: 9 1 2 3\n"
+      "def leaf():\n"
+      "  return 0\n"
+    )
+    metrics_2tok = mod.analyze_puzzle(p_file)
+    good8 = (
+      metrics_2tok.const_budget_entries == 2 and metrics_2tok.const_budget_total == 3
+    )
+  check(
+    "livedead_option: analyze_puzzle counts 2-token budget and ignores malformed tokens",
+    good8,
+  )
+  ok = ok and good8
 
   return ok
 
@@ -2135,6 +2323,7 @@ def main():
   disabled_masks_unit_tests(ccommon, mod)
   trusted_layout_unit_tests_pass(ccommon)
   budget_split_unit_tests_pass(ccommon, chk_mod)
+  livedead_budget_option_unit_tests_pass(ccommon, chk_mod, mod)
   sentinel_unit_tests_pass(ccommon, chk_mod)
   fine_grained_unit_tests_pass(ccommon, chk_mod, mod)
   checksum_unit_tests_pass(ccommon, chk_mod, mod)

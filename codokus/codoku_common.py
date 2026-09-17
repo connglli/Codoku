@@ -449,10 +449,9 @@ def block_label_for_line(comments, lineno: int) -> str | None:
   return current
 
 
-# Constant budget: each value maps to its (live, dead) slot split. Live
-# slots sit in blocks on the execution path (plus pre-entry
-# declarations, which always run); dead slots sit in blocks off it.
-ConstBudget = dict[str, tuple[int, int]]
+# Constant budget: each value maps to its (live, dead) slot split (when
+# livedead_const_budget is True), or to its total count across the solution.
+ConstBudget = dict[str, tuple[int, int]] | dict[str, int]
 
 
 def merge_const_split(

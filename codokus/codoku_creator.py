@@ -124,6 +124,10 @@ DUMP_TRACE=1 python solution.py
 
 BUDGET_READ = (
   "- The **<FILL_CONST> budget** "
+  "(`#//@ <FILL_CONST>: <value> <count>` lines) - constants you must use"
+)
+BUDGET_READ_LIVEDEAD = (
+  "- The **<FILL_CONST> budget** "
   "(`#//@ <FILL_CONST>: <value> <live> <dead>` lines) - constants you must use"
 )
 NO_BUDGET_READ = (
@@ -131,6 +135,11 @@ NO_BUDGET_READ = (
   "that keeps the function correct"
 )
 CONST_FILL_BUDGET = (
+  "`<FILL_CONST>` → an integer or float literal (must match the budget "
+  "exactly - right value, right type, right count; `2` and `2.0` "
+  "are distinct)"
+)
+CONST_FILL_BUDGET_LIVEDEAD = (
   "`<FILL_CONST>` → an integer or float literal (must match the budget "
   "exactly - right value, right type, right live/dead split; `2` and `2.0` "
   "are distinct)"
@@ -142,6 +151,14 @@ CONST_FILL_FREE = (
 )
 BUDGET_RULE = (
   "- The `<FILL_CONST>` budget must be matched exactly: each value at its "
+  "exact count, no extras, and with the same type (integer vs float - "
+  "`2` is not `2.0`).\n"
+  "- `<FILL_CONST>` is never `0`, `1`, `0.0`, or `1.0`: those literals stay "
+  "visible in the puzzle and are not masked anywhere. Filling a mark with "
+  "them fails re-masking (`FAIL_REMASKING`)."
+)
+BUDGET_RULE_LIVEDEAD = (
+  "- The `<FILL_CONST>` budget must be matched exactly: each value at its "
   "exact live and dead counts, no extras, and with the same type (integer "
   "vs float - `2` is not `2.0`). A constant parked in the wrong region "
   "fails even when the totals add up.\n"
@@ -150,6 +167,10 @@ BUDGET_RULE = (
   "them fails re-masking (`FAIL_REMASKING`)."
 )
 BUDGET_TIP = (
+  "- For each `<FILL_CONST>`, use the budget "
+  "(`#//@ <FILL_CONST>: <value> <count>` lines) to constrain your choices."
+)
+BUDGET_TIP_LIVEDEAD = (
   "- For each `<FILL_CONST>`, use the budget "
   "(`#//@ <FILL_CONST>: <value> <live> <dead>` lines) to constrain your choices."
 )
@@ -162,21 +183,40 @@ CHECK_ERR = (
 )
 
 
-def render_instruction(has_budget: bool) -> str:
+def render_instruction(has_budget: bool, livedead_const_budget: bool = False) -> str:
   """Render INSTRUCTION.md; budget lines are only shown when a budget exists."""
+  if not has_budget:
+    budget_read = NO_BUDGET_READ
+    const_fill = CONST_FILL_FREE
+    budget_rule = ""
+    budget_tip = ""
+    check_err = ""
+  elif livedead_const_budget:
+    budget_read = BUDGET_READ_LIVEDEAD
+    const_fill = CONST_FILL_BUDGET_LIVEDEAD
+    budget_rule = BUDGET_RULE_LIVEDEAD
+    budget_tip = BUDGET_TIP_LIVEDEAD
+    check_err = CHECK_ERR
+  else:
+    budget_read = BUDGET_READ
+    const_fill = CONST_FILL_BUDGET
+    budget_rule = BUDGET_RULE
+    budget_tip = BUDGET_TIP
+    check_err = CHECK_ERR
+
   return (
-    INSTRUCTION_TEMPLATE.replace(
-      "{{BUDGET_READ}}", BUDGET_READ if has_budget else NO_BUDGET_READ
-    )
-    .replace("{{CONST_FILL}}", CONST_FILL_BUDGET if has_budget else CONST_FILL_FREE)
-    .replace("{{BUDGET_RULE}}", BUDGET_RULE if has_budget else "")
-    .replace("{{BUDGET_TIP}}", BUDGET_TIP if has_budget else "")
-    .replace("{{CHECK_ERR}}", CHECK_ERR if has_budget else "")
+    INSTRUCTION_TEMPLATE.replace("{{BUDGET_READ}}", budget_read)
+    .replace("{{CONST_FILL}}", const_fill)
+    .replace("{{BUDGET_RULE}}", budget_rule)
+    .replace("{{BUDGET_TIP}}", budget_tip)
+    .replace("{{CHECK_ERR}}", check_err)
   )
 
 
-def write_instruction(path: Path, has_budget: bool) -> None:
-  path.write_text(render_instruction(has_budget))
+def write_instruction(
+  path: Path, has_budget: bool, livedead_const_budget: bool = False
+) -> None:
+  path.write_text(render_instruction(has_budget, livedead_const_budget))
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +262,23 @@ PUZZLE_HEADER_TEMPLATE = """\
 """
 
 BUDGET_SECTION_TEMPLATE = """\
+# ------------------------------------------------
+# Requirements for <FILL_CONST>
+# ------------------------------------------------
+#
+# The lines below list every constant the <FILL_CONST> marks must carry, as
+# "<value> <count>" pairs. Across your whole solution each <value> must appear
+# in <FILL_CONST> positions exactly <count> times -- no more, no fewer -- and no
+# other constant may appear in any <FILL_CONST> position. The value must match
+# exactly, including its type: `2` (integer) and `2.0` (float) are distinct.
+# Constants already shown in the fixed (entry/exit) code do not count toward
+# this budget. `0`, `1`, `0.0`, and `1.0` stay visible and never take a
+# <FILL_CONST> position, so they are not in the budget.
+#
+{{FILL_CONST}}//
+"""
+
+BUDGET_SECTION_LIVEDEAD_TEMPLATE = """\
 # ------------------------------------------------
 # Requirements for <FILL_CONST>
 # ------------------------------------------------
@@ -291,11 +348,7 @@ class MaskProbs(NamedTuple):
 
 @dataclass(frozen=True)
 class GeneratorConfig:
-  """Inputs passed to rysmith (see `rysmith --help`).
-
-  `features` carries the boolean rysmith toggles (e.g. `--no-fp`); the
-  numeric knobs are dedicated fields.
-  """
+  """Sampled configuration for candidate generation and puzzle construction."""
 
   n_bbls: int
   n_stmts: int
@@ -306,6 +359,7 @@ class GeneratorConfig:
   n_vars: int
   n_params: int
   lift_consts: bool
+  livedead_const_budget: bool = False
   p_mask_lhs_vars: float = 0.1
   p_mask_rhs_vars: float = 0.75
   p_mask_ops: float = 0.75
@@ -364,7 +418,8 @@ class GenerationProfile:
   p_branch: FloatRange
   n_vars: IntRange
   n_params: IntRange
-  lift_consts: bool
+  lift_consts: bool = False
+  livedead_const_budget: bool = False
   features: tuple[str, ...] = ()
   disabled_masks: frozenset[str] = frozenset()
   acceptance: Mapping[str, tuple[float, float]] = field(default_factory=dict)
@@ -432,6 +487,7 @@ PROFILES: dict[str, GenerationProfile] = {
     n_vars=IntRange(6, 10),
     n_params=IntRange(2, 3),
     lift_consts=False,
+    livedead_const_budget=False,
     features=(
       "--no-fp",
       "--no-vec",
@@ -461,6 +517,7 @@ PROFILES: dict[str, GenerationProfile] = {
     n_vars=IntRange(10, 16),
     n_params=IntRange(3, 4),
     lift_consts=False,
+    livedead_const_budget=False,
     features=(
       "--no-vec",
       "--no-ptrarith",
@@ -488,6 +545,7 @@ PROFILES: dict[str, GenerationProfile] = {
     n_vars=IntRange(14, 20),
     n_params=IntRange(4, 5),
     lift_consts=False,
+    livedead_const_budget=False,
     features=(),
     acceptance={
       "exec_path_length": (10, 2147483647),
@@ -512,6 +570,7 @@ PROFILES: dict[str, GenerationProfile] = {
     n_vars=IntRange(10, 14),
     n_params=IntRange(3, 5),
     lift_consts=True,
+    livedead_const_budget=False,
     # We consider constants, variables, and control flows.
     disabled_masks=frozenset({"<FILL_OP>", "<FILL_FUNC>"}),
     features=(),
@@ -539,6 +598,7 @@ PROFILES: dict[str, GenerationProfile] = {
     n_vars=IntRange(10, 14),
     n_params=IntRange(3, 5),
     lift_consts=True,
+    livedead_const_budget=False,
     # We consider constants, operators, and control flows.
     disabled_masks=frozenset({"<FILL_VAR>"}),
     features=(),
@@ -568,6 +628,7 @@ PROFILES: dict[str, GenerationProfile] = {
     # We consider variables, operators, and control flows.
     disabled_masks=frozenset({"<FILL_CONST>"}),
     lift_consts=True,
+    livedead_const_budget=False,
     features=(),
     acceptance={
       "exec_path_length": (10, 30),
@@ -596,6 +657,7 @@ PROFILES: dict[str, GenerationProfile] = {
     n_vars=IntRange(6, 10),
     n_params=IntRange(3, 4),
     lift_consts=False,
+    livedead_const_budget=False,
     features=(
       "--no-fp",
       "--no-vec",
@@ -625,6 +687,7 @@ PROFILES: dict[str, GenerationProfile] = {
     n_vars=IntRange(6, 10),
     n_params=IntRange(3, 4),
     lift_consts=False,
+    livedead_const_budget=False,
     features=(
       "--no-vec",
       "--no-ptrarith",
@@ -653,6 +716,7 @@ PROFILES: dict[str, GenerationProfile] = {
     n_vars=IntRange(8, 12),
     n_params=IntRange(3, 4),
     lift_consts=False,
+    livedead_const_budget=False,
     features=(),
     acceptance={
       "exec_path_length": (10, 24),
@@ -1076,19 +1140,38 @@ def render_header(
   path_str: str,
   budget_counts: ConstBudget,
   lift_consts: bool,
+  livedead_const_budget: bool = False,
   disabled_masks: frozenset[str] = frozenset(),
 ) -> str:
-  fill_const_lines = "".join(
-    f"#//@ <FILL_CONST>: {val} {live} {dead}\n"
-    for val in sorted(budget_counts)
-    for live, dead in [budget_counts[val]]
-  )
+  if livedead_const_budget:
+    fill_const_lines = "".join(
+      f"#//@ <FILL_CONST>: {val} {live} {dead}\n"
+      for val in sorted(budget_counts)
+      for live, dead in [
+        budget_counts[val]
+        if isinstance(budget_counts[val], tuple)
+        else (budget_counts[val], 0)
+      ]
+    )
+    template = BUDGET_SECTION_LIVEDEAD_TEMPLATE
+  else:
+    fill_const_lines = "".join(
+      f"#//@ <FILL_CONST>: {val} {cnt}\n"
+      for val in sorted(budget_counts)
+      for cnt in [
+        (budget_counts[val][0] + budget_counts[val][1])
+        if isinstance(budget_counts[val], tuple)
+        else budget_counts[val]
+      ]
+    )
+    template = BUDGET_SECTION_TEMPLATE
+
   # No <FILL_CONST> marks when constants are disabled, so the budget section
   # (a prose banner over an empty list) is suppressed like lift_consts.
   if lift_consts or "<FILL_CONST>" in disabled_masks:
     budget_section = ""
   else:
-    budget_section = BUDGET_SECTION_TEMPLATE.replace("{{FILL_CONST}}", fill_const_lines)
+    budget_section = template.replace("{{FILL_CONST}}", fill_const_lines)
 
   # The disabled kinds ride in the banner so the checker re-masks with the
   # same vocabulary: without it the checker would mask kinds the puzzle left
@@ -1215,6 +1298,7 @@ def sample_config(profile: GenerationProfile, rng: random.Random) -> GeneratorCo
     n_vars=profile.n_vars.sample(rng),
     n_params=profile.n_params.sample(rng),
     lift_consts=profile.lift_consts,
+    livedead_const_budget=profile.livedead_const_budget,
     features=profile.features,
     disabled_masks=profile.disabled_masks,
   )
@@ -1257,7 +1341,15 @@ def install_candidate(
   elif oracle_destination.exists():
     oracle_destination.unlink()
 
-  write_instruction(outdir / "INSTRUCTION.md", not candidate.config.lift_consts)
+  has_budget = (
+    not candidate.config.lift_consts
+    and "<FILL_CONST>" not in candidate.config.disabled_masks
+  )
+  write_instruction(
+    outdir / "INSTRUCTION.md",
+    has_budget,
+    candidate.config.livedead_const_budget,
+  )
 
   metrics_data = asdict(candidate.metrics)
   metrics_data["masks_by_kind"] = dict(candidate.metrics.masks_by_kind)
@@ -1370,6 +1462,7 @@ def generate_candidate(
     path_str,
     masked.budget_counts,
     config.lift_consts,
+    config.livedead_const_budget,
     config.disabled_masks,
   )
   (candidate_dir / "puzzle.py").write_text(header + masked.puzzle_body)
