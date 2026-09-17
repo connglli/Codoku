@@ -6,6 +6,7 @@ helpers cover only the Python target's masking and CFG needs.
 
 import ast
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -447,6 +448,31 @@ def block_label_for_line(comments, lineno: int) -> str | None:
     else:
       break
   return current
+
+
+# ---------------------------------------------------------------------------
+# Harness examples
+#
+# rysmith's --n-examples replays the leaf once per example inside the fixed
+# @main wrapper: r = <leaf>(...) followed by r = _in_check_chksum(<expected>,
+# r), one pair per example. The checker counts the examples from the puzzle
+# text alone, and the creator's checksum recalibration patches every pair.
+# ---------------------------------------------------------------------------
+
+
+def count_harness_examples(text: str) -> int:
+  """Count the @main harness examples a puzzle replays.
+
+  One `_in_check_chksum(<expected>, r)` call per example; the helper's
+  def line names no literal, so only the replay calls match.
+  """
+  return len(HARNESS_CHECK_RE.findall(text))
+
+
+# The harness replay's check statement: the call's expected argument is a
+# literal, and the local it checks is the leaf's return-value holder. The
+# def line carries named parameters, so only call statements match.
+HARNESS_CHECK_RE = re.compile(r"r\s*=\s*_in_check_chksum\(-?\d+\s*,\s*r\s*\)")
 
 
 # Constant budget: each value maps to its (live, dead) slot split (when

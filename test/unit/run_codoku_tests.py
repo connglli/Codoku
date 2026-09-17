@@ -2306,6 +2306,241 @@ def checksum_unit_tests_pass(ccommon, chk_mod, mod) -> bool:
   return ok
 
 
+def multi_example_tests_pass(ccommon, chk_mod) -> bool:
+  """The @main harness replays the leaf once per example (rysmith
+  --n-examples 3): each replay carries its own `_in_check_chksum(<expected>,
+  r)` call, and the prescribed run traces the leaf path once per example."""
+  ok = True
+
+  def program(n_examples: int) -> bytes:
+    replay = ""
+    for i in range(n_examples):
+      arg = 3 - 8 * i
+      replay += f"    r = func_t({arg})\n"
+      # The leaf returns (pa + 1) + 2 on the prescribed path.
+      replay += f"    r = _in_check_chksum({arg + 3}, r)\n"
+    return (
+      "def _in_check_chksum(expected, actual):\n"
+      "    if expected != actual:\n"
+      "        raise ValueError('@check_chksum mismatch')\n"
+      "    return actual\n"
+      "\n"
+      "def func_t(pa):\n"
+      "    # ^entry\n"
+      '    if __import__("os").environ.get("DUMP_TRACE"):\n'
+      '        print("^entry:")\n'
+      "    v = (pa + 1)\n"
+      "    # ^b0\n"
+      '    if __import__("os").environ.get("DUMP_TRACE"):\n'
+      '        print("^b0:")\n'
+      "    v = (v + 2)\n"
+      "    # ^exit\n"
+      '    if __import__("os").environ.get("DUMP_TRACE"):\n'
+      '        print("^exit:")\n'
+      "    return v\n"
+      "\n"
+      "def main():\n" + replay + "    return 0\n"
+      "\n"
+      'if __name__ == "__main__":\n'
+      "    import sys\n"
+      "    sys.exit(main())\n"
+    ).encode("utf-8")
+
+  # (1) The harness example count is one per checksum call, not the
+  # helper's definition, and one per replay in the puzzle text.
+  count = chk_mod.count_harness_examples(program(3).decode("utf-8"))
+  good = count == 3
+  check("multi: example count is one per checksum call", good, str(count))
+  ok = ok and good
+
+  # (2) A multi-example ground truth passes the full checker: the
+  # prescribed trace is the path once per example, and every replay's
+  # checksum output must pass.
+  def e2e(n_examples: int, tmpdir: str) -> tuple[bool, str]:
+    banner = (
+      "#//@ CFG_EDGE: entry -> b0\n"
+      "#//@ CFG_EDGE: b0 -> exit\n"
+      "#//@ EXEC_PATH: entry -> b0 -> exit\n"
+    )
+    try:
+      puzzle_path = os.path.join(tmpdir, "puzzle.py")
+      solution_path = os.path.join(tmpdir, "solution.py")
+      with open(puzzle_path, "w") as f:
+        f.write(banner + program(n_examples).decode("utf-8"))
+      with open(solution_path, "wb") as f:
+        f.write(program(n_examples))
+      chk_mod.check(puzzle_path, solution_path)
+      return True, ""
+    except chk_mod.CheckFailure as exc:
+      return False, f"{exc.result}: {exc.message}"
+
+  with tempfile.TemporaryDirectory(prefix="codoku_multi2_") as tmpdir:
+    passed, detail = e2e(2, tmpdir)
+    check("multi: two-example ground truth passes the full checker", passed, detail)
+    ok = ok and passed
+
+  with tempfile.TemporaryDirectory(prefix="codoku_multi3_") as tmpdir:
+    passed, detail = e2e(3, tmpdir)
+    check("multi: three-example ground truth passes the full checker", passed, detail)
+    ok = ok and passed
+
+  # (3) Edge case: a masked threshold cell decides the path a replay
+  # takes. The ground truth's fill keeps every replay on the prescribed
+  # path, while a fill that departs one replay fails FAIL_PATH.
+  def branching_program(fill: str) -> bytes:
+    replay = (
+      "    r = func_t(3)\n"
+      "    r = _in_check_chksum(1, r)\n"  # truth: (pa + 1) - 3 = 1 on b2
+      "    r = func_t(-5)\n"
+      "    r = _in_check_chksum(-7, r)\n"
+    )
+    return (
+      "def _in_check_chksum(expected, actual):\n"
+      "    if expected != actual:\n"
+      "        raise ValueError('@check_chksum mismatch')\n"
+      "    return actual\n"
+      "\n"
+      "def func_t(pa):\n"
+      "    # ^entry\n"
+      '    if __import__("os").environ.get("DUMP_TRACE"):\n'
+      '        print("^entry:")\n'
+      "    v = (pa + 1)\n"
+      "    # ^b0\n"
+      '    if __import__("os").environ.get("DUMP_TRACE"):\n'
+      '        print("^b0:")\n'
+      "    if (v > " + fill + "):\n"
+      "        # ^b1\n"
+      '        if __import__("os").environ.get("DUMP_TRACE"):\n'
+      '            print("^b1:")\n'
+      "        v = (v + 2)\n"
+      "    else:\n"
+      "        # ^b2\n"
+      '        if __import__("os").environ.get("DUMP_TRACE"):\n'
+      '            print("^b2:")\n'
+      "        v = (v - 3)\n"
+      "    # ^exit\n"
+      '    if __import__("os").environ.get("DUMP_TRACE"):\n'
+      '        print("^exit:")\n'
+      "    return v\n"
+      "\n"
+      "def main():\n" + replay + "    return 0\n"
+      "\n"
+      'if __name__ == "__main__":\n'
+      "    import sys\n"
+      "    sys.exit(main())\n"
+    ).encode("utf-8")
+
+  branch_banner = (
+    "#//@ CFG_EDGE: entry -> b0\n"
+    "#//@ CFG_EDGE: b0 -> b1\n"
+    "#//@ CFG_EDGE: b0 -> b2\n"
+    "#//@ CFG_EDGE: b1 -> exit\n"
+    "#//@ CFG_EDGE: b2 -> exit\n"
+    "#//@ EXEC_PATH: entry -> b0 -> b2 -> exit\n"
+  )
+  with tempfile.TemporaryDirectory(prefix="codoku_multictrl_") as tmpdir:
+    puzzle_path = os.path.join(tmpdir, "puzzle.py")
+    with open(puzzle_path, "w") as f:
+      f.write(branch_banner + branching_program("<FILL_CONST>").decode("utf-8"))
+    verdicts = []
+    for name, fill in (("ground truth", "5"), ("departing fill", "3")):
+      solution_path = os.path.join(tmpdir, f"{name}.py")
+      with open(solution_path, "wb") as f:
+        f.write(branching_program(fill))
+      try:
+        chk_mod.check(puzzle_path, solution_path)
+        verdicts.append((name, "PASS", ""))
+      except chk_mod.CheckFailure as exc:
+        verdicts.append((name, str(exc.result), exc.message))
+    good = verdicts[0][1] == "PASS" and verdicts[1][1] == str(
+      chk_mod.CheckResult.FAIL_PATH
+    )
+    check("multi: departing fill fails, ground truth passes", good, str(verdicts))
+    ok = ok and good
+
+  return ok
+
+
+def multi_example_checksum_tests_pass(ccommon, chk_mod, mod) -> bool:
+  """The harness carries one `_in_check_chksum` per example: the checksum
+  randomization must recalibrate every expectation from a run of the
+  ground truth, so a valid solution passes every example's check."""
+  ok = True
+
+  def run_module(src_bytes: bytes) -> int:
+    with tempfile.NamedTemporaryFile("wb", suffix=".py", delete=False) as tf:
+      tf.write(src_bytes)
+      path = tf.name
+    try:
+      r = subprocess.run(
+        [sys.executable, path], capture_output=True, text=True, timeout=60
+      )
+      return r.returncode
+    finally:
+      os.unlink(path)
+
+  def multi_fixture(n_checks: int) -> bytes:
+    replay = ""
+    for i in range(n_checks):
+      a0, a1, a2 = 3 - 5 * i, 5 + i, 7 - 2 * i
+      replay += f"    r = func_t({a0}, {a1}, {a2})\n"
+      # The originals are stale guesses, as in the generated flow: the
+      # recalibration re-derives each from a run.
+      replay += f"    r = _in_check_chksum({11 * i + 123}, r)\n"
+    return (
+      "def _in_check_chksum(expected, actual):\n"
+      "    if expected != actual:\n"
+      "        raise ValueError('@check_chksum mismatch')\n"
+      "    return actual\n"
+      "\n"
+      "def func_t(pa0, pa1, pa2):\n"
+      "    v__chk = 0\n"
+      "    v__chk = (v__chk + pa0)\n"
+      "    v__chk = (v__chk + pa1)\n"
+      "    v__chk = (v__chk + pa2)\n"
+      "    return v__chk\n"
+      "\n"
+      "def main():\n" + replay + "    return 0\n"
+      "\n"
+      'if __name__ == "__main__":\n'
+      "    import sys\n"
+      "    sys.exit(main())\n"
+    ).encode("utf-8")
+
+  for n_checks in (2, 3):
+    randomized = mod.randomize_checksum(multi_fixture(n_checks), 42)
+    returncode = run_module(randomized)
+    good = returncode == 0
+    check(
+      f"checksum: every example's expectation recalibrates ({n_checks} checks)",
+      good,
+      f"rc={returncode}\n{randomized.decode('utf-8')}",
+    )
+    ok = ok and good
+    calls = re.findall(r"_in_check_chksum\(-?\d+\s*,\s*r\)", randomized.decode("utf-8"))
+    good = len(calls) == n_checks
+    check(
+      f"checksum: every replay's check call survives ({n_checks} checks)",
+      good,
+      str(calls),
+    )
+    ok = ok and good
+
+  # (b) Edge case: a leaf the recalibration cannot run keeps the addition
+  # chain, whose expectations rysmith calibrated for every example.
+  broken = multi_fixture(3).replace(b"    v__chk = 0\n", b"    v__chk = 0 // 0\n", 1)
+  kept = mod.randomize_checksum(broken, 42)
+  good = kept == broken
+  check(
+    "checksum: failing samples keep the addition chain (3 checks)",
+    good,
+    str(kept == broken),
+  )
+  ok = ok and good
+
+  return ok
+
+
 def main():
   if len(sys.argv) < 3:
     print("usage: run_codoku_tests.py <codoku.py> <rysmith>")
@@ -2327,6 +2562,8 @@ def main():
   sentinel_unit_tests_pass(ccommon, chk_mod)
   fine_grained_unit_tests_pass(ccommon, chk_mod, mod)
   checksum_unit_tests_pass(ccommon, chk_mod, mod)
+  multi_example_tests_pass(ccommon, chk_mod)
+  multi_example_checksum_tests_pass(ccommon, chk_mod, mod)
 
   with tempfile.TemporaryDirectory(prefix="codoku_gen_") as workdir:
     # Mirror the image layout: codoku + vendored modules + rysmith in one dir.
@@ -2361,6 +2598,7 @@ def main():
     # (2) The puzzle uses <FILL_XXX> tokens and the codoku check command.
     with open(puzzle) as f:
       ptext = f.read()
+
     check(
       "puzzle uses <FILL_XXX> tokens",
       "<FILL_VAR>" in ptext or "<FILL_CONST>" in ptext or "<FILL_OP>" in ptext,
@@ -2482,7 +2720,10 @@ def main():
         try:
           gt_path = cand_dir / "puzzle.gt.py"
           trace, rc = chk_mod.run_dumps_trace(gt_path, timeout=60)
-          trace_ok = rc == 0 and trace == path_blocks
+          # The harness replays the leaf once per example, so the
+          # ground-truth trace is the prescribed path once per example.
+          n_examples = chk_mod.count_harness_examples(ptext)
+          trace_ok = rc == 0 and trace == path_blocks * n_examples
         except RuntimeError:
           trace_ok = False
 

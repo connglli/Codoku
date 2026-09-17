@@ -6,7 +6,7 @@ Codoku (short for *code sudoku*) offers renewable challenges for coding agents. 
 A puzzle masks a generated Python function with **typed cells** (`<FILL_*>` marks): identifiers, function names, numeric constants, operators, control keywords, and CFG labels. A solution fills every cell subject to global semantic constraints:
 
 - **Static**: the completion parses and compiles, matches the declared control-flow graph, and draws each constant from the constant table at exactly its listed counts (or live and dead counts if enabled; `2` and `2.0` count as distinct).
-- **Dynamic**: running it on the given input follows the prescribed execution path block-for-block and returns the expected output.
+- **Dynamic**: the prescribed run replays the harness examples, tracing the execution path block-for-block and checking each replay's expected output.
 
 Each choice can ripple through later statements, branches, loops, or the output, so locally valid fills may still invalidate the whole solution, while valid solutions are sparse in a large search space. Every puzzle ships with a witness solution, so at least one valid filling exists; the checker accepts *any* completion satisfying the constraints, not just the witness. New puzzles are generated from scratch by semantic reification, so fresh challenges can always be minted after model training.
 

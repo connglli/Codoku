@@ -29,7 +29,7 @@ Like [README.md](./README.md), this project centers on Codoku. The RefractIR par
 
 ## Puzzle at a Glance
 
-+ A puzzle is a generated leaf: a random Python function from `rysmith --target python`, wrapped in a fixed `@main` harness that checks the checksum, and carry the guarded memory model from [codokus/codoku_preamble.py](./codokus/codoku_preamble.py).
++ A puzzle is a generated leaf: a random Python function from `rysmith --target python --n-examples 3`, wrapped in a fixed `@main` harness that replays the leaf once per example (three by default) and checks each replay's checksum, and carry the guarded memory model from [codokus/codoku_preamble.py](./codokus/codoku_preamble.py). Every example re-solves the same symbolic template on the prescribed path, so the run traces that path once per example.
 + Cells: masking is a lossy, token-level rewrite; each cell stands for a *kind* of element, not a specific one:
 
 | Cell | What it hides |

@@ -13,7 +13,7 @@ Checks performed in strict order from easiest to hardest to reason about:
   Stage 4 - FAIL_COMPILE    : Compile (solution fails to compile).
   Stage 5 - FAIL_CFG        : CFG topology matches the declared //@ CFG_EDGE: markers exactly.
   Stage 6 - FAIL_TIMEOUT    : The solution run exceeded the 5s execution cap.
-  Stage 7 - FAIL_PATH       : Execution did not follow the prescribed path exactly.
+  Stage 7 - FAIL_PATH       : Execution did not follow the prescribed path once per harness example.
   Stage 8 - FAIL_OUTPUT     : check_chksum reports a wrong result (non-zero exit).
   Stage 9 - FAIL_FILL_CONST : Constant budget live/dead split mismatch.
 
@@ -35,6 +35,7 @@ from codoku_common import (
   build_python_cfg,
   collect_canonical_cells,
   collect_python_leaf_locals,
+  count_harness_examples,
   find_python_block_comments,
   find_python_leaf_function,
   get_python_maskable_statements,
@@ -692,7 +693,10 @@ def check(puzzle: str, solution: str) -> None:
     trace, exit_code = run_python_solution(sol_path)
   finally:
     os.unlink(sol_path)
-  check_path(trace, req.expected_path)
+  # The harness replays the leaf once per example, so the trace is the
+  # prescribed path once per harness example; the checksum output anchors
+  # every replay.
+  check_path(trace, req.expected_path * count_harness_examples(puzzle_text))
   check_output(exit_code)
 
   # -------------------------------------------------------------------------
