@@ -16,6 +16,7 @@ SOLVER ?= bitwuzla
 INSTALL_PREFIX ?= /usr/local
 
 CXXFLAGS = -std=c++20 -Iinclude -Wall -Wextra -O2
+DEPFLAGS = -MMD -MP
 LDFLAGS =
 ARFLAGS = rcs
 
@@ -191,6 +192,11 @@ LIBRARY_OBJS = $(COMMON_OBJS) \
                $(SOLVER_CORE_SRCS:.cpp=.o) \
                $(SOLVER_IMPL_OBJ)
 
+DEPS = $(COMMON_OBJS:.o=.d) $(TEST_OBJS:.o=.d) $(INTERP_OBJS:.o=.d) \
+       $(COMPILER_OBJS:.o=.d) $(SOLVER_OBJS:.o=.d) $(RYSMITH_OBJS:.o=.d) \
+       $(RYLINK_OBJS:.o=.d) $(RYTWIN_OBJS:.o=.d)
+-include $(DEPS)
+
 .PHONY: all clean test test-unit test-frontend test-analysis test-interp test-backends test-cross-validation test-solver test-reify cross-validation build install
 
 all: $(TARGET_INTERP) $(TARGET_COMPILER) $(TARGET_SOLVER) $(TARGET_RYSMITH) $(TARGET_RYLINK) $(TARGET_RYTWIN)
@@ -218,7 +224,7 @@ $(TARGET_RYTWIN): $(COMMON_OBJS) $(RYTWIN_OBJS)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
 
 %.o: %.cpp
-	$(CXX) $(CXXFLAGS) -c -o $@ $<
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 build: all $(LIB_DIR)/$(LIB_NAME)
 	mkdir -p $(BIN_DIR) $(INC_DIR)
@@ -240,6 +246,7 @@ $(LIB_DIR)/$(LIB_NAME): $(LIBRARY_OBJS)
 clean:
 	rm -f $(COMMON_OBJS) $(TEST_OBJS) $(INTERP_OBJS) $(COMPILER_OBJS) $(SOLVER_OBJS) $(RYSMITH_OBJS) $(RYLINK_OBJS) $(RYTWIN_OBJS) $(TARGET_INTERP) $(TARGET_COMPILER) $(TARGET_SOLVER) $(TARGET_RYSMITH) $(TARGET_RYLINK) $(TARGET_RYTWIN)
 	rm -rf $(BUILD_DIR)
+	find src alivesmt -name "*.d" -delete
 	find . -name "*.gcno" -delete
 	find . -name "*.gcda" -delete
 	find . -name "*.gcov" -delete
