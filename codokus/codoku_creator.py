@@ -939,7 +939,8 @@ CHECKSUM_OPS: tuple[bytes, ...] = (
   b">>",
 )
 CHECKSUM_SAMPLE_ATTEMPTS = 20
-CHECKSUM_LITERAL_LIMIT = 32  # decimal characters of the expected checksum
+CHECKSUM_LITERAL_LIMIT_MIN = 5  # min decimal digits of a shipped checksum
+CHECKSUM_LITERAL_LIMIT_MAX = 32  # max decimal characters of the expected checksum
 CHECKSUM_RUN_TIMEOUT = 5.0  # matches the checker's execution cap
 
 
@@ -1091,11 +1092,10 @@ CHECKSUM_COEFF_LIMIT = 10**4
 
 
 def _accept_checksum_values(values: list[int]) -> bool:
-  """Every expected checksum is printable and unique: one harness replay
-  that collapses onto a neighbour's checksum shrinks the case below its
-  example count, and a too large value overflows the `_in_check_chksum`
-  literal, so either budget breach rejects the case."""
-  if any(len(str(value)) > CHECKSUM_LITERAL_LIMIT for value in values):
+  """Every expected checksum is printable, non-trivial, and unique."""
+  if any(len(str(abs(value))) < CHECKSUM_LITERAL_LIMIT_MIN for value in values):
+    return False
+  if any(len(str(value)) > CHECKSUM_LITERAL_LIMIT_MAX for value in values):
     return False
   return len(set(values)) == len(values)
 
@@ -1503,8 +1503,8 @@ def insert_global_chksum(
   operands are available there; each call passes the running `_g[0]` in, so
   every call adds all the findable variables without ever reading an
   `_UNDEF`/`_PAD` slot. Return None when the instrumented ground truth
-  cannot run; degrades to *src_bytes* when the checksum randomization kept
-  the addition chain (no function)."""
+  cannot run or its accumulated `_g` total is trivially guessable; degrades
+  to *src_bytes* when the checksum randomization kept the addition chain."""
   if chksum_every < 1:
     raise RuntimeError("chksum_every must be at least 1")
   if not operands:
@@ -1591,7 +1591,7 @@ def insert_global_chksum(
   candidate = apply_replacements(src_bytes, replacements).decode("utf-8")
 
   expected = _run_expected_global(candidate)
-  if expected is None or len(str(expected)) > CHECKSUM_LITERAL_LIMIT:
+  if expected is None or not _accept_checksum_values([expected]):
     return None
   final, anchored = GLOBAL_CHKSUM_PLACEHOLDER_RE.subn(
     f"_in_check_chksum({expected}, _g[0])", candidate, count=1

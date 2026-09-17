@@ -3265,42 +3265,41 @@ def global_chksum_tests_pass(ccommon, chk_mod, mod) -> bool:
   ok = ok and good
 
   # K=2 chooses b0 and b2, where not every operand is available (v9 unbound
-  # at b0; t0's slot still `_UNDEF` at both): no mid-path call, but the end
-  # anchor still checks the exit calls' accumulated total.
+  # at b0; t0's slot still `_UNDEF` at both): no mid-path call qualifies, so
+  # the accumulated `_g` total stays a trivial zero and the candidate is
+  # rejected for resampling by the outer generate() loop.
   try:
     instrumented = mod.insert_global_chksum(
       extracted, "entry -> b0 -> b1 -> b2 -> b3 -> exit", 2, operands
     )
   except Exception as exc:  # noqa: BLE001
-    check("gchk: instrumented module built", False, str(exc))
+    check("gchk: no qualifying block rejects the trivial zero", False, str(exc))
     return ok
-  if instrumented is None:
-    check("gchk: instrumented module built", False, "returned None")
-    return ok
-  itext = instrumented.decode("utf-8")
-  call_sites = re.findall(r"_g\[0\] = _cast_int\(_in_global_chksum\(_g\[0\], ", itext)
-  global_anchor = re.findall(r"_in_check_chksum\(-?\d+, _g\[0\]\)", itext)
-  harness_anchors = chk_mod.count_harness_examples(itext)
-  good = (
-    len(call_sites) == 0
-    and len(global_anchor) == 1
-    and harness_anchors == 2
-    and len(re.findall(r"    r = _in_check_chksum\(-?\d+, r\)", itext)) == 2
-  )
+  good = instrumented is None
   check(
-    "gchk: no qualifying block keeps the end-of-main check alone",
+    "gchk: no qualifying block rejects the trivial zero",
     good,
-    f"calls={len(call_sites)} anchor={global_anchor} harness={harness_anchors}",
+    "returned bytes" if instrumented is not None else "",
   )
   ok = ok and good
 
-  # (5) Behavior: the instrumented module (no qualifying block under K=2,
-  # so only the end-of-main anchor) exits 0 and the sampling is
-  # deterministic. A module whose checksum randomization kept the
-  # addition chain degrades untouched.
+  # (5) Behavior: the K=1 instrumented module (one qualifying call at b3)
+  # exits 0 and the sampling is deterministic. A module whose checksum
+  # randomization kept the addition chain degrades untouched.
+  every_visit = mod.insert_global_chksum(
+    extracted, "entry -> b0 -> b1 -> b2 -> b3 -> exit", 1, operands
+  )
+  if every_visit is None:
+    check("gchk: the instrumented module runs clean", False, "returned None")
+    return ok
+  itext = every_visit.decode("utf-8")
   anchor_match = re.search(r"_in_check_chksum\((-?\d+), _g\[0\]\)", itext)
-  rc = run_module(instrumented)
-  good = anchor_match is not None and rc == 0
+  rc = run_module(every_visit)
+  good = (
+    anchor_match is not None
+    and rc == 0
+    and len(str(abs(int(anchor_match.group(1))))) >= mod.CHECKSUM_MIN_DIGITS
+  )
   check(
     "gchk: the instrumented module runs clean",
     good,
@@ -3309,10 +3308,10 @@ def global_chksum_tests_pass(ccommon, chk_mod, mod) -> bool:
   ok = ok and good
 
   again = mod.insert_global_chksum(
-    extracted, "entry -> b0 -> b1 -> b2 -> b3 -> exit", 2, operands
+    extracted, "entry -> b0 -> b1 -> b2 -> b3 -> exit", 1, operands
   )
-  good = again == instrumented
-  check("gchk: repeated insertion is deterministic", good, str(again == instrumented))
+  good = again == every_visit
+  check("gchk: repeated insertion is deterministic", good, str(again == every_visit))
   ok = ok and good
 
   degrades = mod.insert_global_chksum(
@@ -3330,9 +3329,7 @@ def global_chksum_tests_pass(ccommon, chk_mod, mod) -> bool:
   # finally available (t0's slot concrete after its b2 store); a zero
   # stride and a missing harness anchor fail closed; leaf extraction
   # keeps helper/builtin callees out of the operand leaves.
-  every_visit = mod.insert_global_chksum(
-    extracted, "entry -> b0 -> b1 -> b2 -> b3 -> exit", 1, operands
-  )
+  # (every_visit was built in (5) above.)
   every_text = every_visit.decode("utf-8") if every_visit else ""
   every_calls = len(
     re.findall(r"_g\[0\] = _cast_int\(_in_global_chksum\(_g\[0\], ", every_text)
@@ -3418,7 +3415,8 @@ def global_chksum_tests_pass(ccommon, chk_mod, mod) -> bool:
   ok = ok and good
 
   # A main harness indented by 6 spaces carries its end anchor at 6 spaces
-  # and the instrumented module runs clean.
+  # and the instrumented module runs clean (K=1 so b3 qualifies; K=2 has
+  # no qualifying call and rejects as a trivial zero).
   indented = (
     GLOBAL_CHKSUM_SRC.replace(b"    r = func_t", b"      r = func_t")
     .replace(b"    r = _in_check_chksum", b"      r = _in_check_chksum")
@@ -3433,7 +3431,7 @@ def global_chksum_tests_pass(ccommon, chk_mod, mod) -> bool:
     check("gchk: a 6-space main harness extracts", False, "returned None")
     return ok
   indented_instrumented = mod.insert_global_chksum(
-    indented_extracted, "entry -> b0 -> b1 -> b2 -> b3 -> exit", 2, operands
+    indented_extracted, "entry -> b0 -> b1 -> b2 -> b3 -> exit", 1, operands
   )
   iitext = indented_instrumented.decode("utf-8") if indented_instrumented else ""
   anchors6 = re.findall(r"\n[ ]*_in_check_chksum\(-?\d+, _g\[0\]\)", iitext)
@@ -3445,6 +3443,40 @@ def global_chksum_tests_pass(ccommon, chk_mod, mod) -> bool:
   check("gchk: a 6-space harness runs clean", good, f"rc={rc}")
   ok = ok and good
 
+  return ok
+
+
+def global_floor_unit_tests_pass(mod) -> bool:
+  """Every shipped checksum must be non-trivial: fewer than
+  CHECKSUM_MIN_DIGITS decimal digits (including the no-qualifying-call
+  zero) rejects the candidate so generate() resamples. The floor lives in
+  _accept_checksum_values, so it gates `^exit` replay checksums and the
+  accumulated `_g` total alike."""
+  ok = True
+  cases = [
+    ([0], False),
+    ([2], False),
+    ([101], False),
+    ([-101], False),
+    ([9999], False),
+    ([-9999], False),
+    ([10000], True),
+    ([-10000], True),
+    ([10**31], True),
+    ((-(10**31),), False),
+    ([5472002543803354666], True),
+    ([5472002543803354666, 42], False),
+    ([5472002543803354666, 5472002543803354667], True),
+  ]
+  for values, want in cases:
+    got = mod._accept_checksum_values(list(values))
+    good = got is want
+    check(f"gchk-floor: _accept_checksum_values({values}) is {want}", good, str(got))
+    ok = ok and good
+  for values in ([10**40],):
+    good = mod._accept_checksum_values(values) is False
+    check(f"gchk-floor: _accept_checksum_values({values}) rejects", good, "")
+    ok = ok and good
   return ok
 
 
@@ -3695,6 +3727,7 @@ def main():
   multi_example_checksum_tests_pass(ccommon, chk_mod, mod)
   checksum_replay_distinct_tests_pass(ccommon, chk_mod, mod)
   global_chksum_tests_pass(ccommon, chk_mod, mod)
+  global_floor_unit_tests_pass(mod)
   example_count_tests_pass(ccommon, chk_mod, mod)
 
   with tempfile.TemporaryDirectory(prefix="codoku_gen_") as workdir:
