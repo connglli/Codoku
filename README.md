@@ -32,7 +32,7 @@ codoku create --profile small --seed 42 -o tutorial/
 
 Creation samples a profile until a puzzle passes acceptance: `small` straight-line functions with short paths, `medium` loop-driven functions with moderate paths, `large` branching functions with deep loops (`small`/`easy` and `large`/`hard` are aliases).
 
-## Write Codokus
+## Solve Codokus
 
 Fill in every cell and save the full program to `solution.py`. Agents may use any tools: running candidates, invoking the checker, writing their own search, but no tool reveals which choice belongs in which cell. What counts is finding a valid solution within budget.
 
