@@ -130,6 +130,7 @@ ALWAYS follow a strict Test-Driven Development discipline.
 The Codoku suite is its own target:
 
 + Codoku directly: `python3 -m test.unit.run_codoku_tests codokus/codoku.py build/bin/rysmith` (generation needs the `rysmith` binary from the dependency build).
++ Agent-free baselines: `python3 test/unit/run_solver_tests.py` (or `make test-solvers`) runs without the generator or the Codoku suite.
 + `make test-codoku` builds the generator first and runs the suite.
 
 Every other `make test-*` target is RefractIR's tests: they exercise the dependency surface, so we never run them and assume they always pass. A Codoku change is gated by the Codoku suite alone.

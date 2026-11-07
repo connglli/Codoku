@@ -145,6 +145,7 @@ TARGET_RYSMITH = rysmith
 TARGET_RYLINK = rylink
 TARGET_RYTWIN = rytwin
 TARGET_CODOKU = codoku
+CODOKU_SOLVER_SRCS = codokus/codoku_solver.py $(wildcard codokus/solvers/*.py)
 
 BUILD_DIR = build
 BIN_DIR = $(BUILD_DIR)/bin
@@ -198,7 +199,7 @@ DEPS = $(COMMON_OBJS:.o=.d) $(TEST_OBJS:.o=.d) $(INTERP_OBJS:.o=.d) \
        $(RYLINK_OBJS:.o=.d) $(RYTWIN_OBJS:.o=.d)
 -include $(DEPS)
 
-.PHONY: all clean test test-unit test-codoku test-frontend test-analysis test-interp test-backends test-cross-validation test-solver test-reify cross-validation build install
+.PHONY: all clean test test-unit test-codoku test-solvers test-frontend test-analysis test-interp test-backends test-cross-validation test-solver test-reify cross-validation build install
 
 all: $(TARGET_INTERP) $(TARGET_COMPILER) $(TARGET_SOLVER) $(TARGET_RYSMITH) $(TARGET_RYLINK) $(TARGET_RYTWIN) $(TARGET_CODOKU)
 
@@ -214,7 +215,7 @@ $(TARGET_SOLVER): $(COMMON_OBJS) $(SOLVER_OBJS)
 $(TARGET_RYSMITH): $(COMMON_OBJS) $(RYSMITH_OBJS)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
 
-$(TARGET_CODOKU): codokus/codoku.py
+$(TARGET_CODOKU): codokus/codoku.py $(CODOKU_SOLVER_SRCS)
 	ln -sf codokus/codoku.py $(TARGET_CODOKU)
 	chmod +x $(TARGET_CODOKU)
 
@@ -241,13 +242,16 @@ build: all $(LIB_DIR)/$(LIB_NAME)
 	cp -f codokus/codoku_common.py $(BIN_DIR)/codoku_common.py
 	cp -f codokus/codoku_preamble.py $(BIN_DIR)/codoku_preamble.py
 	cp -f codokus/codoku_complexity.py $(BIN_DIR)/codoku_complexity.py
+	cp -f codokus/codoku_solver.py $(BIN_DIR)/codoku_solver.py
+	mkdir -p $(BIN_DIR)/solvers
+	cp -f codokus/solvers/*.py $(BIN_DIR)/solvers/
 	cp -r include/* $(INC_DIR)/
 
 install: build
 	mkdir -p $(INSTALL_PREFIX)/bin
 	mkdir -p $(INSTALL_PREFIX)/lib
 	mkdir -p $(INSTALL_PREFIX)/include/refractir
-	cp -fp $(BIN_DIR)/* $(INSTALL_PREFIX)/bin/
+	cp -rfp $(BIN_DIR)/* $(INSTALL_PREFIX)/bin/
 	cp -fp $(LIB_DIR)/* $(INSTALL_PREFIX)/lib/
 	cp -rfp $(INC_DIR)/* $(INSTALL_PREFIX)/include/refractir/
 
@@ -280,6 +284,10 @@ test-unit: $(TARGET_INTERP) $(TARGET_COMPILER) $(TARGET_SOLVER) $(TARGET_RYSMITH
 # test-unit so a Codoku change is gated by its own target alone.
 test-codoku: $(TARGET_CODOKU) $(TARGET_RYSMITH)
 	$(PY) -m test.unit.run_codoku_tests ./$(TARGET_CODOKU) ./$(TARGET_RYSMITH)
+
+# Codoku solvers: the baseline solvers
+test-codoku-solvers:
+	$(PY) test/unit/run_solver_tests.py
 
 # Integration tests, grouped by the component under test. Each component
 # target is callable on its own (e.g. `make test-frontend`) so a developer

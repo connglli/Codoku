@@ -5,11 +5,13 @@ Subcommands:
   create  - generate one puzzle (codoku_creator)
   check   - validate a solution (codoku_checker)
   analyze - report a puzzle's realized metrics and complexity estimate
+  solve   - run an agent-free solver (codoku_solver)
 
 Usage:
   codoku create [--profile small|medium|large] [--seed N] [-o DIR]
   codoku check <puzzle> [<solution>]
   codoku analyze [--json] [--ground-truth GT] [puzzle]
+  codoku solve [--solver random|full-smt|template-smt|all] <puzzles...>
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ from pathlib import Path
 from codoku_checker import main as check_main
 from codoku_complexity import main as analyze_main
 from codoku_creator import DEFAULT_MAX_ATTEMPTS, PROFILES, generate
+from codoku_solver import main as solve_main
 
 
 def positive_int(value: str) -> int:
@@ -110,6 +113,13 @@ def build_parser() -> argparse.ArgumentParser:
     "heuristic complexity estimate.",
   )
 
+  subparsers.add_parser(
+    "solve",
+    help="run an agent-free solver",
+    description="Run a random, whole-puzzle SMT, or template-enumeration "
+    "solver on one or more puzzles.",
+  )
+
   return parser
 
 
@@ -120,6 +130,8 @@ def main() -> int:
     return check_main(argv[1:])
   if argv and argv[0] == "analyze":
     return analyze_main(argv[1:])
+  if argv and argv[0] == "solve":
+    return solve_main(argv[1:])
   if argv and argv[0] in ("-h", "--help"):
     parser.parse_args(["-h"])
     return 0

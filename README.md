@@ -36,6 +36,19 @@ Creation samples a profile until a puzzle passes acceptance: `small` straight-li
 
 Fill in every cell and save the full program to `solution.py`. Agents may use any tools: running candidates, invoking the checker, writing their own search, but no tool reveals which choice belongs in which cell. What counts is finding a valid solution within budget.
 
+### Agent-free solvers
+
+```bash
+codoku solve --solver random --time-limit 60 --max-attempts 200 tutorial/puzzle.py
+codoku solve --solver full-smt --time-limit 60 --solver-timeout 10 tutorial/puzzle.py
+codoku solve --solver template-smt --time-limit 60 --solver-timeout 10 tutorial/puzzle.py
+codoku solve --solver all --time-limit 60 --max-attempts 200 tutorial/puzzle.py
+```
+
+### Agent solvers
+
+An agent solver is a coding agent that receives the puzzle and may use any available tool: reading files, running candidate solutions, invoking the checker, or writing its own search. The checker reports the first violated constraint, so the agent can repair candidates iteratively. The benchmark measures whether the agent finds a valid filling within a fixed time, cost, and request budget.
+
 ## Check Codokus
 
 ```bash
