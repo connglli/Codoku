@@ -69,9 +69,9 @@ RUN git clone --depth 1 --branch 0.9.1 \
     && cd build && ninja install \
     && rm -rf /tmp/bitwuzla-src
 
-# - ReifyPuzzle toolchain + codoku -------------------------
-RUN git clone --depth 1 --branch codokus \
-      https://github.com/connglli/ReifyPuzzle /tmp/reifypuzzle-src \
+# - Codoku toolchain -----------------------------------------
+RUN git clone --depth 1 --branch main \
+      https://github.com/connglli/Codoku /tmp/reifypuzzle-src \
     && cd /tmp/reifypuzzle-src \
     # Build and install the toolchain
     && mkdir -p /opt/rypuz \
