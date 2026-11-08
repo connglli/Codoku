@@ -11,7 +11,6 @@ shared wrapper checks every concrete candidate.
 from __future__ import annotations
 
 import argparse
-import re
 import sys
 import time
 from pathlib import Path
@@ -48,12 +47,6 @@ class TemplateSMTBaseline(Baseline):
   def propose(self, remaining: float) -> str | None:
     if self._const_cells and not self.model.harness_examples:
       raise UnsupportedPuzzle("no harness example could be parsed")
-    if any(
-      not re.fullmatch(r"-?\d+", value)
-      for cell in self._const_cells
-      for value in cell.domain
-    ):
-      raise UnsupportedPuzzle("floating-point constant")
     global_deadline = time.monotonic() + remaining
     while time.monotonic() < global_deadline:
       if self._current_template is None:

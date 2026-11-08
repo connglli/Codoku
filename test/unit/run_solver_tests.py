@@ -534,6 +534,105 @@ def test_codoku_solve_cli() -> None:
     )
 
 
+FLOAT_PUZZLE = """\
+#//@ CFG_EDGE: entry -> b0
+#//@ CFG_EDGE: b0 -> exit
+#//@ EXEC_PATH: entry -> b0 -> exit
+#//@ <FILL_CONST>: 1.5 1
+
+
+def _in_check_chksum(expected, actual):
+    if expected != actual:
+        raise RuntimeError("mismatch")
+    return actual
+
+
+def codoku():
+    x = <FILL_CONST>
+    # ^entry
+    if __import__("os").environ.get("DUMP_TRACE"):
+        print("^entry:")
+    # ^b0
+    if __import__("os").environ.get("DUMP_TRACE"):
+        print("^b0:")
+    y = x + 2.5
+    # ^exit
+    if __import__("os").environ.get("DUMP_TRACE"):
+        print("^exit:")
+    return int(y)
+
+
+def main():
+    r = codoku()
+    r = _in_check_chksum(4, r)
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main())
+"""
+
+PREENTRY_LOOP_PUZZLE = """\
+#//@ CFG_EDGE: entry -> exit
+#//@ EXEC_PATH: entry -> exit
+#//@ <FILL_CONST>: 5 1
+
+
+def _in_check_chksum(expected, actual):
+    if expected != actual:
+        raise RuntimeError("mismatch")
+    return actual
+
+
+def codoku():
+    x = <FILL_CONST>
+    while True:
+        # ^entry
+        if __import__("os").environ.get("DUMP_TRACE"):
+            print("^entry:")
+        break
+    # ^exit
+    if __import__("os").environ.get("DUMP_TRACE"):
+        print("^exit:")
+    return x
+
+
+def main():
+    r = codoku()
+    r = _in_check_chksum(5, r)
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main())
+"""
+
+
+def test_support_extensions(common_mod, smt_mod) -> None:
+  if shutil.which("z3") is None:
+    check("support: skipped (z3 unavailable)", True)
+    return
+  with tempfile.TemporaryDirectory(prefix="codoku_solver_support_") as tmpdir:
+    for name, text in (
+      ("float", FLOAT_PUZZLE),
+      ("preentry-loop", PREENTRY_LOOP_PUZZLE),
+    ):
+      puzzle = os.path.join(tmpdir, f"{name}.py")
+      write_puzzle(puzzle, text)
+      model = common_mod.PuzzleModel.from_file(puzzle)
+      solver = smt_mod.FullSMTBaseline(
+        model, common_mod.BaselineOptions(seed=1, solver_timeout=2.0)
+      )
+      result = solver.run(time_limit=5.0, max_attempts=1)
+      check(
+        f"support: {name} has no unsupported/error status",
+        result.status not in {"unsupported", "error"},
+        f"{result.status} {result.message}",
+      )
+
+
 def test_wrapper_budget(common_mod, random_mod) -> None:
   with tempfile.TemporaryDirectory(prefix="codoku_solver_budget_") as tmpdir:
     puzzle = os.path.join(tmpdir, "puzzle.py")
@@ -562,6 +661,7 @@ def main() -> int:
   test_ternary_chain(common_mod, smt_mod, template_mod)
   test_branch_path(common_mod, smt_mod)
   test_pointer_arithmetic(common_mod, smt_mod, template_mod)
+  test_support_extensions(common_mod, smt_mod)
   test_codoku_solve_cli()
   test_wrapper_budget(common_mod, random_mod)
   failures = [name for name, ok, _ in results if not ok]

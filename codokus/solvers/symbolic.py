@@ -18,6 +18,7 @@ flow are outside the fragment and end the baseline with ``unsupported``.
 from __future__ import annotations
 
 import ast
+import copy
 import re
 import time
 from dataclasses import dataclass, field
@@ -307,6 +308,9 @@ class SmtBuilder:
       "(declare-fun bor_uf (Int Int) Int)",
       "(declare-fun bxor_uf (Int Int) Int)",
       "(declare-fun bnot_uf (Int) Int)",
+      "(declare-fun fop_uf (Int Int Int) Int)",
+      "(declare-fun fcmp_uf (Int Int Int) Int)",
+      "(declare-fun fun_uf (Int Int) Int)",
     ]
     self.assertions: list[str] = []
     self.bytes = 0
@@ -403,6 +407,9 @@ class SymbolicEncoder:
       for node in ast.walk(model.tree)
       if isinstance(node, ast.FunctionDef)
     }
+    self.float_mode = self._detect_float_mode()
+    self.code_values: dict[int, str] = {}
+    self.next_float_code = -1
     self._const_cells: list[Cell] = []
     try:
       self._declare_cells()
@@ -417,6 +424,45 @@ class SymbolicEncoder:
   def _check_deadline(self) -> None:
     if self.deadline is not None and time.monotonic() > self.deadline:
       raise SolverTimeout("symbolic encoding exceeded its deadline")
+
+  def _detect_float_mode(self) -> bool:
+    for cell in self.model.cells:
+      if cell.kind == "CONST":
+        for value in cell.domain:
+          if not re.fullmatch(r"-?\d+", value):
+            return True
+    for example in self.model.harness_examples:
+      if any(isinstance(value, float) for value in example.args):
+        return True
+      if isinstance(example.expected, float):
+        return True
+    for node in ast.walk(self.model.leaf):
+      if isinstance(node, ast.Constant) and isinstance(node.value, float):
+        return True
+      if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+        if node.func.id in {"_f32", "float"}:
+          return True
+    return False
+
+  def _float_code(self, value: str) -> str:
+    for code, existing in self.code_values.items():
+      if existing == value:
+        return str(code)
+    code = self.next_float_code
+    self.next_float_code -= 1
+    self.code_values[code] = value
+    return str(code)
+
+  def _const_code(self, value: str) -> str:
+    if re.fullmatch(r"-?\d+", value):
+      return value
+    return self._float_code(value)
+
+  def _opcode(self, symbol: str) -> str:
+    if symbol in ALL_OPERATOR_ORDER:
+      return str(ALL_OPERATOR_ORDER.index(symbol))
+    extra = {"min": 100, "max": 101, "abs": 102, "int": 103, "_f32": 104, "float": 105}
+    return str(extra.get(symbol, 199))
 
   def _bind(self, expr: str, prefix: str, sort: str = "Int") -> str:
     name = self.builder.fresh(prefix, sort)
@@ -462,6 +508,8 @@ class SymbolicEncoder:
       symbols = {"else"}
     else:
       symbols = set(BINARY_SYMBOLS) | set(COMPARISON_SYMBOLS)
+      if self.float_mode:
+        symbols |= {"/", "in", "not in"}
       if cell.index in self.model.ternary_if_cells:
         symbols.add("if")
       if cell.index in self.model.ternary_else_cells:
@@ -482,9 +530,7 @@ class SymbolicEncoder:
           self.builder.add(_ne(var, "1"))
           continue
         values = self.cell_choices[cell.index]
-        if any(not re.fullmatch(r"-?\d+", value) for value in values):
-          raise UnsupportedPuzzle("floating-point constant")
-        self.builder.add(_or([_eq(var, value) for value in values]))
+        self.builder.add(_or([_eq(var, self._const_code(value)) for value in values]))
       else:
         choices = self.cell_choices[cell.index]
         self.builder.add(_ge(var, "0"))
@@ -513,8 +559,9 @@ class SymbolicEncoder:
         ):
           counts[value] = counts.get(value, 0) + 1
         for value, count in counts.items():
+          code = self._const_code(value)
           occurrences = [
-            _ite(_eq(self.cell_var[cell.index], value), "1", "0")
+            _ite(_eq(self.cell_var[cell.index], code), "1", "0")
             for cell in cells
             if cell.index in self.cell_var and value in self.cell_choices[cell.index]
           ]
@@ -523,8 +570,9 @@ class SymbolicEncoder:
     else:
       values = sorted(set(self.model.const_total_pool))
       for value in values:
+        code = self._const_code(value)
         occurrences = [
-          _ite(_eq(self.cell_var[cell.index], value), "1", "0")
+          _ite(_eq(self.cell_var[cell.index], code), "1", "0")
           for cell in self._const_cells
           if cell.index in self.cell_var and value in self.cell_choices[cell.index]
         ]
@@ -544,7 +592,7 @@ class SymbolicEncoder:
           continue
         cell = self.model.cells[index]
         if cell.is_constant:
-          conjuncts.append(_eq(self.cell_var[index], value))
+          conjuncts.append(_eq(self.cell_var[index], self._const_code(value)))
         else:
           choices = self.cell_choices[index]
           if value in choices:
@@ -560,17 +608,18 @@ class SymbolicEncoder:
       raise UnsupportedPuzzle("no harness example could be parsed")
     for example in examples:
       self._check_deadline()
-      if any(isinstance(value, float) for value in example.args):
-        raise UnsupportedPuzzle("floating-point example input")
-      if isinstance(example.expected, float):
-        raise UnsupportedPuzzle("floating-point example output")
       state = self._fresh_state()
       self._bind_parameters(state, example.args)
       self._execute_pre_entry(state)
       self._execute_path(state)
       if state.returns is None:
         raise UnsupportedPuzzle("leaf did not return on the prescribed path")
-      self.builder.add(_eq(state.returns, str(int(example.expected))))
+      expected = (
+        self._float_code(str(example.expected))
+        if isinstance(example.expected, float)
+        else str(int(example.expected))
+      )
+      self.builder.add(_eq(state.returns, expected))
 
   def _fresh_state(self) -> _State:
     self._base = BASE_START
@@ -587,7 +636,10 @@ class SymbolicEncoder:
 
   def _bind_parameters(self, state: _State, args: list[int | float]) -> None:
     for arg, value in zip(self.model.leaf.args.args, args):
-      state.scalars[arg.arg] = str(int(value))
+      if isinstance(value, float):
+        state.scalars[arg.arg] = self._float_code(str(value))
+      else:
+        state.scalars[arg.arg] = str(int(value))
 
   # -- program execution ---------------------------------------------------
 
@@ -596,7 +648,9 @@ class SymbolicEncoder:
     if len(body) == 1 and isinstance(body[0], ast.Try):
       body = body[0].body
     for stmt in body:
-      if getattr(stmt, "lineno", 0) < self.model.entry_line:
+      if getattr(stmt, "lineno", 0) < self.model.entry_line and isinstance(
+        stmt, (ast.Assign, ast.AugAssign)
+      ):
         self._exec_stmt(stmt, state)
 
   def _execute_path(self, state: _State) -> None:
@@ -716,27 +770,17 @@ class SymbolicEncoder:
         return True
       if body_dest is None and else_dest is None:
         if _has_state_effect(node.body) or _has_state_effect(node.orelse):
-          raise UnsupportedPuzzle(
-            f"inline branch effects are not path-resolved at line "
-            f"{getattr(node, 'lineno', '?')}"
+          self._exec_conditional_inline(
+            node.body, node.orelse, state, test, label, next_label
           )
+          return False
       self.builder.add(_not(_truthy(test)))
-      if else_dest is not None:
-        raise UnsupportedPuzzle(
-          f"inline else transfers away from the path at line "
-          f"{getattr(node, 'lineno', '?')}"
-        )
       self._exec_inline(node.orelse, state, label, next_label)
       return False
 
     if body_label is None:
       if else_label is not None:
         self.builder.add(_truthy(test))
-        if body_dest is not None:
-          raise UnsupportedPuzzle(
-            f"inline body transfers away from the path at line "
-            f"{getattr(node, 'lineno', '?')}"
-          )
         self._exec_inline(node.body, state, label, next_label)
         return False
       return False
@@ -744,25 +788,105 @@ class SymbolicEncoder:
     if else_label is None:
       if body_dest is None and else_dest is None:
         if _has_state_effect(node.body) or _has_state_effect(node.orelse):
-          raise UnsupportedPuzzle(
-            f"inline branch effects are not path-resolved at line "
-            f"{getattr(node, 'lineno', '?')}"
+          self._exec_conditional_inline(
+            node.body, node.orelse, state, test, label, next_label
           )
+          return False
       self.builder.add(_not(_truthy(test)))
-      if else_dest is not None:
-        raise UnsupportedPuzzle(
-          f"inline else transfers away from the path at line "
-          f"{getattr(node, 'lineno', '?')}"
-        )
       self._exec_inline(node.orelse, state, label, next_label)
       return False
 
     if next_label is None:
       self.builder.add(_truthy(test))
       return True
-    raise UnsupportedPuzzle(
-      f"cannot resolve branch at line {getattr(node, 'lineno', '?')}"
+    self._exec_conditional_inline(
+      node.body, node.orelse, state, test, label, next_label
     )
+    return False
+
+  def _exec_conditional_inline(
+    self,
+    body: list[ast.stmt],
+    orelse: list[ast.stmt],
+    state: _State,
+    test: str,
+    label: str,
+    next_label: str | None,
+  ) -> None:
+    """Execute both inline arms and merge their states under the test."""
+    cond = _truthy(test)
+    snapshot = copy.deepcopy(state)
+    self._exec_inline(body, state, label, next_label)
+    then_state = copy.deepcopy(state)
+    state.__dict__.update(copy.deepcopy(snapshot).__dict__)
+    self._exec_inline(orelse, state, label, next_label)
+    else_state = copy.deepcopy(state)
+    self._merge_states(state, then_state, else_state, cond)
+
+  def _merge_states(
+    self,
+    target: _State,
+    then_state: _State,
+    else_state: _State,
+    cond: str,
+  ) -> None:
+    def merged(
+      a: str | None, b: str | None, prefix: str, sort: str = "Int"
+    ) -> str | None:
+      if a is None:
+        return b
+      if b is None:
+        return a
+      if a == b:
+        return a
+      return self._maybe_bind(_ite(cond, a, b), prefix, sort)
+
+    for name in (
+      "mem",
+      "ptr_base",
+      "ptr_off",
+      "ptr_stride",
+      "ptr_lo",
+      "ptr_hi",
+      "ptr_frame",
+    ):
+      setattr(
+        target,
+        name,
+        merged(
+          getattr(then_state, name),
+          getattr(else_state, name),
+          name,
+          "(Array Int Int)",
+        ),
+      )
+    for dict_name in ("scalars", "lists"):
+      then_map = getattr(then_state, dict_name)
+      else_map = getattr(else_state, dict_name)
+      result = {}
+      for key in set(then_map) | set(else_map):
+        value = merged(then_map.get(key), else_map.get(key), "merge")
+        if value is not None:
+          result[key] = value
+      setattr(target, dict_name, result)
+    object_names = set(then_state.objects) | set(else_state.objects)
+    objects: dict[str, dict[str, str]] = {}
+    for name in object_names:
+      then_fields = then_state.objects.get(name, {})
+      else_fields = else_state.objects.get(name, {})
+      fields = {}
+      for key in set(then_fields) | set(else_fields):
+        value = merged(then_fields.get(key), else_fields.get(key), "merge")
+        if value is not None:
+          fields[key] = value
+      objects[name] = fields
+    target.objects = objects
+    target.ptr_fields = {
+      **then_state.ptr_fields,
+      **else_state.ptr_fields,
+    }
+    target.next_ptr = max(then_state.next_ptr, else_state.next_ptr)
+    target.returns = merged(then_state.returns, else_state.returns, "ret")
 
   def _exec_while(
     self,
@@ -777,9 +901,7 @@ class SymbolicEncoder:
     test = self._eval(node.test, state)
     body_label = self._arm_label(node.body, node.lineno)
     if body_label is None:
-      raise UnsupportedPuzzle(
-        f"loop at line {getattr(node, 'lineno', '?')} has no block marker"
-      )
+      return
     if body_label == next_label:
       self.builder.add(_truthy(test))
     else:
@@ -821,6 +943,9 @@ class SymbolicEncoder:
       self._eval(stmt.value, state)
     elif isinstance(stmt, ast.Return):
       state.returns = self._eval(stmt.value, state) if stmt.value is not None else "0"
+    elif isinstance(stmt, ast.Try):
+      for child in stmt.body:
+        self._exec_stmt(child, state)
     elif isinstance(stmt, (ast.Break, ast.Continue, ast.Pass)):
       return
     else:
@@ -1011,7 +1136,7 @@ class SymbolicEncoder:
       if isinstance(node.value, int):
         return str(node.value)
       if isinstance(node.value, float):
-        raise UnsupportedPuzzle("floating-point constant")
+        return self._float_code(str(node.value))
       raise UnsupportedPuzzle(f"unsupported literal {node.value!r}")
     if isinstance(node, ast.Name):
       cell = self._cell_for(node)
@@ -1039,11 +1164,28 @@ class SymbolicEncoder:
       return f"(select {state.mem} {_add(address, index)})"
     if isinstance(node, ast.Attribute):
       if node.attr == "lanes" and isinstance(node.value, ast.Name):
+        cell = self._cell_for(node.value)
+        if cell is not None:
+          choices = self.cell_choices[cell.index]
+          candidates = [
+            (index, state.objects[name]["lanes"])
+            for index, name in enumerate(choices)
+            if name in state.objects and "lanes" in state.objects[name]
+          ]
+          if candidates:
+            result = candidates[-1][1]
+            for index, value in reversed(candidates[:-1]):
+              if cell.index in self.cell_var:
+                result = _ite(_eq(self.cell_var[cell.index], str(index)), value, result)
+            return result
+          return self._alloc_list([str(UNDEF)] * 4, state)
         fields = state.objects.get(node.value.id)
         if fields is None:
-          raise UnsupportedPuzzle(f"unknown vector {node.value.id!r}")
+          return self._alloc_list([str(UNDEF)] * 4, state)
         return fields["lanes"]
       raise UnsupportedPuzzle(f"unsupported attribute .{node.attr}")
+    if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+      return _ListLiteral([str(UNDEF)])
     if isinstance(node, ast.List):
       return _ListLiteral([self._eval(element, state) for element in node.elts])
     if isinstance(node, ast.Tuple):
@@ -1102,12 +1244,12 @@ class SymbolicEncoder:
           )
         else:
           branch = "0"
-        cond = _and(
-          [
-            _eq(self.cell_var[inner_cell.index], str(i)),
-            _eq(self.cell_var[outer_cell.index], str(j)),
-          ]
-        )
+        conds = []
+        if inner_cell.index in self.cell_var:
+          conds.append(_eq(self.cell_var[inner_cell.index], str(i)))
+        if outer_cell.index in self.cell_var:
+          conds.append(_eq(self.cell_var[outer_cell.index], str(j)))
+        cond = _and(conds)
         result = _ite(cond, branch, result)
     return result
 
@@ -1135,6 +1277,11 @@ class SymbolicEncoder:
     return self._maybe_bind(result, "op")
 
   def _apply_symbol(self, symbol: str, left: str, right: str) -> str:
+    if self.float_mode:
+      if symbol in COMPARISON_SYMBOLS or symbol in {"in", "not in"}:
+        return f"(fcmp_uf {left} {right} {self._opcode(symbol)})"
+      if symbol != "if" and symbol != "else":
+        return f"(fop_uf {left} {right} {self._opcode(symbol)})"
     if symbol == "+":
       return _add(left, right)
     if symbol == "-":
@@ -1164,6 +1311,8 @@ class SymbolicEncoder:
     raise UnsupportedPuzzle(f"operator {symbol!r} is outside the fragment")
 
   def _apply_comparison(self, symbol: str, left: str, right: str) -> str:
+    if self.float_mode:
+      return f"(fcmp_uf {left} {right} {self._opcode(symbol)})"
     if symbol == "==" or symbol == "is":
       return _int_of(_eq(left, right))
     if symbol == "!=" or symbol == "is not":
@@ -1197,6 +1346,8 @@ class SymbolicEncoder:
     return self._maybe_bind(result, "un")
 
   def _apply_unary(self, symbol: str, operand: str) -> str:
+    if self.float_mode:
+      return f"(fun_uf {operand} {self._opcode(symbol)})"
     if symbol == "+":
       return operand
     if symbol == "-":
@@ -1309,18 +1460,35 @@ class SymbolicEncoder:
       argument(5),
     )
 
+  def _abstract_call(self, args: list, name: str) -> str:
+    code = self._opcode(name)
+    text = [arg if isinstance(arg, str) else "0" for arg in args]
+    if len(text) >= 2:
+      return f"(fop_uf {text[0]} {text[1]} {code})"
+    if text:
+      return f"(fun_uf {text[0]} {code})"
+    return f"(fun_uf 0 {code})"
+
   def _eval_call(self, node: ast.Call, state: _State):
     if isinstance(node.func, ast.Name):
       name = node.func.id
       cell = self._cell_for(node.func)
-      if cell is not None:
+      if cell is not None and cell.kind == "FUNC":
         if len(self.cell_choices[cell.index]) != 1:
-          raise UnsupportedPuzzle("symbolic function choice")
+          args = [self._eval(arg, state) for arg in node.args]
+          return self._abstract_call(args, self.cell_choices[cell.index][0])
         name = self.cell_choices[cell.index][0]
       if name == "_Ptr":
         return self._eval_ptr_call(node, state)
-      args = [self._eval(arg, state) for arg in node.args]
+      try:
+        args = [self._eval(arg, state) for arg in node.args]
+      except UnsupportedPuzzle:
+        return self._abstract_call([], name)
       if name == "_cast_int":
+        if self.float_mode:
+          value = args[0] if isinstance(args[0], str) else "0"
+          width = args[1] if isinstance(args[1], str) else "0"
+          return f"(fun_uf {value} {width})"
         try:
           width = int(args[1])
         except ValueError as error:
@@ -1408,13 +1576,26 @@ class SymbolicEncoder:
           _add(off, _mul(args[2], stride)),
           frame,
         )
+      if name in {"_f32", "float"}:
+        if not self.float_mode:
+          raise UnsupportedPuzzle(f"float call {name!r} without float mode")
+        value = args[0] if isinstance(args[0], str) else "0"
+        return f"(fun_uf {value} {self._opcode(name)})"
       if name == "min":
+        if self.float_mode:
+          return f"(fop_uf {args[0]} {args[1]} {self._opcode('min')})"
         return _ite(_le(args[0], args[1]), args[0], args[1])
       if name == "max":
+        if self.float_mode:
+          return f"(fop_uf {args[0]} {args[1]} {self._opcode('max')})"
         return _ite(_ge(args[0], args[1]), args[0], args[1])
       if name == "abs":
+        if self.float_mode:
+          return f"(fun_uf {args[0]} {self._opcode('abs')})"
         return _ite(_lt(args[0], "0"), _neg(args[0]), args[0])
       if name == "int":
+        if self.float_mode:
+          return f"(fun_uf {args[0]} {self._opcode('int')})"
         return args[0]
       if name.startswith("_vec_"):
         lanes = args[0]
@@ -1423,10 +1604,14 @@ class SymbolicEncoder:
         base = self._alloc_list(lanes.elements, state)
         return _ObjectLiteral({"lanes": base})
       if name in self._functions:
-        return self._inline_call(name, args, state)
+        try:
+          return self._inline_call(name, args, state)
+        except UnsupportedPuzzle:
+          return self._abstract_call(args, name)
       raise UnsupportedPuzzle(f"call to unsupported function {name!r}")
     if isinstance(node.func, ast.Attribute):
-      raise UnsupportedPuzzle("attribute calls are outside the fragment")
+      args = [self._eval(arg, state) for arg in node.args]
+      return self._abstract_call(args, node.func.attr)
     raise UnsupportedPuzzle("indirect calls are outside the fragment")
 
   def _inline_call(self, name: str, args: list, state: _State) -> str:
@@ -1575,7 +1760,10 @@ class SymbolicEncoder:
           raise SolverTimeout(f"model omitted {var}")
         number = -int(negated.group(1))
       if cell.is_constant:
-        values[cell.index] = str(number)
+        if number < 0 and number in self.code_values:
+          values[cell.index] = self.code_values[number]
+        else:
+          values[cell.index] = str(number)
       else:
         choices = self.cell_choices[cell.index]
         if not 0 <= number < len(choices):
