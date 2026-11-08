@@ -261,3 +261,65 @@ It asserts the round-trip invariant (ground truth round-trips across seeds), the
 banner markers, that `require`/`assume` are dropped, and that the structural and
 constant-budget checks reject the obvious cheats (unfilled marks,
 deleted/duplicated statements, off-budget constants).
+
+---
+
+## 7. Agent-free baselines
+
+The Python Codoku solvers live in [../codokus/solvers/](../codokus/solvers/) and are exposed through `codoku solve`.
+
+The shared layer in [common.py](../codokus/solvers/common.py) infers the typed cells, their domains, the constant multiset, the declared CFG and execution path, and the harness examples from the puzzle text.
+
+It writes one candidate at a time, runs the checker in an isolated subprocess, and stops at a wall-clock or attempt budget.
+
+The wrapper records SHA256 digests of candidates in a bounded memory and can persist them to disk, so a repeated attempt is not checked twice.
+
+No baseline reads the oracle or the witness.
+
+### Random baseline
+
+[rnd_solver.py](../codokus/solvers/rnd_solver.py) samples one filling per `propose()` call. Variables come from visible local names and in-bounds subscripts, function cells from defined non-internal functions, operator cells from construct-specific operator vocabularies, labels and goto flags from declared CFG nodes, control cells from `break`/`continue`, and constant cells from the budget multiset.
+
+Free constants are drawn from an unbounded nonnegative integer distribution with occasional finite floats.
+
+The wrapper keeps drawing until the checker accepts a filling or the budget ends.
+
+### Whole-puzzle SMT baseline
+
+[smt_solver.py](../codokus/solvers/smt_solver.py) gives every cell a variable and builds one query with [symbolic.py](../codokus/solvers/symbolic.py).
+
+The query encodes domain membership, the constant multiset, and a trace-guided symbolic execution of the declared path.
+
+Integer `+`, `-`, `*`, `//`, `%`, `**`, `<<`, and `>>` use exact integer semantics in the supported fragment.
+
+Pointer operations are records with buffer, offset, stride, bounds, and frame in SMT arrays. Loads, stores, and pointer arithmetic preserve buffer identity and offsets, including pointers stored in lists.
+
+Each model is checked; a failed model is blocked by its exact cell assignment and the query is solved again.
+
+A solver deadline, expression-size guard, and query-size guard bound each attempt.
+
+### Template SMT baseline
+
+[tpl_solver.py](../codokus/solvers/tpl_solver.py) enumerates the non-constant cells in an order that varies operators, labels, functions, and control cells before variables, and turns each enumeration into a constants-only template.
+
+The same encoder solves the constants over the budget pool.
+
+A failed constants assignment is blocked and the same template is re-solved before the outer enumeration advances.
+
+A cap on enumeration bounds the search when the template space is large.
+
+### SMT theories and fragment
+
+The query uses `(set-logic ALL)` and lets the underlying solver choose the combination it needs. The sorts that occur are `Int`, `Bool`, and `(Array Int Int)`.
+
+Uninterpreted functions abstract float operators, comparisons, and conversions, helper calls, and bitwise operators. No `BitVec` or `FloatingPoint` sorts occur.
+
+`ALL` is appropriate because the query mixes nonlinear integer arithmetic, arrays, finite-domain cell choices, and uninterpreted functions. No single fixed theory covers that mixture, and Z3 or CVC5 can select the available theories.
+
+Exact FP and bit-vector encodings require binary64, binary32, rounding, conversion, NaN, infinity, and `struct` terms on top of the nonlinear integer, array, finite-domain, and blocking structure; the checker filters spurious models.
+
+The float and bitwise layers are over-approximations, not an IEEE or machine-integer semantics.
+
+Integer arithmetic and pointer record operations use exact semantics in the supported fragment; bounds, definedness, and trap conditions are assumed to hold on the prescribed path.
+
+The SMT baselines do not emit `unsupported` or `error` statuses; resource exhaustion reports `timeout` or `exhausted`.
