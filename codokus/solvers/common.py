@@ -1737,23 +1737,45 @@ def enumerate_templates(
 
 
 def run_smt2(query: str, *, smt_solver: str, timeout: float) -> tuple[str, str]:
-  """Run an SMT-LIB2 query through the external solver binary."""
-  binary = shutil.which(smt_solver)
-  if binary is None:
-    raise SolverUnavailable(f"SMT solver {smt_solver!r} is not installed")
-  command = [binary, "-smt2", "-in"]
-  if Path(binary).name.startswith("cvc5"):
-    command = [binary, "--lang=smt2"]
-  try:
-    run = subprocess.run(
-      command,
-      input=query,
-      capture_output=True,
-      text=True,
-      timeout=timeout,
-    )
-  except subprocess.TimeoutExpired as error:
-    raise SolverTimeout(
-      f"{smt_solver} exceeded the {timeout:g}s solver deadline"
-    ) from error
-  return run.stdout, run.stderr
+  """Run an SMT-LIB2 query through an external solver binary.
+
+  A solver binary that cannot be executed (for example a mount with no
+  execute permission) falls back to the other installed solver.  Both are
+  invoked from a writable temporary directory so a solver that writes
+  scratch files does not depend on the caller's working directory.
+  """
+  candidates = [smt_solver]
+  if smt_solver == "z3":
+    candidates.append("cvc5")
+  last_error: OSError | None = None
+  for name in candidates:
+    binary = shutil.which(name)
+    if binary is None:
+      continue
+    command = [binary, "-smt2", "-in"]
+    if Path(binary).name.startswith("cvc5"):
+      command = [binary, "--lang=smt2"]
+    try:
+      with tempfile.TemporaryDirectory(prefix="codoku_smt_") as workdir:
+        environment = dict(os.environ)
+        environment["TMPDIR"] = workdir
+        run = subprocess.run(
+          command,
+          input=query,
+          capture_output=True,
+          text=True,
+          timeout=timeout,
+          cwd=workdir,
+          env=environment,
+        )
+      return run.stdout, run.stderr
+    except subprocess.TimeoutExpired as error:
+      raise SolverTimeout(
+        f"{name} exceeded the {timeout:g}s solver deadline"
+      ) from error
+    except OSError as error:
+      last_error = error
+      continue
+  if last_error is not None:
+    raise SolverUnavailable(f"cannot execute SMT solver {smt_solver!r}: {last_error}")
+  raise SolverUnavailable(f"SMT solver {smt_solver!r} is not installed")
